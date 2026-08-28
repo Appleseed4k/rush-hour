@@ -15,33 +15,41 @@ def block_orientations(state):
 
 
 def neighbors(state, orientations, n_rows=6, n_cols=6):
-    """Yield (move, new_state) pairs reachable from `state` in one move, without mutating anything."""
+    """Yield ((car_name, direction, steps), new_state) pairs reachable from `state`
+    in one move, where a move slides a car by any number of clear cells in one
+    direction - matching rush_hour_and_or.py's move semantics, so distances from
+    bfs() count a multi-cell slide as a single move rather than one per cell."""
     occupied = {pos: name for name, positions in state for pos in positions}
     order = [name for name, _ in state]
     state_dict = dict(state)
 
     for name, positions in state:
+        horizontal = orientations[name] == "h"
+        bound = n_cols if horizontal else n_rows
+        axis_pos = [j for _, j in positions] if horizontal else [i for i, _ in positions]
+        cross = positions[0][0] if horizontal else positions[0][1]
+        lo, hi = min(axis_pos), max(axis_pos)
+
         for direction in MOVES[orientations[name]]:
             di, dj = DELTAS[direction]
-            new_positions = tuple((i + di, j + dj) for i, j in positions)
-
-            valid = True
-            for i, j in new_positions:
-                if not (0 <= i < n_rows and 0 <= j < n_cols):
-                    valid = False
+            delta = dj if horizontal else di
+            steps = 1
+            while True:
+                edge = hi + steps if delta > 0 else lo - steps
+                if not (0 <= edge < bound):
                     break
-                occupant = occupied.get((i, j))
+                cell = (cross, edge) if horizontal else (edge, cross)
+                occupant = occupied.get(cell)
                 if occupant is not None and occupant != name:
-                    valid = False
                     break
-            if not valid:
-                continue
 
-            new_state = tuple(
-                (n, new_positions if n == name else state_dict[n])
-                for n in order
-            )
-            yield (name, direction), new_state
+                new_positions = tuple((i + di * steps, j + dj * steps) for i, j in positions)
+                new_state = tuple(
+                    (n, new_positions if n == name else state_dict[n])
+                    for n in order
+                )
+                yield (name, direction, steps), new_state
+                steps += 1
 
 
 def find_goal_states(states):
@@ -76,12 +84,15 @@ def multi_bfs(state):
 
 
 def hint(state, distances):
-    """Return a (block, direction) move from `state` that is one step closer to the goal."""
+    """Return a (block, direction) move from `state` that is one step closer to the
+    goal, taken from the direction of the AND-OR-optimal macro-move (the slide that
+    achieves the distance reduction) - kept as a 2-tuple, without `steps`, so it
+    stays compatible with the single-cell-move action space used elsewhere."""
     orientations = block_orientations(state)
     current = distances[state]
-    for move, new_state in neighbors(state, orientations):
+    for (name, direction, _steps), new_state in neighbors(state, orientations):
         if distances[new_state] < current:
-            return move
+            return (name, direction)
     return None
 
 
