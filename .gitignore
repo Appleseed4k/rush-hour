@@ -1,0 +1,7 @@
+and_or/
+eval_frames/
+predictions/
+teach/
+rush_nw_tensors.pt 
+rush_nw.txt
+rush.txt
