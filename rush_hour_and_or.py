@@ -9,23 +9,11 @@ GAMMA = 0.01  # probability of abandoning a subgoal at an OrNode for a random ac
 
 class GammaLapse(Exception):
     """Raised by OrNode.solve() when its stopping probability fires, unwinding the
-    whole in-progress search all the way to the top-level solve() - a lapse
-    abandons the entire train of thought, not just the subgoal being considered
-    when it happened, so no ancestor should backtrack and try another candidate
-    after one of these.
+    whole in-progress search all the way to the top-level solve()."""
 
-    `moves`/`origins` carry every move actually made on the way to `new_state` -
-    not just the lapse's own random move, but also any blockers an enclosing
-    AndNode had already resolved before one of ITS OWN blockers lapsed. Those
-    already-committed moves are real and did happen (self.state, threaded through
-    the recursion, already reflects them), so AndNode.solve() must catch this,
-    prepend its own so-far-accumulated moves/origins, and re-raise - only the
-    outermost solve() should let it stop propagating."""
-
-    def __init__(self, new_state, moves, origins):
+    def __init__(self, new_state, moves):
         self.new_state = new_state
         self.moves = moves
-        self.origins = origins
 
 
 def legal_moves(state):
@@ -55,15 +43,23 @@ def legal_moves(state):
     return moves
 
 
+def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset()):
+    """Try each (direction, steps) candidate for car_name in random order, returning
+    the first (new_state, moves) that resolves - or None if every candidate dead-ends."""
+    random.shuffle(candidates)
+    for direction, steps in candidates:
+        result = AndNode(state, car_name, direction, steps, visited, protected).solve()
+        if result is not None:
+            return result
+    return None
+
+
 class OrNode:
-    """Subgoal: car_name must vacate every cell in `collisions`. With probability
+    """
+    Subgoal: car_name must vacate every cell in `collisions`. With probability
     GAMMA, abandons the entire search (not just this subgoal) for a uniformly
-    random legal move instead - see GammaLapse. Otherwise, tries its candidate
-    actions one at a time in random order (depth-first), backtracking to the next
-    candidate whenever one dead-ends, until one works or all have been tried. This
-    keeps the search bounded to what a single train of thought could hold - only
-    the current path's choices, not the whole tree - unlike breadth-first
-    propagation over every leaf at once."""
+    random legal move instead
+    """
 
     def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset()):
         self.state = state
@@ -99,13 +95,8 @@ class OrNode:
         return candidates
 
     def solve(self):
-        """(new_state, moves, origins) via depth-first search over candidate
-        actions (see class docstring), or None if every candidate dead-ends (a
-        local failure the calling AndNode's OWN caller backtracks from - not a
-        GammaLapse, which instead propagates straight through uncaught). `origins`
-        is parallel to `moves`, tagging every move "tree" (all of them are, since
-        a GammaLapse's single random move never joins a `moves` list - it replaces
-        the whole search's result instead - see GAMMA)."""
+        """(new_state, moves) via depth-first search over candidate actions (see
+        class docstring), or None if every candidate dead-ends."""
         key = (self.car_name, self.collisions)
         if key in self.visited:
             return None
@@ -117,15 +108,9 @@ class OrNode:
                 return None
             car_name, direction, steps = random.choice(moves)
             node = AndNode(self.state, car_name, direction, steps)
-            raise GammaLapse(node.apply(self.state), [(car_name, direction, steps)], ["gamma"])
+            raise GammaLapse(node.apply(self.state), [(car_name, direction, steps)])
 
-        candidates = self.directions()
-        random.shuffle(candidates)
-        for direction, steps in candidates:
-            result = AndNode(self.state, self.car_name, direction, steps, next_visited, self.protected).solve()
-            if result is not None:
-                return result
-        return None
+        return first_solve(self.state, self.car_name, self.directions(), next_visited, self.protected)
 
 
 class AndNode:
@@ -179,39 +164,14 @@ class AndNode:
         return tuple((n, new_car if n == self.car_name else pos) for n, pos in state)
 
     def solve(self):
-        """(new_state, moves, origins) if every blocker resolves and the path stays
-        clear, else None - a local failure the calling OrNode backtracks from by
-        trying its next candidate. When there are multiple simultaneous blockers,
-        the order they're addressed in is sampled once and not reconsidered -
-        deliberately not a full CSP search - though each individual blocker's own
-        OrNode does backtrack over ITS candidates. `origins` is parallel to
-        `moves`: each blocker's own tags pass through unchanged, and this node's
-        own final move (the action it was asked to solve) is tagged "tree".
-
-        If a blocker's OrNode.solve() raises GammaLapse, the blockers resolved
-        before it in this loop are real moves that already happened (self.state
-        stays untouched, but working_state was threaded into that OrNode, so its
-        new_state already reflects them) - so they're prepended onto the lapse's
-        moves/origins before re-raising, rather than silently dropped. Letting the
-        exception through unmerged would desync a caller replaying `moves` from
-        the original state, since new_state would then reflect more moves than
-        got reported.
-
-        No car already committed to a move higher up the call stack (self.car_name
-        included) is ever nominated as someone else's blocker: self.protected tracks
-        every such car, growing by self.car_name before it's passed to blockers'
-        subgoals. Without this, a blocker nested arbitrarily deep could nudge one of
-        those committed cars aside to solve its own problem, leaving the commitment
-        stale - the final apply() below trusts working_state's position for
-        self.car_name unconditionally, so a stale one silently produces a bogus (even
-        out-of-bounds) move."""
+        """(new_state, moves) if every blocker resolves and the path stays clear,
+        else None."""
         blockers = self.blockers()
         if self.protected & blockers.keys():
             return None
 
         working_state = self.state
         moves = []
-        origins = []
         order = list(blockers.items())
         random.shuffle(order)
         next_protected = self.protected | {self.car_name}
@@ -219,20 +179,18 @@ class AndNode:
             try:
                 result = OrNode(working_state, blocker_name, collisions, self.visited, next_protected).solve()
             except GammaLapse as lapse:
-                raise GammaLapse(lapse.new_state, moves + lapse.moves, origins + lapse.origins) from None
+                raise GammaLapse(lapse.new_state, moves + lapse.moves) from None
             if result is None:
                 return None
-            working_state, blocker_moves, blocker_origins = result
+            working_state, blocker_moves = result
             moves.extend(blocker_moves)
-            origins.extend(blocker_origins)
 
         if AndNode(working_state, self.car_name, self.direction, self.steps, self.visited).blockers():
             return None  # a blocker's own fix left the path obstructed after all
 
         final_state = self.apply(working_state)
         moves.append((self.car_name, self.direction, self.steps))
-        origins.append("tree")
-        return final_state, moves, origins
+        return final_state, moves
 
 
 def red_candidates(state, exclude_steps):
@@ -250,25 +208,15 @@ def red_candidates(state, exclude_steps):
     return candidates
 
 
-def solve(state, origins=None):
-    """Sequence of (car_name, direction, steps) moves driving red to the exit (its
-    rightmost cell reaching column BOARD_SIZE - 1), via one stochastic pass of AND-OR
-    subgoal decomposition (see GAMMA) - modeling a single bounded round of human
-    backward reasoning, not an exhaustive solver. Expected to fail far from the
-    goal, and results vary run to run.
-
+def solve(state):
+    """Sequence of (car_name, direction, steps) moves driving red to the exit, via
+    one stochastic pass of AND-OR subgoal decomposition (see GAMMA) - modeling a
+    single bounded round of human backward reasoning, not an exhaustive solver.
     If the direct slide to the exit can't be resolved, tries repositioning red
     itself (see red_candidates) before falling back to a fully random legal move
-    (see legal_moves). A fallback returns (new_state, moves) instead of a bare move
-    list, since a GammaLapse can carry real moves an AndNode had already committed
-    to before it fired (see GammaLapse). Callers should check which shape they got
-    back (bare list vs. tuple) and call solve() again on new_state to keep trying.
-
-    If `origins` is given (a list), one tag per move actually returned is appended
-    to it: "tree" for a move the search deliberately found (direct slide, red
-    repositioning, or blocker resolution), "gamma" for a lapse's random move, or
-    "abort" for the final fallback's random move once every candidate at every
-    level backtracked through without finding a chain or lapsing."""
+    (see legal_moves).
+    Returns a plain move list once red reaches the exit; otherwise a (new_state,
+    moves) pair reflecting a partial attempt, for the caller to feed back in."""
     red = dict(state)['red']
     steps = (BOARD_SIZE - 1) - max(j for _, j in red)
     if steps <= 0:
@@ -277,38 +225,24 @@ def solve(state, origins=None):
     try:
         result = AndNode(state, 'red', 'r', steps).solve()
     except GammaLapse as lapse:
-        if origins is not None:
-            origins.extend(lapse.origins)
         return lapse.new_state, lapse.moves
 
     if result is not None:
-        _, moves, move_origins = result
-        if origins is not None:
-            origins.extend(move_origins)
+        _, moves = result
         return moves
 
-    candidates = red_candidates(state, steps)
-    random.shuffle(candidates)
-    for direction, cand_steps in candidates:
-        try:
-            result = AndNode(state, 'red', direction, cand_steps).solve()
-        except GammaLapse as lapse:
-            if origins is not None:
-                origins.extend(lapse.origins)
-            return lapse.new_state, lapse.moves
-        if result is not None:
-            new_state, moves, move_origins = result
-            if origins is not None:
-                origins.extend(move_origins)
-            return new_state, moves
+    try:
+        result = first_solve(state, 'red', red_candidates(state, steps))
+    except GammaLapse as lapse:
+        return lapse.new_state, lapse.moves
+    if result is not None:
+        return result
 
     moves = legal_moves(state)
     if not moves:
         return state, None
     move = random.choice(moves)
     car_name, direction, steps = move
-    if origins is not None:
-        origins.append("abort")
     return AndNode(state, car_name, direction, steps).apply(state), [move]
 
 
@@ -318,11 +252,10 @@ if __name__ == "__main__":
     puzzle = puzzles[25]
     state = puzzle
     all_moves = []
-    all_origins = []
-    att = solve(state, all_origins)
+    att = solve(state)
     while type(att) is not list:
         state, moves = att
         all_moves.extend(moves)
-        att = solve(state, all_origins)
+        att = solve(state)
     all_moves += att
     visualize("and_or", puzzle, all_moves)
