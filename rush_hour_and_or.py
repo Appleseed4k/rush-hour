@@ -4,7 +4,7 @@ from rush_hour_bfs import DELTAS
 from rush_hour_lib import sample_unique, visualize
 
 BOARD_SIZE = 6
-GAMMA = 0.01  # probability of abandoning a subgoal at an OrNode for a random action
+GAMMA = 0.07  # probability of abandoning a subgoal at an OrNode for a random action
 
 
 class GammaLapse(Exception):
