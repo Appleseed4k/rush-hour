@@ -258,4 +258,4 @@ if __name__ == "__main__":
         all_moves.extend(moves)
         att = solve(state)
     all_moves += att
-    visualize("and_or", puzzle, all_moves)
+    visualize("visualization/and_or", puzzle, all_moves)
