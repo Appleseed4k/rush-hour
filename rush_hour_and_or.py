@@ -1,7 +1,6 @@
 import random
 
-from rush_hour_bfs import DELTAS
-from rush_hour_lib import sample_unique, visualize
+from rush_hour_lib import DELTAS, sample_unique, visualize
 
 BOARD_SIZE = 6
 GAMMA = 0.07  # probability of abandoning a subgoal at an OrNode for a random action
@@ -43,12 +42,12 @@ def legal_moves(state):
     return moves
 
 
-def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset()):
+def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset(), policy=None):
     """Try each (direction, steps) candidate for car_name in random order, returning
     the first (new_state, moves) that resolves - or None if every candidate dead-ends."""
     random.shuffle(candidates)
     for direction, steps in candidates:
-        result = AndNode(state, car_name, direction, steps, visited, protected).solve()
+        result = AndNode(state, car_name, direction, steps, visited, protected, policy).solve()
         if result is not None:
             return result
     return None
@@ -57,17 +56,18 @@ def first_solve(state, car_name, candidates, visited=frozenset(), protected=froz
 class OrNode:
     """
     Subgoal: car_name must vacate every cell in `collisions`. With probability
-    GAMMA, abandons the entire search (not just this subgoal) for a uniformly
-    random legal move instead
+    GAMMA, abandons the entire search (not just this subgoal) for a legal move
+    instead - chosen by `policy(state)` if given, else uniformly at random.
     """
 
-    def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset()):
+    def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset(), policy=None):
         self.state = state
         self.car_name = car_name
         self.car = dict(state)[car_name]
         self.collisions = frozenset(collisions)
         self.visited = visited
         self.protected = protected
+        self.policy = policy
 
     def directions(self):
         """(direction, steps) candidates that clear the car off every collision cell."""
@@ -106,24 +106,25 @@ class OrNode:
             moves = legal_moves(self.state)
             if not moves:
                 return None
-            car_name, direction, steps = random.choice(moves)
-            node = AndNode(self.state, car_name, direction, steps)
+            car_name, direction, steps = self.policy(self.state) if self.policy else random.choice(moves)
+            node = AndNode(self.state, car_name, direction, steps, policy=self.policy)
             raise GammaLapse(node.apply(self.state), [(car_name, direction, steps)])
 
-        return first_solve(self.state, self.car_name, self.directions(), next_visited, self.protected)
+        return first_solve(self.state, self.car_name, self.directions(), next_visited, self.protected, self.policy)
 
 
 class AndNode:
     """Action: move car_name `steps` cells in `direction`. Solvable once every car
     occupying a swept cell has vacated it (AND semantics)."""
 
-    def __init__(self, state, car_name, direction, steps, visited=frozenset(), protected=frozenset()):
+    def __init__(self, state, car_name, direction, steps, visited=frozenset(), protected=frozenset(), policy=None):
         self.state = state
         self.car_name = car_name
         self.direction = direction
         self.steps = steps
         self.visited = visited
         self.protected = protected
+        self.policy = policy
 
     def swept_cells(self):
         """Cells this move newly enters, nearest first."""
@@ -177,7 +178,7 @@ class AndNode:
         next_protected = self.protected | {self.car_name}
         for blocker_name, collisions in order:
             try:
-                result = OrNode(working_state, blocker_name, collisions, self.visited, next_protected).solve()
+                result = OrNode(working_state, blocker_name, collisions, self.visited, next_protected, self.policy).solve()
             except GammaLapse as lapse:
                 raise GammaLapse(lapse.new_state, moves + lapse.moves) from None
             if result is None:
@@ -191,6 +192,18 @@ class AndNode:
         final_state = self.apply(working_state)
         moves.append((self.car_name, self.direction, self.steps))
         return final_state, moves
+
+
+def blockers_in_path(state):
+    """Cars currently occupying red's direct slide to the exit - a cheap,
+    board-only proximity signal (no BFS) for how close red is to solved: zero
+    once the path is already clear, however far red itself still has to
+    travel."""
+    red = dict(state)['red']
+    steps = (BOARD_SIZE - 1) - max(j for _, j in red)
+    if steps <= 0:
+        return 0
+    return len(AndNode(state, 'red', 'r', steps).blockers())
 
 
 def red_candidates(state, exclude_steps):
@@ -208,13 +221,13 @@ def red_candidates(state, exclude_steps):
     return candidates
 
 
-def solve(state):
+def solve(state, policy=None):
     """Sequence of (car_name, direction, steps) moves driving red to the exit, via
     one stochastic pass of AND-OR subgoal decomposition (see GAMMA) - modeling a
     single bounded round of human backward reasoning, not an exhaustive solver.
     If the direct slide to the exit can't be resolved, tries repositioning red
-    itself (see red_candidates) before falling back to a fully random legal move
-    (see legal_moves).
+    itself (see red_candidates) before falling back to a legal move chosen by
+    `policy(state)` if given, else uniformly at random (see legal_moves).
     Returns a plain move list once red reaches the exit; otherwise a (new_state,
     moves) pair reflecting a partial attempt, for the caller to feed back in."""
     red = dict(state)['red']
@@ -223,7 +236,7 @@ def solve(state):
         return []
 
     try:
-        result = AndNode(state, 'red', 'r', steps).solve()
+        result = AndNode(state, 'red', 'r', steps, policy=policy).solve()
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
 
@@ -232,7 +245,7 @@ def solve(state):
         return moves
 
     try:
-        result = first_solve(state, 'red', red_candidates(state, steps))
+        result = first_solve(state, 'red', red_candidates(state, steps), policy=policy)
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
     if result is not None:
@@ -241,7 +254,7 @@ def solve(state):
     moves = legal_moves(state)
     if not moves:
         return state, None
-    move = random.choice(moves)
+    move = policy(state) if policy else random.choice(moves)
     car_name, direction, steps = move
     return AndNode(state, car_name, direction, steps).apply(state), [move]
 

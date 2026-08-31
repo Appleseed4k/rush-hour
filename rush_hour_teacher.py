@@ -1,27 +1,22 @@
 import random
 from collections import defaultdict
 
-from rush_hour_bfs import hint
-from rush_hour_rl import legal_actions
+from rush_hour_lib import hint
 
 
 class Teacher():
     """Decides, state by state, whether a training session should be steered by
-    a hint instead of letting the agent's own policy choose.
+    a hint instead of letting the agent's own policy choose. Hints are pulled
+    automatically from the puzzle's BFS-optimal solution.
 
-    Two orthogonal settings:
-    - `mode`: where a hint comes from. "automatic" pulls from the puzzle's
-      BFS-optimal solution; "manual" prompts a human for typed input (`block
-      direction`, or "skip" to let the agent choose that state, or "solve" to
-      end the session early).
-    - `policy`: how "automatic" mode decides *whether* to hint at a given
-      state. "random" flips a `hint_prob`-weighted coin. "q" learns the
-      decision with tabular Q-learning: the state is just distance-to-goal,
-      the action is hint-or-not, and the reward is the student's own per-step
-      reward, bootstrapped one step at a time exactly like `Agent.q_learning`
-      — a hint's credit comes from what happens immediately after it, with
-      any longer-run effect propagating backward through the chain of
-      updates rather than a hand-widened reward window.
+    `policy` decides *whether* to hint at a given state. "random" flips a
+    `hint_prob`-weighted coin. "q" learns the decision with tabular
+    Q-learning: the state is just distance-to-goal, the action is
+    hint-or-not, and the reward is the student's own per-step reward,
+    bootstrapped one step at a time exactly like standard tabular Q-learning
+    — a hint's credit comes from what happens immediately after it, with any
+    longer-run effect propagating backward through the chain of updates
+    rather than a hand-widened reward window.
 
     Once `max_hints` hints have been given in a session, `exhausted` becomes
     True, at which point the calling training loop is expected to hand off to
@@ -35,12 +30,10 @@ class Teacher():
     to stop both, so it can be reused as a fixed, fully-evaluated policy
     across a separate group of students without drifting mid-comparison.
     """
-    def __init__(self, blocks, solution, mode="automatic", policy="random", max_hints=1,
+    def __init__(self, cars, solution, policy="random", max_hints=1,
                  hint_prob=0.5, hint_reward=0.1, alpha=0.1, gamma=0.95, epsilon=1.0,
                  epsilon_decay=0.99):
-        self.action_space = [(block, direction) for direction in "lrud" for block in blocks]
         self.solution = solution
-        self.mode = mode
         self.policy = policy
         self.max_hints = max_hints
         self.hint_prob = hint_prob
@@ -77,13 +70,12 @@ class Teacher():
     def _context(self, state):
         return self.solution[state]
 
-    def advise(self, environment, state, step_number=None):
-        """Returns an advised (block, direction) action, or None to defer to the agent."""
+    def advise(self, state):
+        """Returns an advised (car, direction, steps) action, or None to defer
+        to the agent."""
         if self.exhausted:
             return None
-        if self.mode == "manual":
-            action = self._advise_manual(environment, state, step_number)
-        elif self.policy == "q":
+        if self.policy == "q":
             action = self._advise_q(state)
         else:
             action = self._advise_automatic(state)
@@ -93,8 +85,8 @@ class Teacher():
 
     def observe(self, next_state, reward):
         """Bootstrapped Q-update for the "q" policy's last decision. No-op for
-        "random" policy or manual mode (only "q" has anything to learn), and
-        for a frozen teacher (see `freeze()`).
+        "random" policy (only "q" has anything to learn), and for a frozen
+        teacher (see `freeze()`).
         """
         if self._pending is None or not self.training:
             return
@@ -106,12 +98,12 @@ class Teacher():
         self.qtable[ctx0][decision] += self.alpha * rpe
 
     def reward(self, advised, steps, solved, penalty):
-        """Reward for the action just taken. Random-policy automatic hints get a
-        flat bonus; everything else (agent moves, manual hints, and "q"-policy
-        hints) uses the normal shaped reward, so the "q" policy learns from the
-        same signal the student does.
+        """Reward for the action just taken. Random-policy hints get a flat
+        bonus; everything else (agent moves and "q"-policy hints) uses the
+        normal shaped reward, so the "q" policy learns from the same signal
+        the student does.
         """
-        if advised and self.mode == "automatic" and self.policy == "random":
+        if advised and self.policy == "random":
             return self.hint_reward
         return (1 - steps * penalty) if solved else 0
 
@@ -136,19 +128,3 @@ class Teacher():
         decision = action is not None
         self._pending = (ctx, decision)
         return action
-
-    def _advise_manual(self, environment, state, step_number):
-        environment.visualize(step_number=step_number, solution=self.solution)
-        legal = set(legal_actions(environment, self.action_space))
-        while True:
-            prompt = input("What action should the agent take?")
-            if prompt == "skip":
-                return None
-            if prompt == "solve":
-                self.hints_used = self.max_hints
-                return None
-            action = tuple(prompt.split())
-            if action not in legal:
-                print("Invalid move, try again")
-                continue
-            return action

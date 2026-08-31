@@ -1,11 +1,102 @@
 import os
 import random
 import shutil
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import matplotlib.pyplot as plt
 
-from rush_hour_bfs import multi_bfs, DELTAS
+MOVES = {"h": "lr", "v": "ud"}
+DELTAS = {"l": (0, -1), "r": (0, 1), "u": (-1, 0), "d": (1, 0)}
+
+
+def car_orientations(state):
+    orientations = {}
+    for name, positions in state:
+        if positions[0][0] == positions[1][0]:
+            orientations[name] = "h"
+        else:
+            orientations[name] = "v"
+    return orientations
+
+
+def neighbors(state, orientations, n_rows=6, n_cols=6):
+    """Yield ((car_name, direction, steps), new_state) pairs reachable from `state`
+    in one move, where a move slides a car by any number of clear cells in one
+    direction - matching rush_hour_and_or.py's move semantics, so distances from
+    bfs() count a multi-cell slide as a single move rather than one per cell."""
+    occupied = {pos: name for name, positions in state for pos in positions}
+    order = [name for name, _ in state]
+    state_dict = dict(state)
+
+    for name, positions in state:
+        horizontal = orientations[name] == "h"
+        bound = n_cols if horizontal else n_rows
+        axis_pos = [j for _, j in positions] if horizontal else [i for i, _ in positions]
+        cross = positions[0][0] if horizontal else positions[0][1]
+        lo, hi = min(axis_pos), max(axis_pos)
+
+        for direction in MOVES[orientations[name]]:
+            di, dj = DELTAS[direction]
+            delta = dj if horizontal else di
+            steps = 1
+            while True:
+                edge = hi + steps if delta > 0 else lo - steps
+                if not (0 <= edge < bound):
+                    break
+                cell = (cross, edge) if horizontal else (edge, cross)
+                occupant = occupied.get(cell)
+                if occupant is not None and occupant != name:
+                    break
+
+                new_positions = tuple((i + di * steps, j + dj * steps) for i, j in positions)
+                new_state = tuple(
+                    (n, new_positions if n == name else state_dict[n])
+                    for n in order
+                )
+                yield (name, direction, steps), new_state
+                steps += 1
+
+
+def find_goal_states(states):
+    goal_states = []
+    for state in states:
+        if state[0][1][1][1] == 5:
+            goal_states.append(state)
+    return goal_states
+
+
+def bfs(initial, orientations):
+    n_rows, n_cols = 6, 6
+
+    distance = {state: 0 for state in initial}
+    queue = deque(initial)
+
+    while queue:
+        state = queue.popleft()
+        for _, new_state in neighbors(state, orientations, n_rows, n_cols):
+            if new_state not in distance:
+                distance[new_state] = distance[state] + 1
+                queue.append(new_state)
+
+    return distance
+
+
+def multi_bfs(state):
+    orientations = car_orientations(state)
+    distances = bfs([state], orientations)
+    return bfs(find_goal_states(distances), orientations)
+
+
+def hint(state, distances):
+    """Return the (car, direction, steps) macro-move from `state` that is one
+    move closer to the goal, taken from the AND-OR-optimal slide that achieves
+    the distance reduction."""
+    orientations = car_orientations(state)
+    current = distances[state]
+    for move, new_state in neighbors(state, orientations):
+        if distances[new_state] < current:
+            return move
+    return None
 
 
 def sample_puzzle(path="data/rush_nw.txt"):
@@ -13,9 +104,10 @@ def sample_puzzle(path="data/rush_nw.txt"):
     Data Preparation section): each line is "<distance> <bitboard> <count>",
     where `bitboard` is a 36-character, row-major layout of a 6x6 grid ("o" for
     empty, "A" for the target car, and one other letter per remaining car).
-    Returns a list of blocks in the format `Environment` expects: the target
-    car's positions first, followed by every other car's, each a list of
-    (row, col) tuples.
+    Returns a list of (name, positions) pairs in the format `Environment`
+    expects: the target car (renamed "red", matching sample_unique() and
+    Environment.get_state()) first, followed by every other car under its
+    original letter name, each a list of (row, col) tuples.
     """
     with open(path) as f:
         bitboard = random.choice(f.readlines()).split()[1]
@@ -27,7 +119,7 @@ def sample_puzzle(path="data/rush_nw.txt"):
             cars[cell].append((row, col))
 
     other_names = sorted(name for name in cars if name != "A")
-    return [cars["A"]] + [cars[name] for name in other_names]
+    return [("red", cars["A"])] + [(name, cars[name]) for name in other_names]
 
 
 def sample_unique(path="data/rush_nw_unique.txt"):
