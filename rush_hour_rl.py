@@ -352,6 +352,541 @@ class DQNAgent():
                 target_param.mul_(1 - self.tau).add_(self.tau * policy_param)
 
 
+class PolicyValueNetwork(nn.Module):
+    """Shared trunk, two heads - the same shape the paper uses once it adds
+    a value network on top of TPT (§5.2): a policy head (action logits) and
+    a value head (here, predicted cost-to-go, i.e. moves remaining to the
+    goal, rather than their win/loss probability, since our targets are
+    exact realized move-counts from AND-OR traces rather than binary game
+    outcomes).
+    """
+    def __init__(self, in_dim, out_dim, hidden=128):
+        super().__init__()
+        self.trunk = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        self.policy_head = nn.Linear(hidden, out_dim)
+        self.value_head = nn.Linear(hidden, 1)
+
+    def forward(self, x):
+        features = self.trunk(x)
+        return self.policy_head(features), self.value_head(features).squeeze(-1)
+
+
+class PolicyAgent():
+    """Imitation-learning counterpart to DQNAgent: same action-space/encoder
+    setup and the same policy(state, mask, greedy) interface, but net(x) is
+    read as (action logits, predicted cost-to-go) rather than Q-values, and
+    it's trained by supervised cross-entropy + regression against AND-OR
+    traces (see train_policy) instead of TD bootstrapping. Sharing
+    DQNAgent's interface means anywhere an agent is passed a masked (state,
+    greedy) query - e.g. valid_action_mask-based rollouts, or eventually a
+    policy callback inside rush_hour_and_or.py - this can be dropped in
+    unchanged; value_policy below is the separate, environment-based
+    decision rule that actually consumes the value head.
+    """
+    def __init__(self, cars, size=(6, 6), max_slide=None, lr=1e-3, hidden=128):
+        self.encoder = StateEncoder(cars, size)
+        max_slide = max_slide if max_slide is not None else max(size) - 1
+        self.action_space = [(car, direction, steps)
+                              for direction in "lrud" for car in cars
+                              for steps in range(1, max_slide + 1)]
+        self.action_index = {a: i for i, a in enumerate(self.action_space)}
+        self.net = PolicyValueNetwork(self.encoder.dim, len(self.action_space), hidden)
+        self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
+
+    def policy(self, state, mask, greedy=False):
+        logits, _ = self.net(self.encoder.encode(state).unsqueeze(0))
+        logits = logits.squeeze(0).masked_fill(~mask, float("-inf"))
+        if greedy:
+            return self.action_space[int(logits.argmax())]
+        probs = torch.softmax(logits, dim=-1)
+        idx = torch.multinomial(probs, 1).item()
+        return self.action_space[idx]
+
+    def value_policy(self, environment, mask, visited=frozenset()):
+        """Greedy 1-ply, value-guided action choice: applies every currently
+        legal action to `environment`, scores the resulting state with the
+        value head, undoes the move, and returns whichever action minimizes
+        predicted total remaining moves (1 + cost-to-go of the resulting
+        state) - rather than the policy head's raw argmax. Every candidate
+        here is already a fully legal, directly-executable move (this is
+        the legal-moves-only regime that doubles as GammaLapse's fallback),
+        so unlike AND-OR's own internal AND/OR-node candidates, this never
+        has to evaluate a hypothetical invalid/overlapping board - exactly
+        the state-conditioned-on-legal-action distinction that makes value
+        scoring safe here but not (yet) inside AND-OR's own recursion.
+        This is meant to catch the kind of move a pure policy-argmax can't:
+        e.g. undoing the last move nets zero progress, so its resulting
+        state's predicted cost-to-go should be no better than - and, with
+        the extra step counted, strictly worse than - continuing forward.
+
+        `visited` (states already seen this rollout, supplied by the
+        caller) is a cheap guard against the value head's own remaining
+        blind spot: it isn't trained to be Bellman-consistent, so two
+        neighboring states can each look slightly better than the other
+        and form a shallow trap even though the head is otherwise well
+        fit - the endgame wobble found earlier. Among the scored
+        candidates, this returns the lowest-cost action whose resulting
+        state _isn't_ already in `visited`, falling back to the plain
+        lowest-cost action only when every legal candidate leads
+        somewhere already seen (a genuine dead end no choice can avoid).
+        """
+        scored = []
+        for i in mask.nonzero(as_tuple=True)[0].tolist():
+            car, direction, steps = self.action_space[i]
+            environment.move(car, direction, steps)
+            next_state = environment.get_state()
+            with torch.no_grad():
+                _, value = self.net(self.encoder.encode(next_state).unsqueeze(0))
+            environment.move(car, OPPOSITE[direction], steps)
+            scored.append(((car, direction, steps), 1 + value.item(), next_state))
+
+        scored.sort(key=lambda entry: entry[1])
+        for action, _cost, next_state in scored:
+            if next_state not in visited:
+                return action
+        return scored[0][0]
+
+    def heuristic(self, state, actions):
+        """Policy-head logits for `actions` (full (car_name, direction, steps)
+        tuples, possibly not yet legal) from the current, already-valid
+        `state` - one forward pass regardless of how many actions are scored.
+        This is the AND-OR-side counterpart to policy()/value_policy(): where
+        those two only ever choose among moves that are already directly
+        executable (legal_moves, or environment.move()-confirmed), AND-OR's
+        own internal candidates at an AndNode/OrNode are geometric
+        possibilities whose blockers may not be cleared yet, so scoring the
+        state a candidate would produce would mean evaluating an invalid,
+        overlapping board. Scoring the action's raw logit against the
+        *current* state's encoding sidesteps that entirely - no move is ever
+        applied here. Returns a dict mapping every action in `actions` to a
+        score (its logit, or -inf if the action isn't in this agent's action
+        space, e.g. a slide longer than max_slide) - the shape
+        rush_hour_and_or.py's order_candidates/heuristic parameter expects.
+        """
+        with torch.no_grad():
+            logits, _ = self.net(self.encoder.encode(state).unsqueeze(0))
+        logits = logits.squeeze(0)
+        return {
+            action: (logits[self.action_index[action]].item() if action in self.action_index else float("-inf"))
+            for action in actions
+        }
+
+
+def _solve_trace(state, max_steps, heuristic=None):
+    """One full AND-OR resolution attempt from `state`: repeatedly calls
+    and_or_solve until it returns a plain list (solved) or gives up (a
+    dead end with no legal moves, or the move budget runs out). Returns
+    the move list if solved, else None. Shared by generate_and_or_traces
+    (starting from the puzzle's initial state) and dagger_round (starting
+    from wherever a rollout actually ends up).
+
+    `heuristic`, if given (typically a trained PolicyAgent's own
+    `.heuristic` method), guides AND-OR's internal candidate ordering
+    instead of the plain random search - this is the "teacher improves
+    from the apprentice" half of the loop: once a network exists, later
+    rounds can generate sharper, more network-consistent expert traces
+    instead of forever re-deriving supervision from an undirected search.
+    """
+    moves = []
+    while len(moves) < max_steps:
+        att = and_or_solve(state, heuristic=heuristic)
+        if type(att) is list:
+            moves.extend(att)
+            return moves
+        state, step_moves = att
+        if not step_moves:
+            return None
+        moves.extend(step_moves)
+    return None
+
+
+def _replay_trace(state, moves, size):
+    """Replays `moves` against a fresh Environment seeded at `state`,
+    returning (states_before_each_move, solved) - solved confirms the
+    replayed moves actually reach the goal, since and_or_solve's own
+    (state, moves) bookkeeping isn't re-validated against real Environment
+    move semantics until this point.
+    """
+    environment = Environment(size, state)
+    trace_states = []
+    for move in moves:
+        trace_states.append(environment.get_state())
+        environment.move(*move)
+    return trace_states, environment.check_win()
+
+
+def generate_and_or_traces(initial_cars, size, n_traces, max_steps=200, heuristic=None):
+    """Harvests supervised imitation examples from AND-OR solves: `n_traces`
+    independent attempts from the same puzzle (`initial_cars`, in
+    Environment's (name, positions) format), each replayed to recover the
+    exact state before every move and confirm the puzzle was actually won.
+    Discards any attempt that doesn't reach the goal within max_steps (an
+    unlucky run of GammaLapses/dead-ends) - this is expected to throw away
+    a large fraction of attempts on harder puzzles, same as the plain
+    solver's own known solve-rate noise. Returns a flat list of (state,
+    action, cost_to_go) tuples, where cost_to_go is the number of moves
+    remaining in that trace once `action` is taken.
+
+    `heuristic`, if given, is passed straight through to _solve_trace to
+    guide AND-OR's search instead of the plain random order - omit it (the
+    default) for the undirected traces round 0 of imitation needs, since an
+    untrained/freshly-initialized network's heuristic scores are just noise.
+    """
+    state0 = tuple((name, tuple(positions)) for name, positions in initial_cars)
+    examples = []
+    solved_count = 0
+    with tqdm(range(n_traces), desc="AND-OR traces") as pbar:
+        for i in pbar:
+            moves = _solve_trace(state0, max_steps, heuristic=heuristic)
+            if moves:
+                trace_states, solved = _replay_trace(state0, moves, size)
+                if solved:
+                    solved_count += 1
+                    n = len(moves)
+                    examples.extend((s, move, n - j) for j, (s, move) in enumerate(zip(trace_states, moves)))
+            pbar.set_postfix(solved=f"{solved_count}/{i + 1}", examples=len(examples))
+    return examples
+
+
+def dagger_round(agent, initial_cars, size, n_rollouts, max_steps=200, greedy=True, use_value=True,
+                  guide_and_or=False, bar_position=0):
+    """One DAgger correction pass (Ross, Gordon & Bagnell 2011; the
+    aggregation approach behind the paper's DAgger-improved TPT network in
+    §4.3): rolls the current agent out from initial_cars n_rollouts times,
+    and at every state the rollout actually visits, re-queries AND-OR
+    fresh from that exact state for its own preferred resolution - not
+    whatever the agent just did - recording the full resulting (state,
+    action, cost_to_go) chain as supervision. The rollout itself still
+    advances via the agent's own decision rule, so later states in the same
+    rollout reflect wherever the agent's own mistakes actually lead it -
+    that's what a single round of generate_and_or_traces can't see, since
+    it only ever labels states along AND-OR's own trajectories.
+
+    `use_value` rolls out via value_policy (1-ply value-guided lookahead),
+    the actually-deployed decision rule once a value head exists - so the
+    states that get corrected are the ones the real, near-solving rollout
+    visits (e.g. the small endgame wobble the value head still falls into),
+    rather than states along the policy head's argmax, which on a hard
+    puzzle can fail outright within a couple of moves and so never even
+    reaches the states most worth correcting. Set False to fall back to
+    the policy head (`greedy` then selects argmax vs. sampled) instead.
+
+    `guide_and_or` passes agent.heuristic into each correction's AND-OR
+    search (see _solve_trace), instead of AND-OR's plain random candidate
+    order - the teacher half of the ExIt loop: by this point (round >= 1)
+    the agent already has something learned from round 0, so its heuristic
+    is a real signal, not noise. GAMMA's own lapse probability still keeps
+    corrections from collapsing to one deterministic trajectory.
+
+    `bar_position` is the progress bar's tqdm `position` (and, via that,
+    whether it's left on screen after finishing - see train_policy's
+    matching parameter): 0 when this is the only active bar, 1+ when
+    train_policy_dagger already has its own round-level bar open, so the
+    two don't fight over the same terminal line.
+    """
+    examples = []
+    heuristic = agent.heuristic if guide_and_or else None
+    with tqdm(range(n_rollouts), desc="DAgger rollouts", position=bar_position, leave=bar_position == 0) as pbar:
+        for _ in pbar:
+            environment = Environment(size, initial_cars)
+            visited = set()
+            for step in range(max_steps):
+                state = environment.get_state()
+                if state in visited:
+                    break  # the rollout itself is cycling; no new states to learn from
+                visited.add(state)
+
+                correction = _solve_trace(state, max_steps - step, heuristic=heuristic)
+                if correction:
+                    trace_states, solved = _replay_trace(state, correction, size)
+                    if solved:
+                        n = len(correction)
+                        examples.extend(
+                            (s, move, n - i) for i, (s, move) in enumerate(zip(trace_states, correction))
+                        )
+
+                mask = valid_action_mask(environment, agent.action_space)
+                if not mask.any():
+                    break
+                if use_value:
+                    move = agent.value_policy(environment, mask, visited=visited)
+                else:
+                    move = agent.policy(state, mask, greedy=greedy)
+                environment.move(*move)
+                if environment.check_win():
+                    break
+            pbar.set_postfix(examples=len(examples))
+    return examples
+
+
+def train_policy_dagger(cars, initial_cars, size, n_iterations=5, n_initial_traces=500,
+                         n_rollouts_per_round=30, epochs_per_round=20, batch_size=128,
+                         max_steps=200, use_value_rollout=True, greedy_rollout=True,
+                         lr=1e-3, hidden=128, value_weight=1.0, warm_start=True,
+                         guide_and_or=False, and_or_eval_trials=0):
+    """Round 0 is plain behavior cloning (generate_and_or_traces + train_policy)
+    on demonstrations from the puzzle's start state alone. Every later round
+    rolls the *current* agent out (dagger_round), aggregates the newly
+    labeled states into the growing dataset - mirroring the paper's "online"
+    ExIt/DAgger variant (§3.3), which aggregates every dataset generated so
+    far rather than training on only the latest batch.
+
+    `warm_start` (default True) keeps training the same agent across rounds
+    rather than reinitializing a fresh network each time: each round's
+    train_policy call only has to absorb that round's new examples on top
+    of what it already knows, rather than re-deriving everything from a
+    blank slate on an ever-larger dataset every round with a fixed epoch
+    budget. This matches the actual thing being modeled - a system that
+    gets better through accumulated experience, not a fresh apprentice
+    re-reading a growing textbook from page one each round. Set False to
+    reinitialize a fresh PolicyAgent every round instead (the original
+    behavior), which isolates what the aggregated dataset alone teaches a
+    network, independent of any particular training trajectory - a cleaner
+    read on the dataset's quality, at the cost of not modeling compounding
+    improvement.
+
+    `use_value_rollout` (default True) rolls DAgger's exploration out via
+    the trained value head (value_policy) rather than the policy head's
+    argmax - since value_policy is the decision rule that actually gets
+    close to solving hard puzzles, this targets corrections at the states
+    it actually struggles with (e.g. an endgame wobble), rather than
+    states along the policy head's argmax, which can fail outright within
+    a couple of moves and never reach the states most worth correcting.
+    `greedy_rollout` only matters when use_value_rollout is False.
+
+    `guide_and_or` (default False) is passed to dagger_round: from round 1
+    onward, each correction's AND-OR search is guided by the *current*
+    agent's own heuristic instead of plain random search - the teacher
+    improving from the apprentice, closing the loop the other direction
+    (apprentice-from-teacher is what generate_and_or_traces/dagger_round's
+    supervision already does). `and_or_eval_trials`, if > 0, measures that
+    effect directly each round: runs that many independent AND-OR-only
+    solves (see evaluate_and_or) with the current agent's heuristic (if
+    guide_and_or) or plain random search (if not), so and_or_solve_rate/
+    and_or_avg_moves in round_stats show whether the teacher's own search
+    is getting better as the apprentice does, alongside the apprentice's
+    own policy_*/value_* performance.
+
+    Returns (agent, examples, round_stats), where round_stats is a list of
+    (round, n_examples, policy_loss, value_loss, policy_solved, policy_steps,
+    value_solved, value_steps, and_or_solve_rate, and_or_avg_moves) -
+    policy_* comes from evaluate_policy (argmax over the policy head),
+    value_* from evaluate_value_policy (1-ply value-guided lookahead), and
+    and_or_* from evaluate_and_or (None, None when and_or_eval_trials is 0).
+    """
+    examples = generate_and_or_traces(initial_cars, size, n_initial_traces, max_steps)
+    agent = PolicyAgent(cars, size, lr=lr, hidden=hidden)
+    round_stats = []
+
+    # position=0/leave=True for the round bar, position=1/leave=False for
+    # train_policy's and dagger_round's nested bars (via bar_position=1
+    # below) - distinct terminal lines, so the round bar's postfix and a
+    # nested bar's own updates never overwrite each other mid-line.
+    round_bar = tqdm(range(n_iterations), desc="DAgger rounds", position=0, leave=True)
+    for round_idx in round_bar:
+        losses = train_policy(agent, examples, epochs=epochs_per_round, batch_size=batch_size,
+                               value_weight=value_weight, bar_position=1)
+        policy_loss, value_loss = losses[-1]
+        policy_solved, policy_steps, _ = evaluate_policy(
+            agent, initial_cars, size, max_steps=max_steps, greedy=True)
+        value_solved, value_steps, _ = evaluate_value_policy(
+            agent, initial_cars, size, max_steps=max_steps)
+        if and_or_eval_trials > 0:
+            and_or_solve_rate, and_or_avg_moves = evaluate_and_or(
+                initial_cars, size, and_or_eval_trials, max_steps=max_steps,
+                heuristic=agent.heuristic if guide_and_or else None)
+        else:
+            and_or_solve_rate, and_or_avg_moves = None, None
+        round_stats.append((round_idx, len(examples), policy_loss, value_loss,
+                             policy_solved, policy_steps, value_solved, value_steps,
+                             and_or_solve_rate, and_or_avg_moves))
+        round_bar.set_postfix(examples=len(examples), policy_solved=policy_solved, value_solved=value_solved)
+        if round_idx == n_iterations - 1:
+            break
+        new_examples = dagger_round(agent, initial_cars, size, n_rollouts_per_round,
+                                     max_steps=max_steps, greedy=greedy_rollout,
+                                     use_value=use_value_rollout, guide_and_or=guide_and_or,
+                                     bar_position=1)
+        examples = examples + new_examples
+        if not warm_start:
+            agent = PolicyAgent(cars, size, lr=lr, hidden=hidden)
+
+    return agent, examples, round_stats
+
+
+def print_round_stats(round_stats):
+    """Pretty-prints train_policy_dagger's round_stats - (round, n_examples,
+    policy_loss, value_loss, policy_solved, policy_steps, value_solved,
+    value_steps, and_or_solve_rate, and_or_avg_moves) per round - as a
+    plain-text, right-aligned table instead of one repr'd tuple per line.
+    None (an unsolved round's steps) and and_or_* when and_or_eval_trials
+    was 0 both render as "-".
+    """
+    headers = ["round", "examples", "pol_loss", "val_loss", "pol_solved", "pol_steps",
+               "val_solved", "val_steps", "ao_rate", "ao_moves"]
+
+    def fmt(value):
+        if value is None or (isinstance(value, float) and value != value):  # nan != nan
+            return "-"
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, float):
+            return f"{value:.3f}"
+        return str(value)
+
+    rows = [[fmt(v) for v in row] for row in round_stats]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h)
+              for i, h in enumerate(headers)]
+
+    def line(cells):
+        return "  ".join(c.rjust(w) for c, w in zip(cells, widths))
+
+    print(line(headers))
+    print(line(["-" * w for w in widths]))
+    for row in rows:
+        print(line(row))
+
+
+def train_policy(agent, examples, epochs=20, batch_size=64, value_weight=1.0, bar_position=0):
+    """Supervised imitation training: cross-entropy between agent's masked
+    softmax over the action space and the move actually taken, plus a
+    Huber (smooth L1) regression loss between the value head and
+    cost_to_go, for every (state, action, cost_to_go) example (see
+    generate_and_or_traces). Repeated states across independent traces
+    naturally recover an empirical action distribution rather than a
+    single hard label, since minimizing per-example cross-entropy over
+    the whole dataset converges toward matching each state's observed
+    action frequencies - the same cost-sensitivity a tree-policy target
+    gets from visit counts, without needing to build that distribution by
+    hand. The two losses share the trunk and are summed (`value_weight`
+    scales the regression term, since raw move-counts and log-probabilities
+    sit on different scales). Returns a list of (policy_loss, value_loss)
+    per-epoch averages.
+
+    `bar_position` is the training-epochs progress bar's tqdm `position` -
+    see dagger_round's matching parameter for why (avoids fighting
+    train_policy_dagger's own round-level bar for the same terminal line).
+    """
+    encoded_states = torch.stack([agent.encoder.encode(s) for s, _, _ in examples])
+    targets = torch.tensor([agent.action_index[a] for _, a, _ in examples])
+    costs = torch.tensor([c for _, _, c in examples], dtype=torch.float32)
+
+    # legal_moves(s) is recomputed here per example rather than reused from
+    # wherever the example first came from, since examples arrive as bare
+    # (state, action, cost_to_go) tuples with no mask attached - but distinct
+    # examples very often share the same state (repeated states within one
+    # AND-OR trace, or across independent traces/rollouts), so caching by
+    # state (rather than recomputing legal_moves unconditionally) matters:
+    # it's what took this from the dominant cost in train_policy (~95% of
+    # wall time on a distance-16 puzzle) down to a sub-second, no-bar-needed
+    # pass.
+    mask_cache = {}
+    masks = []
+    for s, _, _ in examples:
+        if s not in mask_cache:
+            legal = set(legal_moves(s))
+            mask_cache[s] = torch.tensor([m in legal for m in agent.action_space], dtype=torch.bool)
+        masks.append(mask_cache[s])
+    masks = torch.stack(masks)
+
+    n = len(examples)
+    losses = []
+    for _ in tqdm(range(epochs), desc="training epochs", position=bar_position, leave=bar_position == 0):
+        perm = torch.randperm(n)
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        for start in range(0, n, batch_size):
+            idx = perm[start:start + batch_size]
+            logits, values = agent.net(encoded_states[idx])
+            logits = logits.masked_fill(~masks[idx], float("-inf"))
+            policy_loss = nn.functional.cross_entropy(logits, targets[idx])
+            value_loss = nn.functional.smooth_l1_loss(values, costs[idx])
+            loss = policy_loss + value_weight * value_loss
+            agent.optimizer.zero_grad()
+            loss.backward()
+            agent.optimizer.step()
+            total_policy_loss += policy_loss.item() * len(idx)
+            total_value_loss += value_loss.item() * len(idx)
+        losses.append((total_policy_loss / n, total_value_loss / n))
+    return losses
+
+
+def evaluate_and_or(initial_cars, size, n_trials, max_steps=200, heuristic=None):
+    """Solve rate and average move count over `n_trials` independent AND-OR
+    attempts from initial_cars (see _solve_trace) - the direct before/after
+    read on whether `heuristic` (typically a trained PolicyAgent's own
+    `.heuristic`) actually makes the *teacher* itself solve more often
+    and/or find shorter solutions, not just whatever the apprentice's own
+    rollouts do. Compare a call with heuristic=None against one with a
+    trained agent's heuristic on the same puzzle to see the teacher-side
+    half of the ExIt loop directly. Returns (solve_rate, avg_moves) -
+    avg_moves is nan when nothing solved, matching evaluate_policy's
+    convention for an unsolved run.
+    """
+    state0 = tuple((name, tuple(positions)) for name, positions in initial_cars)
+    lengths = [
+        len(moves)
+        for moves in (_solve_trace(state0, max_steps, heuristic=heuristic) for _ in range(n_trials))
+        if moves
+    ]
+    solve_rate = len(lengths) / n_trials
+    avg_moves = float(np.mean(lengths)) if lengths else float("nan")
+    return solve_rate, avg_moves
+
+
+def evaluate_policy(agent, initial_cars, size, max_steps=200, greedy=True):
+    """Rolls the agent's policy forward from initial_cars purely over the
+    legal-move action space - no AND-OR involved, i.e. every decision is
+    made the way a GammaLapse fallback move is chosen today. This is the
+    "as if every move was a gamma lapse" validation: it exercises the
+    policy network on its own, independent of any later AO*-style
+    candidate-ranking integration into rush_hour_and_or.py. Returns
+    (solved, steps, moves).
+    """
+    environment = Environment(size, initial_cars)
+    moves = []
+    for step in range(max_steps):
+        state = environment.get_state()
+        mask = valid_action_mask(environment, agent.action_space)
+        if not mask.any():
+            break
+        move = agent.policy(state, mask, greedy=greedy)
+        environment.move(*move)
+        moves.append(move)
+        if environment.check_win():
+            return True, step + 1, moves
+    return False, None, moves
+
+
+def evaluate_value_policy(agent, initial_cars, size, max_steps=200):
+    """Like evaluate_policy, but decisions come from value_policy's 1-ply
+    value-guided lookahead instead of the policy head's argmax - the
+    comparison that shows whether the value head resolves failures the
+    policy head's argmax can't, like a self-reversing 2-cycle. Tracks
+    every state seen this rollout and passes it to value_policy as
+    `visited`, so a shallow value trap (e.g. a 2-state wobble) gets routed
+    around via the next-best action instead of looping until max_steps.
+    Returns (solved, steps, moves).
+    """
+    environment = Environment(size, initial_cars)
+    moves = []
+    visited = set()
+    for step in range(max_steps):
+        visited.add(environment.get_state())
+        mask = valid_action_mask(environment, agent.action_space)
+        if not mask.any():
+            break
+        move = agent.value_policy(environment, mask, visited=visited)
+        environment.move(*move)
+        moves.append(move)
+        if environment.check_win():
+            return True, step + 1, moves
+    return False, None, moves
+
+
 class DQNTrain():
     def __init__(self, agent, environment, blocker_threshold=5):
         """`environment`'s current configuration is captured as the puzzle to
