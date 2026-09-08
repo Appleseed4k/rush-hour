@@ -16,9 +16,7 @@ class GammaLapse(Exception):
 
 
 def legal_moves(state):
-    """Every (car_name, direction, steps) currently legal for any car - the pool a
-    person picks from when they abandon a subgoal (see GAMMA) or when the tree
-    search dead-ends outright (see solve())."""
+    """Every (car_name, direction, steps) currently legal for any car."""
     occupied = {cell: name for name, positions in state for cell in positions}
     moves = []
     for car_name, positions in state:
@@ -44,11 +42,8 @@ def legal_moves(state):
 
 def order_candidates(state, car_name, candidates, heuristic):
     """(direction, steps) candidates for car_name, best-first per `heuristic` if
-    given, else in random order (the original, GAMMA-consistent behavior - see
-    module docstring for `heuristic`). `heuristic` is called once per state as
-    `heuristic(state, actions)`, where actions are full (car_name, direction,
-    steps) tuples built from `candidates`, and must return a dict scoring
-    every one of them - the same shape PolicyAgent.heuristic returns."""
+    given, else in random order. `heuristic(state, actions)` must return a dict
+    scoring every action - the same shape PolicyAgent.heuristic returns."""
     if heuristic is None:
         random.shuffle(candidates)
         return candidates
@@ -58,39 +53,34 @@ def order_candidates(state, car_name, candidates, heuristic):
     return [(direction, steps) for _, direction, steps in actions]
 
 
-def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset(), policy=None, heuristic=None):
-    """Try each (direction, steps) candidate for car_name - best-first per
-    `heuristic` if given, else in random order - returning the first
-    (new_state, moves) that resolves, or None if every candidate dead-ends."""
+def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset(), heuristic=None):
+    """Tries each (direction, steps) candidate for car_name, best-first per
+    `heuristic` if given, returning the first (new_state, moves) that resolves,
+    or None if every candidate dead-ends."""
     candidates = order_candidates(state, car_name, candidates, heuristic)
     for direction, steps in candidates:
-        result = AndNode(state, car_name, direction, steps, visited, protected, policy, heuristic).solve()
+        result = AndNode(state, car_name, direction, steps, visited, protected, heuristic).solve()
         if result is not None:
             return result
     return None
 
 
 class OrNode:
-    """
-    Subgoal: car_name must vacate every cell in `collisions`. With probability
-    GAMMA, abandons the entire search (not just this subgoal) for a legal move
-    instead - chosen by `policy(state)` if given, else uniformly at random.
+    """Subgoal: car_name must vacate every cell in `collisions`. With probability
+    GAMMA, abandons the entire search (not just this subgoal) for a random
+    legal move instead.
 
     `heuristic`, if given, orders this subgoal's own candidate resolutions
-    best-first (see order_candidates) instead of trying them in random order -
-    letting a trained apprentice network bias the teacher's own search toward
-    the moves it already favors, without touching GAMMA's independent, human-
-    plausible-lapse stochasticity.
+    best-first (see order_candidates) instead of randomly.
     """
 
-    def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset(), policy=None, heuristic=None):
+    def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset(), heuristic=None):
         self.state = state
         self.car_name = car_name
         self.car = dict(state)[car_name]
         self.collisions = frozenset(collisions)
         self.visited = visited
         self.protected = protected
-        self.policy = policy
         self.heuristic = heuristic
 
     def directions(self):
@@ -119,8 +109,8 @@ class OrNode:
         return candidates
 
     def solve(self):
-        """(new_state, moves) via depth-first search over candidate actions (see
-        class docstring), or None if every candidate dead-ends."""
+        """(new_state, moves) via depth-first search over candidate actions, or
+        None if every candidate dead-ends."""
         key = (self.car_name, self.collisions)
         if key in self.visited:
             return None
@@ -130,12 +120,12 @@ class OrNode:
             moves = legal_moves(self.state)
             if not moves:
                 return None
-            car_name, direction, steps = self.policy(self.state) if self.policy else random.choice(moves)
-            node = AndNode(self.state, car_name, direction, steps, policy=self.policy)
+            car_name, direction, steps = random.choice(moves)
+            node = AndNode(self.state, car_name, direction, steps)
             raise GammaLapse(node.apply(self.state), [(car_name, direction, steps)])
 
         return first_solve(self.state, self.car_name, self.directions(), next_visited, self.protected,
-                            self.policy, self.heuristic)
+                            self.heuristic)
 
 
 class AndNode:
@@ -143,20 +133,17 @@ class AndNode:
     occupying a swept cell has vacated it (AND semantics).
 
     `heuristic`, if given, also decides the order multiple simultaneous
-    blockers get resolved in (see solve()): since every blocker must resolve
-    regardless of order (AND semantics), this doesn't change whether a state
-    solves, only which blocker's subgoal - and therefore which candidate
-    moves - the search commits to first.
+    blockers get resolved in (see solve()) - doesn't change whether a state
+    solves, only which candidate moves the search commits to first.
     """
 
-    def __init__(self, state, car_name, direction, steps, visited=frozenset(), protected=frozenset(), policy=None, heuristic=None):
+    def __init__(self, state, car_name, direction, steps, visited=frozenset(), protected=frozenset(), heuristic=None):
         self.state = state
         self.car_name = car_name
         self.direction = direction
         self.steps = steps
         self.visited = visited
         self.protected = protected
-        self.policy = policy
         self.heuristic = heuristic
 
     def swept_cells(self):
@@ -175,9 +162,7 @@ class AndNode:
         return [(pos, cross) if di else (cross, pos) for pos in axis_cells]
 
     def blockers(self):
-        """Every swept cell each other car occupies, grouped by car - a same-line
-        blocker can overlap several swept cells at once, and all of them are needed
-        so OrNode requires clearing the whole overlap, not just the nearest cell."""
+        """Every swept cell each other car occupies, grouped by car."""
         occupied = {
             cell: name
             for name, positions in self.state
@@ -199,13 +184,8 @@ class AndNode:
 
     def _order_blockers(self, order):
         """`order` (blocker_name, collisions) pairs, best-first per self.heuristic:
-        scores every blocker's own candidate resolutions in one batched call
-        (one state, every blocker's candidates at once) and ranks each blocker
-        by its single best-scoring candidate - the blocker the network is most
-        confident it knows how to clear gets committed to first. A blocker with
-        no candidates at all (an immediate dead end) sorts last, same as it
-        would fall out of a random order eventually. Falls back to a random
-        order when self.heuristic is None."""
+        ranks each blocker by its single best-scoring candidate. Falls back to a
+        random order when self.heuristic is None."""
         if self.heuristic is None:
             random.shuffle(order)
             return order
@@ -241,7 +221,7 @@ class AndNode:
         for blocker_name, collisions in order:
             try:
                 result = OrNode(working_state, blocker_name, collisions, self.visited, next_protected,
-                                 self.policy, self.heuristic).solve()
+                                 self.heuristic).solve()
             except GammaLapse as lapse:
                 raise GammaLapse(lapse.new_state, moves + lapse.moves) from None
             if result is None:
@@ -258,10 +238,7 @@ class AndNode:
 
 
 def blockers_in_path(state):
-    """Cars currently occupying red's direct slide to the exit - a cheap,
-    board-only proximity signal (no BFS) for how close red is to solved: zero
-    once the path is already clear, however far red itself still has to
-    travel."""
+    """Cars currently occupying red's direct slide to the exit."""
     red = dict(state)['red']
     steps = (BOARD_SIZE - 1) - max(j for _, j in red)
     if steps <= 0:
@@ -271,10 +248,7 @@ def blockers_in_path(state):
 
 def red_candidates(state, exclude_steps):
     """(direction, steps) options for repositioning red itself, tried once the
-    direct slide to the exit (`exclude_steps`) has failed: shorter rightward
-    slides, plus leftward slides - lets solve() find puzzles that need red to pull
-    back before a later slide can clear, which trying only the maximal rightward
-    move can never discover."""
+    direct slide to the exit (`exclude_steps`) has failed."""
     red = dict(state)['red']
     axis_pos = [j for _, j in red]
     lo, hi = min(axis_pos), max(axis_pos)
@@ -284,25 +258,16 @@ def red_candidates(state, exclude_steps):
     return candidates
 
 
-def solve(state, policy=None, heuristic=None):
-    """Sequence of (car_name, direction, steps) moves driving red to the exit, via
-    one stochastic pass of AND-OR subgoal decomposition (see GAMMA) - modeling a
-    single bounded round of human backward reasoning, not an exhaustive solver.
-    If the direct slide to the exit can't be resolved, tries repositioning red
-    itself (see red_candidates) before falling back to a legal move chosen by
-    `policy(state)` if given, else uniformly at random (see legal_moves).
-    Returns a plain move list once red reaches the exit; otherwise a (new_state,
-    moves) pair reflecting a partial attempt, for the caller to feed back in.
+def solve(state, heuristic=None):
+    """One stochastic pass of AND-OR subgoal decomposition (see GAMMA) driving
+    red to the exit. Returns a plain move list once red reaches the exit;
+    otherwise a (new_state, moves) pair reflecting a partial attempt, for the
+    caller to feed back in.
 
     `heuristic`, if given, is a `heuristic(state, actions) -> {action: score}`
     callable (see PolicyAgent.heuristic in rush_hour_rl.py) that orders every
-    AND-OR candidate-selection point best-first instead of randomly - letting
-    an apprentice network trained on AND-OR's own traces bias where the
-    teacher's search commits first. It never changes whether a state solves
-    (every candidate is still tried on failure, exactly as before), only
-    which solution is found and how quickly - the "teacher improves from the
-    apprentice" half of the loop, complementing `policy`'s existing role as
-    the GammaLapse/dead-end fallback the apprentice can also drive.
+    candidate-selection point best-first instead of randomly. It never changes
+    whether a state solves, only which solution is found and how quickly.
     """
     red = dict(state)['red']
     steps = (BOARD_SIZE - 1) - max(j for _, j in red)
@@ -310,7 +275,7 @@ def solve(state, policy=None, heuristic=None):
         return []
 
     try:
-        result = AndNode(state, 'red', 'r', steps, policy=policy, heuristic=heuristic).solve()
+        result = AndNode(state, 'red', 'r', steps, heuristic=heuristic).solve()
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
 
@@ -319,7 +284,7 @@ def solve(state, policy=None, heuristic=None):
         return moves
 
     try:
-        result = first_solve(state, 'red', red_candidates(state, steps), policy=policy, heuristic=heuristic)
+        result = first_solve(state, 'red', red_candidates(state, steps), heuristic=heuristic)
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
     if result is not None:
@@ -328,7 +293,7 @@ def solve(state, policy=None, heuristic=None):
     moves = legal_moves(state)
     if not moves:
         return state, None
-    move = policy(state) if policy else random.choice(moves)
+    move = random.choice(moves)
     car_name, direction, steps = move
     return AndNode(state, car_name, direction, steps).apply(state), [move]
 
