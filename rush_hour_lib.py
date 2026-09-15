@@ -1,8 +1,8 @@
+import math
 import os
+import random
 import shutil
 from collections import defaultdict, deque
-
-import matplotlib.pyplot as plt
 
 MOVES = {"h": "lr", "v": "ud"}
 DELTAS = {"l": (0, -1), "r": (0, 1), "u": (-1, 0), "d": (1, 0)}
@@ -85,30 +85,59 @@ def multi_bfs(state):
     return bfs(find_goal_states(distances), orientations)
 
 
-def sample_unique(path="data/rush_nw_unique.txt"):
-    """Reads a `rush_nw_unique.txt`-format file ("<distance> <bitboard> <count>"
-    per line, one line per distance-to-goal) and returns a dict keyed by
-    distance, each value in Environment's (name, positions) state-tuple format
-    (red first, then every other car sorted by name)."""
-    puzzles = {}
+def sample_puzzles(output_path, min_distance=1, max_distance=51, num=1, source_path="data/rush_nw.txt"):
+    """Samples up to `num` random puzzles for each distance in [min_distance, max_distance]
+    from a `rush_nw.txt`-format pool file and writes them to output_path in the same
+    "<distance> <bitboard> <count>" line format, ordered by decreasing distance (if a
+    distance has fewer than `num` puzzles in the pool, every puzzle at that distance is
+    written). Read back with read_puzzles()."""
+    pool = defaultdict(list)
+    with open(source_path) as f:
+        for line in f:
+            dist = int(line.split()[0])
+            pool[dist].append(line.rstrip("\n"))
+
+    lines = []
+    for dist in range(max_distance, min_distance - 1, -1):
+        candidates = pool.get(dist, [])
+        lines.extend(random.sample(candidates, min(num, len(candidates))))
+
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def parse_puzzle_line(line):
+    """Parses one "<distance> <bitboard> <count>" line (rush_nw.txt format) into
+    (distance, state), state in Environment's (name, positions) state-tuple
+    format (red first, then every other car sorted by name)."""
+    dist_str, bitboard, _count = line.split()
+    cars = defaultdict(list)
+    for idx, cell in enumerate(bitboard):
+        if cell != "o":
+            row, col = divmod(idx, 6)
+            cars[cell].append((row, col))
+
+    other_names = sorted(name for name in cars if name != "A")
+    state = (("red", tuple(cars["A"])),) + tuple((name, tuple(cars[name])) for name in other_names)
+    return int(dist_str), state
+
+
+def read_puzzles(path="data/rush_nw_unique.txt"):
+    """Reads a puzzle file written by sample_puzzles() and returns a dict keyed
+    by distance-to-goal, each value the list of states sampled at that distance
+    (one per matching line, in file order)."""
+    puzzles = defaultdict(list)
     with open(path) as f:
         for line in f:
-            dist_str, bitboard, _count = line.split()
-            cars = defaultdict(list)
-            for idx, cell in enumerate(bitboard):
-                if cell != "o":
-                    row, col = divmod(idx, 6)
-                    cars[cell].append((row, col))
-
-            other_names = sorted(name for name in cars if name != "A")
-            state = (("red", tuple(cars["A"])),) + tuple((name, tuple(cars[name])) for name in other_names)
-            puzzles[int(dist_str)] = state
-    return puzzles
+            dist, state = parse_puzzle_line(line)
+            puzzles[dist].append(state)
+    return dict(puzzles)
 
 
-def _draw_state(state, save_path, step_number, n=6):
-    """Renders one (name, positions) state tuple to save_path."""
-    fig, ax = plt.subplots()
+def _draw_state(ax, state, n=6):
+    """Draws one (name, positions) state tuple onto `ax`."""
+    import matplotlib.pyplot as plt
+
     ax.add_patch(plt.Rectangle((0, 0), n, n, facecolor="white", edgecolor="none"))
 
     for name, positions in state:
@@ -131,15 +160,13 @@ def _draw_state(state, save_path, step_number, n=6):
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.set_title(f"Step {step_number}")
-
-    fig.savefig(save_path)
-    plt.close(fig)
 
 
 def visualize(file_path, state, moves=None):
     """Saves one PNG per state (initial state plus after each move in `moves`)
     into file_path, plus a trajectory.png plotting distance-to-goal per move."""
+    import matplotlib.pyplot as plt
+
     if os.path.exists(file_path):
         shutil.rmtree(file_path)
     os.makedirs(file_path)
@@ -147,13 +174,20 @@ def visualize(file_path, state, moves=None):
     distances = multi_bfs(state)
     trace = [distances[state]]
 
-    _draw_state(state, os.path.join(file_path, "move_000.png"), step_number=0)
+    def save(state, save_path, step_number):
+        fig, ax = plt.subplots()
+        _draw_state(ax, state)
+        ax.set_title(f"Step {step_number}")
+        fig.savefig(save_path)
+        plt.close(fig)
+
+    save(state, os.path.join(file_path, "move_000.png"), step_number=0)
     for i, (car_name, direction, steps) in enumerate(moves or [], start=1):
         di, dj = DELTAS[direction]
         car = dict(state)[car_name]
         new_car = tuple((r + di * steps, c + dj * steps) for r, c in car)
         state = tuple((n, new_car if n == car_name else pos) for n, pos in state)
-        _draw_state(state, os.path.join(file_path, f"move_{i:03d}.png"), step_number=i)
+        save(state, os.path.join(file_path, f"move_{i:03d}.png"), step_number=i)
         trace.append(distances[state])
 
     fig, ax = plt.subplots()
@@ -165,3 +199,43 @@ def visualize(file_path, state, moves=None):
     plt.tight_layout()
     fig.savefig(os.path.join(file_path, "trajectory.png"))
     plt.close(fig)
+
+
+def show_puzzles(states, titles=None, n_cols=5):
+    """Displays each state in `states` as a subplot of one inline matplotlib figure,
+    arranged in a grid with up to `n_cols` columns per row. `titles`, if given, must
+    have one entry per state; otherwise subplots are titled by their index."""
+    import matplotlib.pyplot as plt
+
+    n_cols = min(n_cols, len(states))
+    n_rows = math.ceil(len(states) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows), squeeze=False)
+
+    for idx, state in enumerate(states):
+        ax = axes[idx // n_cols][idx % n_cols]
+        _draw_state(ax, state)
+        ax.set_title(titles[idx] if titles is not None else f"Puzzle {idx}")
+    for idx in range(len(states), n_rows * n_cols):
+        axes[idx // n_cols][idx % n_cols].axis("off")
+
+    plt.tight_layout()
+    return fig
+
+
+def save_puzzle_images(states, output_dir, titles=None):
+    """Saves one puzzle_NNN.png per state into output_dir (created if missing;
+    existing contents are cleared first). `titles`, if given, must have one
+    entry per state and is used as that image's title; otherwise states are
+    titled by their index."""
+    import matplotlib.pyplot as plt
+
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+
+    for idx, state in enumerate(states):
+        fig, ax = plt.subplots()
+        _draw_state(ax, state)
+        ax.set_title(titles[idx] if titles is not None else f"Puzzle {idx}")
+        fig.savefig(os.path.join(output_dir, f"puzzle_{idx:03d}.png"))
+        plt.close(fig)

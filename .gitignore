@@ -4,6 +4,8 @@ predictions/
 teach/
 future_old/
 visualization/
+solve_attempts/
+models/
 rush_nw_tensors.pt 
 rush_nw.txt
 rush.txt

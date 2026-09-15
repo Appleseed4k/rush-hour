@@ -1,6 +1,6 @@
 import random
 
-from rush_hour_lib import DELTAS, sample_unique, visualize
+from rush_hour_lib import DELTAS, read_puzzles, visualize
 
 BOARD_SIZE = 6
 GAMMA = 0.07  # probability of abandoning a subgoal at an OrNode for a random action
@@ -296,18 +296,3 @@ def solve(state, heuristic=None):
     move = random.choice(moves)
     car_name, direction, steps = move
     return AndNode(state, car_name, direction, steps).apply(state), [move]
-
-
-if __name__ == "__main__":
-    puzzles = sample_unique()
-
-    puzzle = puzzles[25]
-    state = puzzle
-    all_moves = []
-    att = solve(state)
-    while type(att) is not list:
-        state, moves = att
-        all_moves.extend(moves)
-        att = solve(state)
-    all_moves += att
-    visualize("visualization/and_or", puzzle, all_moves)
