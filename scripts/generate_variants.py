@@ -1,9 +1,9 @@
 import argparse
 import string
 
-from rush_hour_and_or import AndNode
-from rush_hour_lib import multi_bfs, parse_puzzle_line
-from rush_hour_fingerprint import forest_distance, solve_forest
+from and_or import AndNode
+from lib import multi_bfs, parse_puzzle_line, visualize_puzzle_file
+from fingerprint import forest_distance, solve_forest
 
 BOARD_SIZE = 6
 
@@ -27,7 +27,7 @@ def skeleton_cells(state, forest):
     its start, and everything its slide(s) sweep through/into. Everything
     else is genuinely free to repack: the solver only ever looks at
     occupancy along a slide's swept cells (AndNode.blockers()/swept_cells()
-    in rush_hour_and_or.py), so a cell no move ever touches cannot affect the
+    in and_or.py), so a cell no move ever touches cannot affect the
     tree no matter what's placed there. Returns (skeleton_names, cells)."""
     names = {"red"}
 
@@ -157,7 +157,7 @@ def generate_variants(line, mirror=True):
 def main():
     parser = argparse.ArgumentParser(
         description="Expands each puzzle in a rush_nw.txt-format exemplar file (e.g. one cluster written by "
-                     "rush_hour_fingerprint.py) into every same-shape variant reachable by repacking the cells its "
+                     "fingerprint.py) into every same-shape variant reachable by repacking the cells its "
                      "AND/OR solve never touches, plus a row-mirror of each. Every variant is verified to have "
                      "forest_distance()==0 to its own exemplar via real solve_forest() execution, so puzzles "
                      "generated from the same exemplar are exact solution-shape matches, while puzzles from "
@@ -166,6 +166,7 @@ def main():
     parser.add_argument("input", help="rush_nw.txt-format file of exemplar puzzles to expand")
     parser.add_argument("output", help="where to write the exemplars plus their generated variants")
     parser.add_argument("--no-mirror", action="store_true", help="skip the row-mirrored variants")
+    parser.add_argument("--visualize-dir", help="also render the written puzzles as PNGs into this folder")
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -182,8 +183,12 @@ def main():
 
     with open(args.output, "w") as f:
         f.write("\n".join(out_lines) + "\n")
+    if args.visualize_dir:
+        visualize_puzzle_file(args.output, args.visualize_dir)
 
     print(f"\n{len(lines)} exemplars -> {len(lines) + total_new} puzzles written to {args.output}")
+    if args.visualize_dir:
+        print(f"wrote {len(out_lines)} images to {args.visualize_dir}")
 
 
 if __name__ == "__main__":

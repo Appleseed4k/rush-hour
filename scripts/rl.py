@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rush_hour_and_or import solve as and_or_solve, legal_moves
-from rush_hour_lib import MOVES, DELTAS
+from and_or import solve as and_or_solve, legal_moves
+from lib import MOVES, DELTAS
 
 OPPOSITE = {"l": "r", "r": "l", "u": "d", "d": "u"}
 
@@ -244,7 +244,7 @@ class PolicyAgent():
         """Policy-head logits for `actions` (full (car_name, direction, steps)
         tuples, possibly not yet legal) from the current state - one forward
         pass regardless of how many actions are scored. Used to bias AND-OR's
-        own candidate ordering (rush_hour_and_or.py's `heuristic` parameter)
+        own candidate ordering (and_or.py's `heuristic` parameter)
         without ever applying a move, since AND-OR's internal candidates can be
         geometrically invalid until their blockers clear. Returns a dict mapping
         each action to its logit (-inf if outside this agent's action space).
@@ -269,7 +269,7 @@ def _solve_trace(state, max_steps, heuristic=None, gamma=0.0):
     `heuristic`, if given (typically a trained PolicyAgent's `.heuristic`),
     guides AND-OR's candidate ordering instead of the plain random search.
 
-    `gamma`, passed straight through to and_or_solve - see rush_hour_and_or.solve.
+    `gamma`, passed straight through to and_or_solve - see and_or.solve.
     """
     moves = []
     while len(moves) < max_steps:
@@ -305,7 +305,7 @@ def generate_and_or_traces(initial_cars, size, n_traces, max_steps=200, heuristi
     `heuristic`, if given, is passed through to _solve_trace to guide AND-OR's
     search instead of the plain random order.
 
-    `gamma`, passed straight through to _solve_trace - see rush_hour_and_or.solve.
+    `gamma`, passed straight through to _solve_trace - see and_or.solve.
 
     `progress`, if given, is an existing tqdm bar to advance by one call per
     trace attempt instead of creating a fresh one here - this is what lets
@@ -469,7 +469,7 @@ def evaluate_and_or(initial_cars, size, n_trials, max_steps=200, heuristic=None,
     the teacher itself solve more often / find shorter solutions. Returns
     (solve_rate, avg_moves) - avg_moves is nan when nothing solved.
 
-    `gamma`, passed straight through to _solve_trace - see rush_hour_and_or.solve.
+    `gamma`, passed straight through to _solve_trace - see and_or.solve.
     """
     state0 = tuple((name, tuple(positions)) for name, positions in initial_cars)
     lengths = [
@@ -548,7 +548,7 @@ class PuzzleTrainer():
         trainer generated before. Stored on self.examples and returned.
 
         `gamma`, passed straight through to generate_and_or_traces - see
-        rush_hour_and_or.solve.
+        and_or.solve.
 
         Shows a single progress bar for the whole call - spanning every
         training puzzle's `n_traces` attempts - rather than one completed bar
@@ -608,7 +608,7 @@ class PuzzleTrainer():
         weights rather than reinitializing the network.
 
         `gamma`, passed straight through to generate_examples and (when
-        `and_or_eval_trials` > 0) evaluate_and_or - see rush_hour_and_or.solve.
+        `and_or_eval_trials` > 0) evaluate_and_or - see and_or.solve.
         A tunable parameter here (rather than a module constant) so callers
         like rush_hour.ipynb can vary it directly.
 
@@ -652,7 +652,7 @@ class PuzzleTrainer():
         guarantee of improving the apprentice - a confidently-wrong heuristic
         can bias AND-OR's search (and thus the next round's training labels)
         worse than the previous round's, not just noisier (see
-        rush_hour_and_or.AndNode._order_blockers, which commits to one
+        and_or.AndNode._order_blockers, which commits to one
         blocker order per attempt with no backtracking if it dead-ends).
         After each round's train_policy call, this evaluates the candidate
         weights on train_puzzles *and* test_puzzles (via _train_score: solved
@@ -770,7 +770,7 @@ def finetune_curve(agent, puzzle, size=(6, 6), n_traces=40, epochs=5, n_rounds=1
     toward an optimal solution in fewer fine-tuning epochs.
 
     `gamma`, passed straight through to PuzzleTrainer.train - see
-    rush_hour_and_or.solve.
+    and_or.solve.
 
     Returns the (epoch, solved, steps) curve, one entry per evaluate_all()
     checkpoint (steps is nan while unsolved), on the same continuous

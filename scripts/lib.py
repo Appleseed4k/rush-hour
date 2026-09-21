@@ -239,3 +239,13 @@ def save_puzzle_images(states, output_dir, titles=None):
         ax.set_title(titles[idx] if titles is not None else f"Puzzle {idx}")
         fig.savefig(os.path.join(output_dir, f"puzzle_{idx:03d}.png"))
         plt.close(fig)
+
+
+def visualize_puzzle_file(input_path, output_dir):
+    """Renders every puzzle in a rush_nw.txt-format file (e.g. one written by
+    fingerprint.write_cluster() or generate_variants.generate_variants()) to a
+    puzzle_NNN.png in output_dir, titled by its distance-to-goal."""
+    entries = [(dist, state) for dist, states in sorted(read_puzzles(input_path).items()) for state in states]
+    states = [state for _, state in entries]
+    titles = [f"distance {dist}" for dist, _ in entries]
+    save_puzzle_images(states, output_dir, titles)

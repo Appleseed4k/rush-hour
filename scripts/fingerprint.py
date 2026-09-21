@@ -9,8 +9,8 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn.cluster._hdbscan.hdbscan")
 
-from rush_hour_and_or import AndNode, OrNode, red_candidates
-from rush_hour_lib import parse_puzzle_line
+from and_or import AndNode, OrNode, red_candidates
+from lib import parse_puzzle_line, visualize_puzzle_file
 
 BOARD_SIZE = 6
 
@@ -77,7 +77,7 @@ def resolve_or(state, car_name, collisions, visited, protected):
 
 
 def solve_forest(state, max_attempts=50):
-    """Deterministic mirror of rush_hour_rl._solve_trace: repeatedly attempts
+    """Deterministic mirror of rl._solve_trace: repeatedly attempts
     the direct slide (or, failing that, a reposition) until red reaches the
     exit. Each attempt is one AND/OR proof tree; returns the list of them (one
     per top-level attempt), or None if it doesn't converge within
@@ -308,13 +308,17 @@ def cluster_puzzles(entries, min_cluster_size, min_samples=None, epsilon=0.0):
     return dict(clusters), failures
 
 
-def write_cluster(entries, indices, output_path):
+def write_cluster(entries, indices, output_path, visualize_dir=None):
     """Writes the puzzles at `indices` into `entries` to output_path as raw
     "<distance> <bitboard> <count>" lines (rush_nw.txt format), ready to be
-    read back with read_puzzles()/sample_puzzles() from rush_hour_lib."""
+    read back with read_puzzles()/sample_puzzles() from lib. If `visualize_dir`
+    is given, also renders those puzzles as PNGs into that folder via
+    lib.visualize_puzzle_file()."""
     lines = [entries[i][2] for i in indices]
     with open(output_path, "w") as f:
         f.write("\n".join(lines) + "\n")
+    if visualize_dir:
+        visualize_puzzle_file(output_path, visualize_dir)
 
 
 def main():
@@ -334,6 +338,8 @@ def main():
     parser.add_argument("--output", help="write the chosen cluster's puzzles to this rush_nw.txt-format file")
     parser.add_argument("--cluster-rank", type=int, default=0,
                          help="which cluster to write when --output is given: 0 = most puzzles (default), 1 = next, ...")
+    parser.add_argument("--visualize-dir",
+                         help="also render the written cluster's puzzles as PNGs into this folder (requires --output)")
     args = parser.parse_args()
 
     entries = sample_puzzles(args.pool, args.count, args.seed)
@@ -358,8 +364,10 @@ def main():
             print(f"\n--cluster-rank {args.cluster_rank} out of range ({len(by_size)} clusters found)")
             return
         cluster_id, members = by_size[args.cluster_rank]
-        write_cluster(entries, members, args.output)
+        write_cluster(entries, members, args.output, args.visualize_dir)
         print(f"\nwrote {len(members)} puzzles (cluster {cluster_id}) to {args.output}")
+        if args.visualize_dir:
+            print(f"wrote {len(members)} images to {args.visualize_dir}")
 
 
 if __name__ == "__main__":

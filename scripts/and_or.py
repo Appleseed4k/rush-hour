@@ -1,7 +1,7 @@
 import itertools
 import random
 
-from rush_hour_lib import DELTAS, read_puzzles, visualize
+from lib import DELTAS, read_puzzles, visualize
 
 BOARD_SIZE = 6
 
@@ -295,7 +295,7 @@ def solve(state, heuristic=None, gamma=0.0):
     for the caller to feed back in.
 
     `heuristic`, if given, is a `heuristic(state, actions) -> {action: score}`
-    callable (see PolicyAgent.heuristic in rush_hour_rl.py) that orders every
+    callable (see PolicyAgent.heuristic in rl.py) that orders every
     candidate-selection point best-first instead of randomly. It never changes
     whether a state solves, only which solution is found and how quickly.
 
