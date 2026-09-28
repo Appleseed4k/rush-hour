@@ -134,23 +134,38 @@ def read_puzzles(path="data/rush_nw_unique.txt"):
     return dict(puzzles)
 
 
-def _draw_state(ax, state, n=6):
-    """Draws one (name, positions) state tuple onto `ax`."""
+def _draw_state(ax, state, n=6, highlight=None, shading=None):
+    """Draws one (name, positions) state tuple onto `ax`. `shading`, if given,
+    maps car names to weights in [0, 1]: each such car is filled from gray
+    (0) to blue (1) and labeled with its weight as a percentage. Car
+    `highlight`, if given, gets a thick blue outline."""
     import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgb
 
+    gray, blue = to_rgb("gray"), to_rgb("royalblue")
+    shading = shading or {}
     ax.add_patch(plt.Rectangle((0, 0), n, n, facecolor="white", edgecolor="none"))
 
+    outline = None
     for name, positions in state:
         rows, cols = [i for i, j in positions], [j for i, j in positions]
         i0, i1, j0, j1 = min(rows), max(rows), min(cols), max(cols)
+        weight = shading.get(name, 0)
+        fill = "red" if name == "red" else tuple((1 - weight) * g + weight * b for g, b in zip(gray, blue))
         ax.add_patch(plt.Rectangle(
             (j0, i0), j1 - j0 + 1, i1 - i0 + 1,
-            facecolor="red" if name == "red" else "gray",
-            edgecolor="black", linewidth=1.5,
+            facecolor=fill, edgecolor="black", linewidth=1.5,
         ))
         if name != "red":
-            ax.text((j0 + j1 + 1) / 2, (i0 + i1 + 1) / 2, name,
+            label = f"{name}\n{weight:.0%}" if weight else name
+            ax.text((j0 + j1 + 1) / 2, (i0 + i1 + 1) / 2, label,
                      ha="center", va="center", color="white", fontsize=12)
+        if name == highlight:
+            outline = (j0, i0, j1 - j0 + 1, i1 - i0 + 1)
+    if outline is not None:
+        # Drawn after every car so neighbouring cars' edges can't cover it.
+        j0, i0, width, height = outline
+        ax.add_patch(plt.Rectangle((j0, i0), width, height, facecolor="none", edgecolor="royalblue", linewidth=5))
 
     ax.add_patch(plt.Rectangle((0, 0), n, n, facecolor="none", edgecolor="black", linewidth=1.5))
     ax.set_xlim(0, n)
@@ -162,9 +177,16 @@ def _draw_state(ax, state, n=6):
         spine.set_visible(False)
 
 
-def visualize(file_path, state, moves=None):
+def visualize(file_path, state, moves=None, boundary=None, highlight=None, shading=None):
     """Saves one PNG per state (initial state plus after each move in `moves`)
-    into file_path, plus a trajectory.png plotting distance-to-goal per move."""
+    into file_path, plus a trajectory.png plotting distance-to-goal per move.
+    `boundary`, if given, is a move index (e.g. from
+    and_or.final_pass_start) marked on trajectory.png with a vertical red line.
+    `highlight`, if given, is a car name outlined in blue in every move PNG,
+    or a `highlight(state) -> car name or None` callable (e.g. wrapping
+    and_or.horizon_car) picking one per PNG. `shading`, if given, maps car
+    names to weights in [0, 1] (e.g. how often critical_car picked each car
+    across attempts), filling each from gray to blue in every move PNG."""
     import matplotlib.pyplot as plt
 
     if os.path.exists(file_path):
@@ -176,7 +198,7 @@ def visualize(file_path, state, moves=None):
 
     def save(state, save_path, step_number):
         fig, ax = plt.subplots()
-        _draw_state(ax, state)
+        _draw_state(ax, state, highlight=highlight(state) if callable(highlight) else highlight, shading=shading)
         ax.set_title(f"Step {step_number}")
         fig.savefig(save_path)
         plt.close(fig)
@@ -192,6 +214,9 @@ def visualize(file_path, state, moves=None):
 
     fig, ax = plt.subplots()
     ax.plot(range(len(trace)), trace, color="gray")
+    if boundary is not None:
+        ax.axvline(boundary, color="red", label="final pass start")
+        ax.legend()
     ax.set_xlabel("Move #")
     ax.set_ylabel("Distance to goal")
     ax.set_ylim(bottom=0)
@@ -199,6 +224,46 @@ def visualize(file_path, state, moves=None):
     plt.tight_layout()
     fig.savefig(os.path.join(file_path, "trajectory.png"))
     plt.close(fig)
+
+
+def critical_car(state, moves, budget):
+    """The last car this solve attempt had to reason past before its final
+    pass, judged from the moves alone: and_or.horizon_car at the latest state
+    up to the final pass's start (and_or.final_pass_start) that has one - the
+    car sitting just outside a `budget`-OrNode reasoning horizon (see
+    and_or.or_budget) before the rest of the plan fell within reach. None if
+    `moves` is None or no such state has a car outside the horizon.
+
+    A property of one attempt, not of the puzzle: different attempts wander
+    through different states, and so can hinge on different cars."""
+    import and_or
+
+    if moves is None:
+        return None
+    boundary = and_or.final_pass_start(state, moves)
+    if boundary is None:
+        return None
+    states = [state]
+    for car_name, direction, steps in moves[:boundary]:
+        states.append(and_or.AndNode(states[-1], car_name, direction, steps).apply(states[-1]))
+    return next((car for s in reversed(states) if (car := and_or.horizon_car(s, budget)) is not None), None)
+
+
+def hint_move(state, distances):
+    """An all-knowing observer's one-move hint from `state`: the move that
+    starts the reasoning chain a pass must get down (and_or.chain_first_moves)
+    - the step beyond the model's horizon that it can't find on its own.
+    When several plans start differently, picks the move reaching the lowest
+    distance-to-goal in `distances` (e.g. multi_bfs of the puzzle), ties at
+    random. None if there's no chain to start."""
+    import and_or
+
+    options = [(move, distances[and_or.AndNode(state, *move).apply(state)])
+               for move in and_or.chain_first_moves(state)]
+    if not options:
+        return None
+    best = min(distance for _, distance in options)
+    return random.choice(sorted(move for move, distance in options if distance == best))
 
 
 def show_puzzles(states, titles=None, n_cols=5):

@@ -2,6 +2,7 @@ __pycache__/
 future_old/
 visualization/
 solve_attempts/
+solve_attempts_hint/
 models/
 rush_nw_tensors.pt 
 rush_nw.txt
