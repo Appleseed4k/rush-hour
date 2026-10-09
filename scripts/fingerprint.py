@@ -9,14 +9,14 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn.cluster._hdbscan.hdbscan")
 
-from and_or import AndNode, OrNode, red_candidates
+from and_or import PROTECT_MOVERS, AndNode, OrNode, protect, red_candidates, seed_protected
 from lib import parse_puzzle_line, visualize_puzzle_file
 
 BOARD_SIZE = 6
 
 
 # Deterministic, tree-capturing mirror of AndNode/OrNode.solve(): uses only
-# the pure helper methods (.directions(), .blockers(), .apply()), never
+# the pure helper methods (.directions(), .blockers(), .move_from(), .apply()), never
 # .solve() itself, so candidate order is whatever those naturally produce
 # (nearest-collision-first) instead of GAMMA/heuristic-randomized. This finds
 # at most one solution per puzzle - the one a single fixed resolution order
@@ -38,26 +38,34 @@ def move_descriptor(state, car_name, direction, steps):
 
 
 def resolve_and(state, car_name, direction, steps, visited, protected):
+    """(final_state, tree) for this move, or None. As in AndNode.solve, the
+    move is made from wherever clearing its blockers left the car (see
+    AndNode.move_from): the tree's "played" is that slide (None if the car was
+    already on its destination) and "action"/"descriptor" describe it, or the
+    declared move when nothing was played."""
     node = AndNode(state, car_name, direction, steps, visited, protected)
     blockers = node.blockers()
     if protected & blockers.keys():
         return None
     working_state = state
     children = []
-    next_protected = protected | {car_name}
+    next_protected = protect(protected, car_name)
     for blocker_name, collisions in blockers.items():
         result = resolve_or(working_state, blocker_name, collisions, visited, next_protected)
         if result is None:
             return None
         working_state, child_tree = result
         children.append(child_tree)
-    if AndNode(working_state, car_name, direction, steps, visited).blockers():
+    played = node.move_from(working_state)
+    if played is not None and AndNode(working_state, car_name, *played, visited).blockers():
         return None
-    final_state = node.apply(working_state)
+    final_state = working_state if played is None else AndNode(working_state, car_name, *played).apply(working_state)
+    action = played or (direction, steps)
     tree = {
         "car": car_name,
-        "action": (direction, steps),
-        "descriptor": move_descriptor(state, car_name, direction, steps),
+        "action": action,
+        "played": played,
+        "descriptor": move_descriptor(working_state, car_name, *action),
         "children": children,
     }
     return final_state, tree
@@ -76,20 +84,22 @@ def resolve_or(state, car_name, collisions, visited, protected):
     return None
 
 
-def solve_forest(state, max_attempts=50):
+def solve_forest(state, max_attempts=50, protect_movers=PROTECT_MOVERS):
     """Deterministic mirror of rl._solve_trace: repeatedly attempts
     the direct slide (or, failing that, a reposition) until red reaches the
     exit. Each attempt is one AND/OR proof tree; returns the list of them (one
     per top-level attempt), or None if it doesn't converge within
-    max_attempts."""
+    max_attempts. `protect_movers` is and_or.solve's, with the same default
+    (and_or.PROTECT_MOVERS)."""
     attempts = []
+    protected = seed_protected(protect_movers)
     for _ in range(max_attempts):
         red = dict(state)["red"]
         steps = (BOARD_SIZE - 1) - max(j for _, j in red)
         if steps <= 0:
             return attempts
 
-        result = resolve_and(state, "red", "r", steps, frozenset(), frozenset())
+        result = resolve_and(state, "red", "r", steps, frozenset(), protected)
         if result is not None:
             state, tree = result
             attempts.append(tree)
@@ -97,7 +107,7 @@ def solve_forest(state, max_attempts=50):
 
         found = False
         for direction, steps2 in red_candidates(state, steps):
-            result = resolve_and(state, "red", direction, steps2, frozenset(), frozenset())
+            result = resolve_and(state, "red", direction, steps2, frozenset(), protected)
             if result is not None:
                 state, tree = result
                 attempts.append(tree)
@@ -280,7 +290,7 @@ def sample_puzzles(pool_path, count, seed=None):
     return [(*parse_puzzle_line(line), line.rstrip("\n")) for line in sampled]
 
 
-def cluster_puzzles(entries, min_cluster_size, min_samples=None, epsilon=0.0):
+def cluster_puzzles(entries, min_cluster_size, min_samples=None, epsilon=0.0, protect_movers=PROTECT_MOVERS):
     """Runs solve_forest() on every entry, then HDBSCAN over pairwise
     tree-edit-distance forest comparisons (see cluster_forests). Returns
     (clusters, failures): clusters maps cluster id -> list of indices into
@@ -290,7 +300,7 @@ def cluster_puzzles(entries, min_cluster_size, min_samples=None, epsilon=0.0):
     forests = []
     failures = 0
     for idx, (_dist, state, _line) in enumerate(entries):
-        forest = solve_forest(state)
+        forest = solve_forest(state, protect_movers=protect_movers)
         if forest is None:
             failures += 1
             continue
@@ -335,6 +345,9 @@ def main():
     parser.add_argument("--epsilon", type=float, default=0.0,
                          help="HDBSCAN cluster_selection_epsilon: merges clusters/points within this forest_distance into one (default: 0.0, no merging)")
     parser.add_argument("--min-print-size", type=int, default=2, help="only print clusters with at least this many puzzles")
+    parser.add_argument("--protect-movers", action=argparse.BooleanOptionalAction, default=PROTECT_MOVERS,
+                         help="forbid subgoals from moving a car whose action is being resolved "
+                              "(and_or.solve's protect_movers; default: and_or.PROTECT_MOVERS)")
     parser.add_argument("--output", help="write the chosen cluster's puzzles to this rush_nw.txt-format file")
     parser.add_argument("--cluster-rank", type=int, default=0,
                          help="which cluster to write when --output is given: 0 = most puzzles (default), 1 = next, ...")
@@ -343,7 +356,8 @@ def main():
     args = parser.parse_args()
 
     entries = sample_puzzles(args.pool, args.count, args.seed)
-    clusters, failures = cluster_puzzles(entries, args.min_cluster_size, args.min_samples, args.epsilon)
+    clusters, failures = cluster_puzzles(entries, args.min_cluster_size, args.min_samples, args.epsilon,
+                                         args.protect_movers)
 
     print(f"{len(entries)} puzzles sampled from {args.pool}")
     print(f"{failures}/{len(entries)} did not converge under the deterministic decomposition")

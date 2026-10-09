@@ -4,6 +4,8 @@ visualization/
 solve_attempts/
 solve_attempts_hint/
 models/
+demonstration/
+23vrb-osfstorage-archive/
 rush_nw_tensors.pt 
 rush_nw.txt
 rush.txt
