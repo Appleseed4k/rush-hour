@@ -218,8 +218,8 @@ class PolicyAgent():
 
     Trained on the solver's own solved attempts by expert iteration (see
     expert_iteration and train_policy). Used two ways, which
-    solve_arbitrated combines: playing the policy head's top legal move
-    (intuition; policy_avoiding_cycles), and as the `heuristic` that orders
+    solve_arbitrated combines: playing the policy head's moves (intuition;
+    policy_avoiding_cycles, solve_intuition), and as the `heuristic` that orders
     and_or.solve's candidate moves (deliberation: AND-OR's lapsing,
     subgoal-by-subgoal reasoning with learned judgment about which option
     to try first).
@@ -358,15 +358,18 @@ class PolicyAgent():
 
 class Example():
     """One labelled board: its encoding, distance to the goal, legal and
-    target move indices, and dest-head targets (action indices and values).
-    From attempts (attempt_examples), the distance is the moves the best
-    attempt still took and the target move is the one it played."""
-    __slots__ = ("state", "x", "distance", "legal", "optimal", "dest_idx", "dest_target")
+    target move indices, dest-head targets (action indices and values), and
+    moves to avoid (ones a teacher pointed out as mistakes there). From
+    attempts (attempt_examples), the distance is the moves the best attempt
+    still took and the target move is the one it played. An example may
+    have no target move, only moves to avoid."""
+    __slots__ = ("state", "x", "distance", "legal", "optimal", "dest_idx", "dest_target", "avoid")
 
-    def __init__(self, state, x, distance, legal, optimal, dest_idx, dest_target):
+    def __init__(self, state, x, distance, legal, optimal, dest_idx, dest_target, avoid=()):
         self.state, self.x, self.distance = state, x, distance
         self.legal, self.optimal = legal, optimal
         self.dest_idx, self.dest_target = dest_idx, dest_target
+        self.avoid = list(avoid)
 
 
 class SubgoalExample():
@@ -679,6 +682,13 @@ def _init_attempt_worker(weights, config):
         _WORKER["agent"] = agent
 
 
+def _cap(max_steps, state):
+    """The move cap for an attempt from `state`: `max_steps` itself, or
+    max_steps(state) when it's a callable (e.g. a cap scaled by the puzzle's
+    optimal length)."""
+    return max_steps(state) if callable(max_steps) else max_steps
+
+
 def _shown_example(board, moves, size, max_slide):
     """Example from a teacher showing `moves` on `board`: the moves are the
     targets; there is no distance or destination target."""
@@ -696,7 +706,8 @@ def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, ag
     teacher = mode.get("teacher")
     if teacher is not None:
         teacher.counts = Counter()  # this puzzle's own tally (jobs can share a teacher object)
-    attempts, shown, taught, played = [], {}, 0, 0
+    attempts, shown, flags = [], {}, {}
+    taught = played = flagged = interventions = 0
     for _ in range(n_attempts):
         if teacher is not None:
             teacher.start(state0, rng)
@@ -705,17 +716,42 @@ def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, ag
             teacher.end_attempt(result)
         taught += sum(result["taught"])
         played += len(result["moves"])
-        for board, move, was_taught in zip(result["boards"], result["moves"], result["taught"]):
+        flagged += sum(result["flagged"])
+        interventions += _interventions(result)
+        for board, move, was_taught, was_flagged in zip(result["boards"], result["moves"], result["taught"],
+                                                        result["flagged"]):
             if was_taught:
                 shown.setdefault(board, set()).add(move)
+            if was_flagged:
+                flags.setdefault(board, set()).add(move)
         if result["solved"]:
             attempts.append(erase_loops(result["boards"], result["moves"]))
     examples = attempt_examples(attempts, size, max_slide)
     covered = {e.state for e in examples}
     examples += [_shown_example(board, moves, size, max_slide) for board, moves in shown.items()
                  if board not in covered]
-    return examples, [], {"solved": len(attempts), "taught": taught, "moves": played,
+    # Mistakes pointed out: never a target on their board, and a move to avoid there.
+    by_board = {e.state: e for e in examples}
+    for board, moves in flags.items():
+        if board not in by_board:
+            by_board[board] = _shown_example(board, (), size, max_slide)  # no target, only moves to avoid
+            examples.append(by_board[board])
+        e = by_board[board]
+        avoid = {_move_index(dict(board), *m, size[1], max_slide) for m in moves}
+        e.optimal = [i for i in e.optimal if i not in avoid]
+        e.avoid = sorted(set(e.avoid) | avoid)
+    return examples, [], {"solved": len(attempts), "taught": taught, "moves": played, "flagged": flagged,
+                          "interventions": interventions,
                           "teacher_counts": dict(teacher.counts) if teacher is not None else {}}
+
+
+def _interventions(result):
+    """Teaching budget spent in one solve_intuition attempt: every move shown
+    and every mistake pointed out, except that a mistake pointed out and the
+    move shown right after it count once together."""
+    taught, flagged = result["taught"], result["flagged"]
+    paired = sum(1 for k in range(len(flagged) - 1) if flagged[k] and taught[k + 1])
+    return sum(taught) + sum(flagged) - paired
 
 
 def attempt_puzzle(job):
@@ -729,10 +765,13 @@ def attempt_puzzle(job):
       plan they completed, with the option that resolved it as the target.
     - "intuition" student: the worker's agent playing by intuition alone
       (solve_intuition), sampling at the mode's "explore" temperature, with
-      the mode's "teacher" (see teach.py) free to show optimal moves. Solved
-      attempts teach as above (no subgoals: there is no search); every move
-      the teacher showed teaches too, solved or not - its board with that
-      move as the target, unless a solved attempt already labels the board."""
+        the mode's "teacher" (see teach.py) free to show optimal moves and
+      point out mistakes. Solved attempts teach as above (no subgoals: there
+      is no search); every move the teacher showed teaches too, solved or
+      not - its board with that move as the target, unless a solved attempt
+      already labels the board; and every mistake the teacher pointed out,
+      solved or not, is never a target on its board and becomes a move to
+      avoid there. Moves the teacher said nothing about mean nothing."""
     state0, n_attempts, gamma, seed, max_steps, (size, max_slide), mode = job
     random.seed(seed)
     agent = _WORKER.get("agent")
@@ -777,8 +816,10 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
                    size=(6, 6), max_slide=5, student="and_or", teacher=None, explore=1.0, memory=10):
     """Labels from the student's own attempts on every puzzle (in parallel):
     (Examples, SubgoalExamples, info) - see attempt_puzzle. info sums
-    attempts made, attempts solved, moves the teacher showed and moves played,
-    and the teacher's own counts ("teacher_counts", see teach.py).
+    attempts made, attempts solved, moves the teacher showed ("taught"),
+    mistakes it pointed out ("flagged"), its interventions (the teaching
+    budget - see _interventions), moves played, and the teacher's own counts
+    ("teacher_counts", see teach.py).
 
     `student` "and_or": with `agent`, attempts are made by the human-like
     solver it guides (its heuristic, at its temperature); without, by plain
@@ -786,7 +827,8 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
     alone, sampling at temperature `explore` with recent-board memory
     `memory`, and `teacher` (see teach.py), if given, may show optimal moves.
     `size` and `max_slide` (the agent's, when one is given) set the action
-    indexing."""
+    indexing. `max_steps` caps each attempt's moves: a number, or a callable
+    giving each puzzle's cap from its starting state."""
     if student == "intuition" and agent is None:
         raise ValueError("the intuition student needs an agent")
     if teacher is not None and student != "intuition":
@@ -796,10 +838,11 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
         size, max_slide = agent.size, agent.max_slide
         weights, config = _agent_payload(agent)
     mode = {"student": student, "teacher": teacher, "explore": explore, "memory": memory}
-    jobs = [(state, n_attempts, gamma, hash((seed, i)) & 0xFFFFFFFF, max_steps, (size, max_slide), mode)
+    jobs = [(state, n_attempts, gamma, hash((seed, i)) & 0xFFFFFFFF, _cap(max_steps, state), (size, max_slide), mode)
             for i, state in enumerate(puzzles)]
     examples, subgoals = [], []
-    info = {"attempts": len(puzzles) * n_attempts, "solved": 0, "taught": 0, "moves": 0, "teacher_counts": Counter()}
+    info = {"attempts": len(puzzles) * n_attempts, "solved": 0, "taught": 0, "moves": 0, "flagged": 0,
+            "interventions": 0, "teacher_counts": Counter()}
     with Pool(processes, initializer=_init_attempt_worker, initargs=(weights, config)) as pool:
         for ex, sg, counts in tqdm(pool.imap(attempt_puzzle, jobs, chunksize=2), total=len(jobs),
                                    desc="attempts"):
@@ -845,21 +888,33 @@ def _batch(agent, examples):
     optimal = torch.zeros(n, n_actions, dtype=torch.bool)
     dest_mask = torch.zeros(n, n_actions, dtype=torch.bool)
     dest_target = torch.zeros(n, n_actions)
+    avoid = torch.zeros(n, n_actions, dtype=torch.bool)
     for r, e in enumerate(examples):
         legal[r, e.legal] = True
         optimal[r, e.optimal] = True
         idx = torch.from_numpy(e.dest_idx.astype(np.int64))
         dest_mask[r, idx] = True
         dest_target[r, idx] = torch.from_numpy(e.dest_target)
-    return (x, distance, legal.to(device), optimal.to(device), dest_mask.to(device), dest_target.to(device))
+        avoid[r, e.avoid] = True
+    return (x, distance, legal.to(device), optimal.to(device), dest_mask.to(device), dest_target.to(device),
+            avoid.to(device))
 
 
-def _loss(agent, examples):
-    x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, examples)
+def _loss(agent, examples, flag_penalty=1.0):
+    """Policy loss (probability on the target moves, for examples that have
+    one), plus `flag_penalty` x the mean of -log(1 - p) over moves to avoid
+    (bounded: it fades once such a move is unlikely), plus dest and value
+    losses where there are targets."""
+    x, distance, legal, optimal, dest_mask, dest_target, avoid = _batch(agent, examples)
     policy, dest, value = agent.net.heads(x)
     logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
-    policy_loss = -logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
-    loss = policy_loss
+    loss = policy.sum() * 0
+    has_target = optimal.any(1)
+    if has_target.any():
+        loss = loss - logp[has_target].masked_fill(~optimal[has_target], float("-inf")).logsumexp(1).mean()
+    if flag_penalty and avoid.any():
+        p = logp.exp()[avoid].clamp(max=1 - 1e-6)
+        loss = loss - flag_penalty * torch.log1p(-p).mean()
     if dest_mask.any():
         loss = loss + F.binary_cross_entropy_with_logits(dest[dest_mask], dest_target[dest_mask])
     has_distance = ~torch.isnan(distance)
@@ -902,7 +957,8 @@ def _subgoal_loss(agent, subgoals):
 @torch.no_grad()
 def evaluate_agreement(agent, examples, batch_size=2048):
     """How well the agent's heads match the labels on `examples`:
-    - agreement: how often the policy head's top legal move is a target;
+    - agreement: how often the policy head's top legal move is a target
+      (over examples that have one);
     - chance: the same for a uniformly random legal move;
     - distance_error: mean absolute error of the value head, in moves.
     """
@@ -910,19 +966,21 @@ def evaluate_agreement(agent, examples, batch_size=2048):
         return {"agreement": float("nan"), "chance": float("nan"), "distance_error": float("nan")}
     agent.net.eval()
     hits = chance = err = 0.0
-    with_distance = 0
+    with_distance = with_target = 0
     for i in range(0, len(examples), batch_size):
-        x, distance, legal, optimal, _, _ = _batch(agent, examples[i:i + batch_size])
+        x, distance, legal, optimal, _, _, _ = _batch(agent, examples[i:i + batch_size])
         policy, _, value = agent.net.heads(x)
         top = policy.masked_fill(~legal, float("-inf")).argmax(1)
-        hits += optimal.gather(1, top[:, None]).float().sum().item()
-        chance += (optimal.sum(1).float() / legal.sum(1).float()).sum().item()
+        has_target = optimal.any(1)
+        hits += optimal.gather(1, top[:, None])[has_target].float().sum().item()
+        chance += (optimal.sum(1).float() / legal.sum(1).float())[has_target].sum().item()
+        with_target += int(has_target.sum())
         has_distance = ~torch.isnan(distance)
         err += (value * 10 - distance)[has_distance].abs().sum().item()
         with_distance += int(has_distance.sum())
     agent.net.train()
-    n = len(examples)
-    return {"agreement": hits / n, "chance": chance / n,
+    return {"agreement": hits / with_target if with_target else float("nan"),
+            "chance": chance / with_target if with_target else float("nan"),
             "distance_error": err / with_distance if with_distance else float("nan")}
 
 
@@ -965,7 +1023,7 @@ def _kept_epoch(history):
 
 
 def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), epochs=40, patience=6,
-                 batch_size=256, on_epoch=None):
+                 batch_size=256, on_epoch=None, flag_penalty=1.0):
     """Supervised training: on board Examples, the policy head puts
     probability on any target move, the dest head predicts each
     destination's target and the value head the distance; on
@@ -982,7 +1040,10 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
     validation scores as dicts.
 
     `on_epoch`, if given, is called as on_epoch(epoch, scores) after each
-    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints."""
+    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints.
+
+    `flag_penalty` weighs the penalty on moves to avoid (mistakes a teacher
+    pointed out) against the rest of the loss - see _loss."""
     examples, subgoals = list(examples), list(subgoals)
     agent._scores = {}
     best, best_state, stale, history = -1.0, None, 0, []
@@ -995,7 +1056,7 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
         batches += [(True, subgoals[i:i + batch_size]) for i in range(0, len(subgoals), batch_size)]
         random.shuffle(batches)
         for is_subgoal, batch in batches:
-            loss = _subgoal_loss(agent, batch) if is_subgoal else _loss(agent, batch)
+            loss = _subgoal_loss(agent, batch) if is_subgoal else _loss(agent, batch, flag_penalty)
             agent.optimizer.zero_grad()
             loss.backward()
             agent.optimizer.step()
@@ -1021,11 +1082,15 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
 
 def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=0.07, max_steps=200, seed=0,
                      checkpoint_dir=None, checkpoint_epochs=True, student="and_or", teacher=None, explore=1.0,
-                     memory=10, **train_kwargs):
+                     memory=10, resume=False, **train_kwargs):
     """Trains `agent` on the student's own attempts, by expert iteration. Each
-    round labels attempts on `puzzles` (training) and `val_puzzles`
+    round labels attempts on its training puzzles and on `val_puzzles`
     (validation) with label_attempts and keeps training the same weights on
-    them, so the examples improve as the agent does.
+    them, so the examples improve as the agent does. `puzzles` is either one
+    list of starting states, used every round, or a list of such lists, one
+    per round (e.g. fresh puzzles each round). `max_steps` caps each
+    attempt's moves - a number, or a callable giving a puzzle's cap from its
+    starting state.
 
     `student` "and_or": round 1's attempts are plain AND-OR; each later
     round's come from the human-like solver the agent has become (its
@@ -1037,8 +1102,10 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
 
     Returns one dict per round: attempts made and solved on the training
     puzzles, the share and number of their moves the teacher showed
-    ("taught", "taught_moves") out of all moves played ("moves"), the
-    teacher's own counts ("teacher_counts", see teach.py), boards and
+    ("taught", "taught_moves") out of all moves played ("moves"), mistakes it
+    pointed out ("flagged"), its interventions - the teaching budget
+    ("interventions", see _interventions) - the teacher's own counts
+    ("teacher_counts", see teach.py), boards and
     subgoals learned from, the best validation scores (agreement with the
     round's own attempts) and the epoch they came from.
 
@@ -1047,9 +1114,18 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
     (round{r}_epoch{e}.pt), plus manifest.json listing them in training
     order - round, epoch, validation scores, and "kept": whether these are
     the weights the round ended on (its best epoch), which the next round
-    starts from. The manifest is rewritten after every round. With
-    `checkpoint_epochs` False, only the untrained agent and each round's
-    kept weights are saved."""
+    starts from. The manifest is rewritten after every round, along with
+    history.json (this function's return value so far), so a run can be
+    re-evaluated later without retraining. With `checkpoint_epochs` False,
+    only the untrained agent and each round's kept weights are saved.
+
+    `resume`: continue the run saved in `checkpoint_dir` - load its history,
+    manifest and last kept weights into `agent` and train from the next
+    round up to `rounds` in all (the optimizer starts fresh). Without a
+    saved run there, it starts from scratch."""
+    per_round = bool(puzzles) and isinstance(puzzles[0], list)
+    if per_round and len(puzzles) < rounds:
+        raise ValueError(f"{len(puzzles)} rounds of puzzles for {rounds} rounds")
     history, manifest = [], []
 
     def checkpoint(round_, epoch, scores):
@@ -1057,14 +1133,24 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
         agent.save(os.path.join(checkpoint_dir, name))
         manifest.append({"file": name, "round": round_, "epoch": epoch, "kept": round_ == 0, **scores})
 
-    if checkpoint_dir is not None:
+    saved = checkpoint_dir is not None and os.path.exists(os.path.join(checkpoint_dir, "history.json"))
+    if resume and saved:
+        with open(os.path.join(checkpoint_dir, "history.json")) as f:
+            history = json.load(f)
+        with open(os.path.join(checkpoint_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        last = max((m for m in manifest if m["kept"]), key=lambda m: m["round"])
+        agent.net.load_state_dict(PolicyAgent.load(os.path.join(checkpoint_dir, last["file"])).net.state_dict())
+        agent._scores = {}
+    elif checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint(0, 0, {})
-    for r in range(rounds):
+    for r in range(len(history), rounds):
+        round_puzzles = puzzles[r] if per_round else puzzles
         guide = agent if r > 0 or student == "intuition" else None
         settings = {"size": agent.size, "max_slide": agent.max_slide, "student": student, "teacher": teacher,
                     "explore": explore, "memory": memory}
-        examples, subgoals, info = label_attempts(puzzles, n_attempts, gamma, guide, seed + 2 * r, max_steps,
+        examples, subgoals, info = label_attempts(round_puzzles, n_attempts, gamma, guide, seed + 2 * r, max_steps,
                                                   **settings)
         val_examples, val_subgoals, _ = label_attempts(val_puzzles, n_attempts, gamma, guide, seed + 2 * r + 1,
                                                        max_steps, **settings)
@@ -1076,8 +1162,8 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
         best = scores[best_epoch - 1]
         history.append({"round": r + 1, "attempts": info["attempts"], "solved": info["solved"],
                         "taught": info["taught"] / info["moves"] if info["moves"] else float("nan"),
-                        "taught_moves": info["taught"], "moves": info["moves"],
-                        "teacher_counts": info["teacher_counts"],
+                        "taught_moves": info["taught"], "moves": info["moves"], "flagged": info["flagged"],
+                        "interventions": info["interventions"], "teacher_counts": info["teacher_counts"],
                         "boards": len(examples), "subgoals": len(subgoals), "best_epoch": best_epoch, **best})
         if checkpoint_dir is not None:
             if not checkpoint_epochs:
@@ -1087,6 +1173,8 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
                     entry["kept"] = True
             with open(os.path.join(checkpoint_dir, "manifest.json"), "w") as f:
                 json.dump(manifest, f, indent=1)
+            with open(os.path.join(checkpoint_dir, "history.json"), "w") as f:
+                json.dump(history, f, indent=1)
     return history
 
 
@@ -1112,23 +1200,26 @@ def solve_and_or(state, max_steps=200, heuristic=None, gamma=0.0):
     return None
 
 
-def solve_arbitrated(agent, state, max_steps=200, gamma=0.0, threshold=0.5, memory=10):
+def solve_arbitrated(agent, state, max_steps=200, gamma=0.0, threshold=0.5, memory=10, temperature=1.0):
     """Solves from `state` by arbitrating, every turn, between intuition and
     deliberation - the human-like solver. Returns (moves if solved else
     None, stats).
 
-    - Intuition: the policy head's top legal move, played when its
-      probability (softmax over legal moves) is at least `threshold` and it
-      doesn't lead back to one of the last `memory` boards (None = every
-      board this attempt). One move.
+    - Intuition: a move sampled from softmax(logits / temperature) with the
+      random module - at the default 1, in proportion to the policy head's
+      own probabilities; at 0, always its top legal move. Played when the
+      top move's probability (softmax over legal moves, the confidence) is
+      at least `threshold` and the chosen move doesn't lead back to one of
+      the last `memory` boards (None = every board this attempt). One move.
     - Deliberation: otherwise, one and_or.solve pass ordered by the agent's
       heuristic, with lapse probability `gamma`; its moves are played. A
       move that would revisit a recent board counts as low confidence -
       going in circles is a reason to stop and think.
 
-    threshold 0 is pure intuition (apart from revisits); above 1, pure
-    deliberation. stats counts "intuitive" moves, "deliberations" (passes)
-    and "deliberate" moves."""
+    `temperature` is intuition's noise only; the agent's own `temperature`
+    is deliberation's (see PolicyAgent). threshold 0 is pure intuition
+    (apart from revisits); above 1, pure deliberation. stats counts
+    "intuitive" moves, "deliberations" (passes) and "deliberate" moves."""
     orientations = car_orientations(state)
     recent = deque([state], maxlen=memory)
     moves = []
@@ -1139,7 +1230,10 @@ def solve_arbitrated(agent, state, max_steps=200, gamma=0.0, threshold=0.5, memo
             logits = agent._evaluate(state)[0][[agent.action_id(state, *move) for move, _ in options]]
             probs = torch.softmax(logits, dim=0)
             best = int(probs.argmax())
-            move, nxt = options[best]
+            choice = best
+            if temperature > 0:
+                choice = random.choices(range(len(options)), torch.softmax(logits / temperature, dim=0).tolist())[0]
+            move, nxt = options[choice]
             if probs[best].item() >= threshold and nxt not in recent:
                 state = nxt
                 moves.append(move)
@@ -1169,11 +1263,12 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
     move the student would have played (teach.CorrectMistakes does).
 
     Returns {"solved", "boards" (start first), "moves", "taught" (per move,
-    whether the teacher showed it)}."""
+    whether the teacher showed it), "flagged" (per move, whether the teacher
+    pointed it out as a mistake)}."""
     rng = rng or random
     orientations = car_orientations(state)
     recent = deque([state], maxlen=memory)
-    boards, moves, taught = [state], [], []
+    boards, moves, taught, flagged = [state], [], [], []
     while len(moves) < max_steps and _red_steps(state) > 0:
         options = dict(neighbors(state, orientations))  # move -> board it leads to
         proposed = []
@@ -1193,49 +1288,56 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
         taught.append(move is not None)
         if move is None:
             move = propose()
-        if teacher is not None:
-            teacher.observe(state, move, options[move], taught[-1])
+        flagged.append(bool(teacher.observe(state, move, options[move], taught[-1])) if teacher is not None
+                       else False)
         state = options[move]
         boards.append(state)
         moves.append(move)
         recent.append(state)
-    return {"solved": _red_steps(state) <= 0, "boards": boards, "moves": moves, "taught": taught}
+    return {"solved": _red_steps(state) <= 0, "boards": boards, "moves": moves, "taught": taught,
+            "flagged": flagged}
 
 
 def _intuition_job(job):
-    """One untaught solve_intuition attempt (top move every turn) by the worker's agent."""
-    state, distance, memory, max_steps = job
-    result = solve_intuition(_WORKER["agent"], state, max_steps, memory)
+    """One untaught solve_intuition attempt by the worker's agent."""
+    state, distance, memory, max_steps, temperature, seed = job
+    result = solve_intuition(_WORKER["agent"], state, max_steps, memory, temperature, rng=random.Random(seed))
     return {"solved": result["solved"], "moves": len(result["moves"]) if result["solved"] else None,
             "distance": distance}
 
 
-def evaluate_intuition(agent, puzzles, memory=10, max_steps=200, processes=None):
-    """One untaught, top-move-every-turn solve_intuition attempt on every
-    (distance, state) in `puzzles`, in parallel (each worker gets a CPU copy
-    of the agent). Deterministic, so one attempt per puzzle is enough.
-    Returns one dict per puzzle: solved, moves (None if unsolved), distance."""
-    jobs = [(state, d, memory, max_steps) for d, state in puzzles]
+def evaluate_intuition(agent, puzzles, n_runs=3, temperature=1.0, memory=10, max_steps=200, seed=0,
+                       processes=None):
+    """`n_runs` untaught solve_intuition attempts on every (distance, state) in
+    `puzzles`, in parallel (each worker gets a CPU copy of the agent): the
+    student's behavior with no teacher, sampling its moves at `temperature`
+    as it does while learning (0 = always its top move, deterministic).
+    `max_steps` is a number or a callable giving each puzzle's cap from its
+    state. Returns one dict per attempt, puzzle by puzzle (`n_runs` each):
+    solved, moves (None if unsolved), distance."""
+    jobs = [(state, d, memory, _cap(max_steps, state), temperature, hash((seed, i, r)) & 0xFFFFFFFF)
+            for i, (d, state) in enumerate(puzzles) for r in range(n_runs)]
     with Pool(processes, initializer=_init_attempt_worker, initargs=_agent_payload(agent)) as pool:
         return pool.map(_intuition_job, jobs, chunksize=2)
 
 
 def _arbitrated_job(job):
     """One solve_arbitrated attempt by the worker's agent (see label_attempts' Pool setup)."""
-    state, distance, gamma, threshold, memory, max_steps, seed = job
+    state, distance, gamma, threshold, memory, max_steps, temperature, seed = job
     random.seed(seed)
-    moves, stats = solve_arbitrated(_WORKER["agent"], state, max_steps, gamma, threshold, memory)
+    moves, stats = solve_arbitrated(_WORKER["agent"], state, max_steps, gamma, threshold, memory, temperature)
     return {"solved": moves is not None, "moves": len(moves) if moves is not None else None,
             "distance": distance, **stats}
 
 
 def evaluate_arbitrated(agent, puzzles, n_runs=3, gamma=0.0, threshold=0.5, memory=10, max_steps=200, seed=0,
-                        processes=None):
+                        processes=None, temperature=1.0):
     """solve_arbitrated `n_runs` times on every (distance, state) in `puzzles`,
     in parallel (each worker gets a CPU copy of the agent, at its
-    temperature). Returns one dict per attempt, puzzle by puzzle: solved,
-    moves (None if unsolved), distance, and the stats of solve_arbitrated."""
-    jobs = [(state, d, gamma, threshold, memory, max_steps, hash((seed, i, r)) & 0xFFFFFFFF)
+    temperature for deliberation; `temperature` is intuition's). Returns one
+    dict per attempt, puzzle by puzzle: solved, moves (None if unsolved),
+    distance, and the stats of solve_arbitrated."""
+    jobs = [(state, d, gamma, threshold, memory, max_steps, temperature, hash((seed, i, r)) & 0xFFFFFFFF)
             for i, (d, state) in enumerate(puzzles) for r in range(n_runs)]
     with Pool(processes, initializer=_init_attempt_worker, initargs=_agent_payload(agent)) as pool:
         return pool.map(_arbitrated_job, jobs, chunksize=2)
