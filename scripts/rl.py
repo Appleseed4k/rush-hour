@@ -358,18 +358,15 @@ class PolicyAgent():
 
 class Example():
     """One labelled board: its encoding, distance to the goal, legal and
-    target move indices, dest-head targets (action indices and values), and
-    moves to avoid (ones a teacher pointed out as mistakes there). From
-    attempts (attempt_examples), the distance is the moves the best attempt
-    still took and the target move is the one it played. An example may
-    have no target move, only moves to avoid."""
-    __slots__ = ("state", "x", "distance", "legal", "optimal", "dest_idx", "dest_target", "avoid")
+    target move indices, and dest-head targets (action indices and values).
+    From attempts (attempt_examples), the distance is the moves the best
+    attempt still took and the target move is the one it played."""
+    __slots__ = ("state", "x", "distance", "legal", "optimal", "dest_idx", "dest_target")
 
-    def __init__(self, state, x, distance, legal, optimal, dest_idx, dest_target, avoid=()):
+    def __init__(self, state, x, distance, legal, optimal, dest_idx, dest_target):
         self.state, self.x, self.distance = state, x, distance
         self.legal, self.optimal = legal, optimal
         self.dest_idx, self.dest_target = dest_idx, dest_target
-        self.avoid = list(avoid)
 
 
 class SubgoalExample():
@@ -615,20 +612,23 @@ def label_subgoals(puzzles, limit=200, seed=0, size=(6, 6), max_slide=5, process
                          desc="labelling subgoals"))
 
 
-def erase_loops(boards, moves):
-    """An attempt's boards (start first) and moves with every loop cut out:
-    a board seen again rewinds the path to its first visit."""
-    path, played, position = [boards[0]], [], {boards[0]: 0}
-    for move, board in zip(moves, boards[1:]):
-        if board in position:
+def erase_loops(boards, moves, window=None):
+    """An attempt's boards (start first) and moves with loops cut out: a
+    board seen again rewinds the path to its earlier visit. With `window`,
+    only a board last seen at most `window` moves earlier is recognized - a
+    longer loop goes unnoticed and stays in the path (hindsight limited to
+    recent boards); None recognizes every board."""
+    path, played, position, seen = [boards[0]], [], {boards[0]: 0}, {boards[0]: 0}
+    for t, (move, board) in enumerate(zip(moves, boards[1:]), 1):
+        if board in position and (window is None or t - seen[board] <= window):
             cut = position[board]
-            for b in path[cut + 1:]:
-                del position[b]
             path, played = path[:cut + 1], played[:cut]
+            position = {b: i for i, b in enumerate(path)}
         else:
             position[board] = len(path)
             path.append(board)
             played.append(move)
+        seen[board] = t
     return path, played
 
 
@@ -699,6 +699,35 @@ def _shown_example(board, moves, size, max_slide):
                    np.zeros(0, dtype=np.int16), np.zeros(0, dtype=np.float32))
 
 
+def intuition_examples(results, size=(6, 6), max_slide=5, window=None, encode=1.0, rng=None):
+    """Examples from one puzzle's solve_intuition attempts (`results`). Solved
+    attempts teach their boards, loops cut out (erase_loops, recognizing
+    boards within `window` moves; None = all) - see attempt_examples. Every
+    move the teacher showed teaches too, solved or not: its board with that
+    move as the target, unless a solved attempt already labels the board.
+
+    `encode` < 1: encoding lapses - each board label from a solved attempt
+    and each move shown is learned only with probability `encode` (drawn
+    from `rng`); at 1 no random numbers are drawn."""
+    rng = rng or random
+
+    def kept():
+        return encode >= 1 or rng.random() < encode
+
+    attempts, shown = [], {}
+    for result in results:
+        for board, move, was_taught in zip(result["boards"], result["moves"], result["taught"]):
+            if was_taught and kept():
+                shown.setdefault(board, set()).add(move)
+        if result["solved"]:
+            attempts.append(erase_loops(result["boards"], result["moves"], window))
+    examples = [e for e in attempt_examples(attempts, size, max_slide) if kept()]
+    covered = {e.state for e in examples}
+    examples += [_shown_example(board, moves, size, max_slide) for board, moves in shown.items()
+                 if board not in covered]
+    return examples
+
+
 def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, agent, mode):
     """attempt_puzzle for the pure-intuition student (see solve_intuition),
     with the mode's teacher, if any, showing optimal moves along the way."""
@@ -706,52 +735,19 @@ def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, ag
     teacher = mode.get("teacher")
     if teacher is not None:
         teacher.counts = Counter()  # this puzzle's own tally (jobs can share a teacher object)
-    attempts, shown, flags = [], {}, {}
-    taught = played = flagged = interventions = 0
+    results = []
     for _ in range(n_attempts):
         if teacher is not None:
             teacher.start(state0, rng)
-        result = solve_intuition(agent, state0, max_steps, mode["memory"], mode["explore"], teacher, rng)
+        results.append(solve_intuition(agent, state0, max_steps, mode["memory"], mode["explore"], teacher, rng))
         if teacher is not None:
-            teacher.end_attempt(result)
-        taught += sum(result["taught"])
-        played += len(result["moves"])
-        flagged += sum(result["flagged"])
-        interventions += _interventions(result)
-        for board, move, was_taught, was_flagged in zip(result["boards"], result["moves"], result["taught"],
-                                                        result["flagged"]):
-            if was_taught:
-                shown.setdefault(board, set()).add(move)
-            if was_flagged:
-                flags.setdefault(board, set()).add(move)
-        if result["solved"]:
-            attempts.append(erase_loops(result["boards"], result["moves"]))
-    examples = attempt_examples(attempts, size, max_slide)
-    covered = {e.state for e in examples}
-    examples += [_shown_example(board, moves, size, max_slide) for board, moves in shown.items()
-                 if board not in covered]
-    # Mistakes pointed out: never a target on their board, and a move to avoid there.
-    by_board = {e.state: e for e in examples}
-    for board, moves in flags.items():
-        if board not in by_board:
-            by_board[board] = _shown_example(board, (), size, max_slide)  # no target, only moves to avoid
-            examples.append(by_board[board])
-        e = by_board[board]
-        avoid = {_move_index(dict(board), *m, size[1], max_slide) for m in moves}
-        e.optimal = [i for i in e.optimal if i not in avoid]
-        e.avoid = sorted(set(e.avoid) | avoid)
-    return examples, [], {"solved": len(attempts), "taught": taught, "moves": played, "flagged": flagged,
-                          "interventions": interventions,
+            teacher.end_attempt(results[-1])
+    examples = intuition_examples(results, size, max_slide)
+    return examples, [], {"solved": sum(r["solved"] for r in results),
+                          "taught": sum(sum(r["taught"]) for r in results),
+                          "moves": sum(len(r["moves"]) for r in results),
+                          "interventions": sum(sum(r["taught"]) for r in results),
                           "teacher_counts": dict(teacher.counts) if teacher is not None else {}}
-
-
-def _interventions(result):
-    """Teaching budget spent in one solve_intuition attempt: every move shown
-    and every mistake pointed out, except that a mistake pointed out and the
-    move shown right after it count once together."""
-    taught, flagged = result["taught"], result["flagged"]
-    paired = sum(1 for k in range(len(flagged) - 1) if flagged[k] and taught[k + 1])
-    return sum(taught) + sum(flagged) - paired
 
 
 def attempt_puzzle(job):
@@ -765,13 +761,11 @@ def attempt_puzzle(job):
       plan they completed, with the option that resolved it as the target.
     - "intuition" student: the worker's agent playing by intuition alone
       (solve_intuition), sampling at the mode's "explore" temperature, with
-        the mode's "teacher" (see teach.py) free to show optimal moves and
-      point out mistakes. Solved attempts teach as above (no subgoals: there
-      is no search); every move the teacher showed teaches too, solved or
-      not - its board with that move as the target, unless a solved attempt
-      already labels the board; and every mistake the teacher pointed out,
-      solved or not, is never a target on its board and becomes a move to
-      avoid there. Moves the teacher said nothing about mean nothing."""
+        the mode's "teacher" (see teach.py) free to show optimal moves.
+      Solved attempts teach as above (no subgoals: there is no search); every
+      move the teacher showed teaches too, solved or not - its board with
+      that move as the target, unless a solved attempt already labels the
+      board."""
     state0, n_attempts, gamma, seed, max_steps, (size, max_slide), mode = job
     random.seed(seed)
     agent = _WORKER.get("agent")
@@ -816,10 +810,9 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
                    size=(6, 6), max_slide=5, student="and_or", teacher=None, explore=1.0, memory=10):
     """Labels from the student's own attempts on every puzzle (in parallel):
     (Examples, SubgoalExamples, info) - see attempt_puzzle. info sums
-    attempts made, attempts solved, moves the teacher showed ("taught"),
-    mistakes it pointed out ("flagged"), its interventions (the teaching
-    budget - see _interventions), moves played, and the teacher's own counts
-    ("teacher_counts", see teach.py).
+    attempts made, attempts solved, moves the teacher showed ("taught"; also
+    "interventions", the teaching budget spent), moves played, and the
+    teacher's own counts ("teacher_counts", see teach.py).
 
     `student` "and_or": with `agent`, attempts are made by the human-like
     solver it guides (its heuristic, at its temperature); without, by plain
@@ -841,8 +834,8 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
     jobs = [(state, n_attempts, gamma, hash((seed, i)) & 0xFFFFFFFF, _cap(max_steps, state), (size, max_slide), mode)
             for i, state in enumerate(puzzles)]
     examples, subgoals = [], []
-    info = {"attempts": len(puzzles) * n_attempts, "solved": 0, "taught": 0, "moves": 0, "flagged": 0,
-            "interventions": 0, "teacher_counts": Counter()}
+    info = {"attempts": len(puzzles) * n_attempts, "solved": 0, "taught": 0, "moves": 0, "interventions": 0,
+            "teacher_counts": Counter()}
     with Pool(processes, initializer=_init_attempt_worker, initargs=(weights, config)) as pool:
         for ex, sg, counts in tqdm(pool.imap(attempt_puzzle, jobs, chunksize=2), total=len(jobs),
                                    desc="attempts"):
@@ -888,33 +881,22 @@ def _batch(agent, examples):
     optimal = torch.zeros(n, n_actions, dtype=torch.bool)
     dest_mask = torch.zeros(n, n_actions, dtype=torch.bool)
     dest_target = torch.zeros(n, n_actions)
-    avoid = torch.zeros(n, n_actions, dtype=torch.bool)
     for r, e in enumerate(examples):
         legal[r, e.legal] = True
         optimal[r, e.optimal] = True
         idx = torch.from_numpy(e.dest_idx.astype(np.int64))
         dest_mask[r, idx] = True
         dest_target[r, idx] = torch.from_numpy(e.dest_target)
-        avoid[r, e.avoid] = True
-    return (x, distance, legal.to(device), optimal.to(device), dest_mask.to(device), dest_target.to(device),
-            avoid.to(device))
+    return x, distance, legal.to(device), optimal.to(device), dest_mask.to(device), dest_target.to(device)
 
 
-def _loss(agent, examples, flag_penalty=1.0):
-    """Policy loss (probability on the target moves, for examples that have
-    one), plus `flag_penalty` x the mean of -log(1 - p) over moves to avoid
-    (bounded: it fades once such a move is unlikely), plus dest and value
+def _loss(agent, examples):
+    """Policy loss (probability on the target moves), plus dest and value
     losses where there are targets."""
-    x, distance, legal, optimal, dest_mask, dest_target, avoid = _batch(agent, examples)
+    x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, examples)
     policy, dest, value = agent.net.heads(x)
     logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
-    loss = policy.sum() * 0
-    has_target = optimal.any(1)
-    if has_target.any():
-        loss = loss - logp[has_target].masked_fill(~optimal[has_target], float("-inf")).logsumexp(1).mean()
-    if flag_penalty and avoid.any():
-        p = logp.exp()[avoid].clamp(max=1 - 1e-6)
-        loss = loss - flag_penalty * torch.log1p(-p).mean()
+    loss = -logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
     if dest_mask.any():
         loss = loss + F.binary_cross_entropy_with_logits(dest[dest_mask], dest_target[dest_mask])
     has_distance = ~torch.isnan(distance)
@@ -968,7 +950,7 @@ def evaluate_agreement(agent, examples, batch_size=2048):
     hits = chance = err = 0.0
     with_distance = with_target = 0
     for i in range(0, len(examples), batch_size):
-        x, distance, legal, optimal, _, _, _ = _batch(agent, examples[i:i + batch_size])
+        x, distance, legal, optimal, _, _ = _batch(agent, examples[i:i + batch_size])
         policy, _, value = agent.net.heads(x)
         top = policy.masked_fill(~legal, float("-inf")).argmax(1)
         has_target = optimal.any(1)
@@ -1023,7 +1005,7 @@ def _kept_epoch(history):
 
 
 def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), epochs=40, patience=6,
-                 batch_size=256, on_epoch=None, flag_penalty=1.0):
+                 batch_size=256, on_epoch=None):
     """Supervised training: on board Examples, the policy head puts
     probability on any target move, the dest head predicts each
     destination's target and the value head the distance; on
@@ -1040,10 +1022,7 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
     validation scores as dicts.
 
     `on_epoch`, if given, is called as on_epoch(epoch, scores) after each
-    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints.
-
-    `flag_penalty` weighs the penalty on moves to avoid (mistakes a teacher
-    pointed out) against the rest of the loss - see _loss."""
+    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints."""
     examples, subgoals = list(examples), list(subgoals)
     agent._scores = {}
     best, best_state, stale, history = -1.0, None, 0, []
@@ -1056,7 +1035,7 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
         batches += [(True, subgoals[i:i + batch_size]) for i in range(0, len(subgoals), batch_size)]
         random.shuffle(batches)
         for is_subgoal, batch in batches:
-            loss = _subgoal_loss(agent, batch) if is_subgoal else _loss(agent, batch, flag_penalty)
+            loss = _subgoal_loss(agent, batch) if is_subgoal else _loss(agent, batch)
             agent.optimizer.zero_grad()
             loss.backward()
             agent.optimizer.step()
@@ -1102,9 +1081,8 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
 
     Returns one dict per round: attempts made and solved on the training
     puzzles, the share and number of their moves the teacher showed
-    ("taught", "taught_moves") out of all moves played ("moves"), mistakes it
-    pointed out ("flagged"), its interventions - the teaching budget
-    ("interventions", see _interventions) - the teacher's own counts
+    ("taught", "taught_moves") out of all moves played ("moves"), its
+    interventions - the teaching budget ("interventions") - the teacher's own counts
     ("teacher_counts", see teach.py), boards and
     subgoals learned from, the best validation scores (agreement with the
     round's own attempts) and the epoch they came from.
@@ -1162,7 +1140,7 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
         best = scores[best_epoch - 1]
         history.append({"round": r + 1, "attempts": info["attempts"], "solved": info["solved"],
                         "taught": info["taught"] / info["moves"] if info["moves"] else float("nan"),
-                        "taught_moves": info["taught"], "moves": info["moves"], "flagged": info["flagged"],
+                        "taught_moves": info["taught"], "moves": info["moves"],
                         "interventions": info["interventions"], "teacher_counts": info["teacher_counts"],
                         "boards": len(examples), "subgoals": len(subgoals), "best_epoch": best_epoch, **best})
         if checkpoint_dir is not None:
@@ -1176,6 +1154,88 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
             with open(os.path.join(checkpoint_dir, "history.json"), "w") as f:
                 json.dump(history, f, indent=1)
     return history
+
+
+def online_update(agent, examples, steps=1, batch_size=256):
+    """Learns from `examples` the way a person learns from one puzzle: `steps`
+    passes over just these examples (one gradient step per batch), no replay
+    of anything earlier, no validation, nothing to rewind to."""
+    examples = list(examples)
+    agent.net.train()
+    for _ in range(steps):
+        random.shuffle(examples)
+        for i in range(0, len(examples), batch_size):
+            loss = _loss(agent, examples[i:i + batch_size])
+            agent.optimizer.zero_grad()
+            loss.backward()
+            agent.optimizer.step()
+    agent._scores = {}
+
+
+def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,
+                     window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
+                     surrender=None):
+    """A session in which a pure-intuition student (`agent`) learns online, a
+    few puzzles at a time, under human-like limits on learning:
+
+    - online: after each block of `block` puzzles it learns from those
+      puzzles' attempts only (online_update, `steps` passes), and plays the
+      next block with what it has become - nothing earlier is replayed;
+    - encoding lapses: each label and move shown is learned with
+      probability `encode` (see intuition_examples);
+    - limited hindsight: loops are cut out of a solved attempt only when it
+      returned to a board seen within the last `window` moves (None: any);
+    - no rewinding: no validation, no keeping an earlier, better version.
+
+    `block` 1 learns after every puzzle. A larger block gives the network
+    more data per update - a way to grant it more experience than a person
+    would need for the same progress (see session_experiment.py's
+    --multiplier).
+
+    Each puzzle (a starting state) gets up to `max_attempts` attempts
+    (solve_intuition, sampling at temperature `explore`, avoiding the last
+    `memory` boards, with `teacher` if given), stopping at the first solve -
+    a restart is a new attempt. `max_steps` caps each attempt: a number or a
+    callable giving a puzzle's cap from its state. With `surrender` (a
+    SurrenderRule), the student may also give up on a puzzle - counting the
+    moves of all its attempts at it - which ends the puzzle: no restart.
+
+    Returns one dict per puzzle, in order: puzzle (index), solved, surrendered, attempts,
+    moves (all attempts), taught, interventions, examples learned
+    from. `on_puzzle(n, agent)`, if given, is called after each update with
+    the number of puzzles played so far - e.g. to snapshot the student."""
+    rng = random.Random(seed)
+    record = []
+    pending = []
+    for i, state in enumerate(puzzles):
+        results = []
+        if teacher is not None:
+            teacher.counts = Counter()
+        for _ in range(max_attempts):
+            if teacher is not None:
+                teacher.start(state, rng)
+            gives_up = surrender.for_puzzle(state, sum(len(r["moves"]) for r in results)) if surrender else None
+            results.append(solve_intuition(agent, state, _cap(max_steps, state), memory, explore, teacher, rng,
+                                           gives_up))
+            if teacher is not None:
+                teacher.end_attempt(results[-1])
+            if results[-1]["solved"] or results[-1]["surrendered"]:
+                break
+        examples = intuition_examples(results, agent.size, agent.max_slide, window, encode, rng)
+        pending += examples
+        record.append({"puzzle": i, "solved": results[-1]["solved"], "surrendered": results[-1]["surrendered"],
+                       "attempts": len(results),
+                       "moves": sum(len(r["moves"]) for r in results),
+                       "taught": sum(sum(r["taught"]) for r in results),
+                       "interventions": sum(sum(r["taught"]) for r in results), "examples": len(examples),
+                       "teacher_counts": dict(teacher.counts) if teacher is not None else {}})
+        if (i + 1) % block == 0 or i + 1 == len(puzzles):
+            if pending:
+                online_update(agent, pending, steps)
+            pending = []
+            if on_puzzle is not None:
+                on_puzzle(i + 1, agent)
+    return record
 
 
 # --- solving ---------------------------------------------------------------------------------
@@ -1253,7 +1313,8 @@ def solve_arbitrated(agent, state, max_steps=200, gamma=0.0, threshold=0.5, memo
     return (moves if _red_steps(state) <= 0 else None), stats
 
 
-def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, teacher=None, rng=None):
+def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, teacher=None, rng=None,
+                    surrender=None):
     """Pure intuition, no search: every turn the policy head chooses among the
     legal moves that don't return to one of the last `memory` boards (all
     legal moves if every one does) - its top move at `temperature` 0, else a
@@ -1262,13 +1323,16 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
     may show the optimal move instead, which is played; it can look at the
     move the student would have played (teach.CorrectMistakes does).
 
-    Returns {"solved", "boards" (start first), "moves", "taught" (per move,
-    whether the teacher showed it), "flagged" (per move, whether the teacher
-    pointed it out as a mistake)}."""
+    `surrender`, if given, is a function of the number of moves played so
+    far: after each move that doesn't solve the puzzle, the student gives
+    up with that probability (drawn from `rng`) - see SurrenderRule.
+
+    Returns {"solved", "surrendered", "boards" (start first), "moves",
+    "taught" (per move, whether the teacher showed it)}."""
     rng = rng or random
     orientations = car_orientations(state)
     recent = deque([state], maxlen=memory)
-    boards, moves, taught, flagged = [state], [], [], []
+    boards, moves, taught = [state], [], []
     while len(moves) < max_steps and _red_steps(state) > 0:
         options = dict(neighbors(state, orientations))  # move -> board it leads to
         proposed = []
@@ -1288,34 +1352,70 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
         taught.append(move is not None)
         if move is None:
             move = propose()
-        flagged.append(bool(teacher.observe(state, move, options[move], taught[-1])) if teacher is not None
-                       else False)
+        if teacher is not None:
+            teacher.observe(state, move, options[move], taught[-1])
         state = options[move]
         boards.append(state)
         moves.append(move)
         recent.append(state)
-    return {"solved": _red_steps(state) <= 0, "boards": boards, "moves": moves, "taught": taught,
-            "flagged": flagged}
+        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(len(moves)):
+            return {"solved": False, "surrendered": True, "boards": boards, "moves": moves, "taught": taught}
+    return {"solved": _red_steps(state) <= 0, "surrendered": False, "boards": boards, "moves": moves,
+            "taught": taught}
+
+
+class SurrenderRule():
+    """When a student gives up on a puzzle, as people do: after each move, it
+    surrenders with a probability that depends on how many moves it has made
+    on the puzzle so far relative to the optimal length - `rates[i]` while
+    moves / optimal is in [edges[i], edges[i + 1]) (the last rate beyond the
+    last edge). The rates are fitted to the human data
+    (human_data.surrender_hazard). `distances` maps each puzzle's starting
+    state to its optimal length. Called as rule(state, moves): the
+    probability of giving up after `moves` moves on the puzzle starting at
+    `state`. `scale` multiplies every rate (capped at 1): the human shape
+    with a student-specific level, fitted so the student's starting solve
+    rate and efficiency match people's. A plain object, so it can be sent
+    to worker processes."""
+
+    def __init__(self, edges, rates, distances, scale=1.0):
+        self.edges, self.distances, self.scale = list(edges), dict(distances), scale
+        self.rates = [min(1.0, scale * r) for r in rates]
+
+    def __call__(self, state, moves):
+        ratio = moves / self.distances[state]
+        i = 0
+        while i + 1 < len(self.edges) and ratio >= self.edges[i + 1]:
+            i += 1
+        return self.rates[min(i, len(self.rates) - 1)]
+
+    def for_puzzle(self, state, offset=0):
+        """The surrender function solve_intuition takes, for an attempt at
+        `state` after `offset` moves already made on it (earlier attempts)."""
+        return lambda moves: self(state, offset + moves)
 
 
 def _intuition_job(job):
     """One untaught solve_intuition attempt by the worker's agent."""
-    state, distance, memory, max_steps, temperature, seed = job
-    result = solve_intuition(_WORKER["agent"], state, max_steps, memory, temperature, rng=random.Random(seed))
+    state, distance, memory, max_steps, temperature, seed, *rest = job
+    surrender = rest[0].for_puzzle(state) if rest and rest[0] is not None else None
+    result = solve_intuition(_WORKER["agent"], state, max_steps, memory, temperature, rng=random.Random(seed),
+                             surrender=surrender)
     return {"solved": result["solved"], "moves": len(result["moves"]) if result["solved"] else None,
             "distance": distance}
 
 
 def evaluate_intuition(agent, puzzles, n_runs=3, temperature=1.0, memory=10, max_steps=200, seed=0,
-                       processes=None):
+                       processes=None, surrender=None):
     """`n_runs` untaught solve_intuition attempts on every (distance, state) in
     `puzzles`, in parallel (each worker gets a CPU copy of the agent): the
     student's behavior with no teacher, sampling its moves at `temperature`
     as it does while learning (0 = always its top move, deterministic).
     `max_steps` is a number or a callable giving each puzzle's cap from its
-    state. Returns one dict per attempt, puzzle by puzzle (`n_runs` each):
-    solved, moves (None if unsolved), distance."""
-    jobs = [(state, d, memory, _cap(max_steps, state), temperature, hash((seed, i, r)) & 0xFFFFFFFF)
+    state. `surrender`: a SurrenderRule, to let the student give up as
+    people do (None: it never does). Returns one dict per attempt, puzzle by
+    puzzle (`n_runs` each): solved, moves (None if unsolved), distance."""
+    jobs = [(state, d, memory, _cap(max_steps, state), temperature, hash((seed, i, r)) & 0xFFFFFFFF, surrender)
             for i, (d, state) in enumerate(puzzles) for r in range(n_runs)]
     with Pool(processes, initializer=_init_attempt_worker, initargs=_agent_payload(agent)) as pool:
         return pool.map(_intuition_job, jobs, chunksize=2)

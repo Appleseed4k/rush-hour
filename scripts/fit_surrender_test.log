@@ -1,0 +1,9 @@
+people, trials 1-10: solved 87.4% ± 2.7%, moves / optimal 2.76 ± 0.17
+round  3: best scale 0.35 -> solved 84.3%, moves / optimal 3.40 (misfit 15.5)   scale 0: 90.6% 3.52   scale 1: 74.6% 3.19
+round  4: best scale 0.40 -> solved 84.7%, moves / optimal 3.16 (misfit 6.5)   scale 0: 91.3% 3.30   scale 1: 76.5% 2.97
+round  5: best scale 0.35 -> solved 86.5%, moves / optimal 2.87 (misfit 0.5)   scale 0: 91.7% 2.97   scale 1: 78.5% 2.70
+round  6: best scale 0.40 -> solved 87.9%, moves / optimal 2.67 (misfit 0.4)   scale 0: 93.3% 2.78   scale 1: 81.1% 2.52
+round  7: best scale 0.40 -> solved 89.7%, moves / optimal 2.37 (misfit 6.1)   scale 0: 94.3% 2.47   scale 1: 83.9% 2.25
+round  8: best scale 0.50 -> solved 89.2%, moves / optimal 2.39 (misfit 5.4)   scale 0: 95.0% 2.51   scale 1: 84.2% 2.29
+round  9: best scale 0.20 -> solved 90.3%, moves / optimal 2.31 (misfit 8.5)   scale 0: 92.5% 2.36   scale 1: 82.8% 2.14
+round 10: best scale 0.45 -> solved 90.7%, moves / optimal 2.20 (misfit 12.6)   scale 0: 95.5% 2.31   scale 1: 85.7% 2.10

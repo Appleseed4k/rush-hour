@@ -14,7 +14,7 @@ attempts per round). load_run() reads a run back; summarize() turns test
 attempts into solve rate and moves / optimal with standard errors.
 
 Examples (from scripts/):
-    python teach_experiment.py fresh_p0.1 --teachers random:0.1 correct-after:0.1 flag:0.1
+    python teach_experiment.py fresh_p0.1 --teachers random:0.1 correct-after:0.1
     python teach_experiment.py fresh_p0.1 --rounds 10 --resume      # continue to 10 rounds
     python teach_experiment.py hard --train-bins 1-8 9-12 13-16 17-20 21-30 --test-bins 21-30 31-40
     python teach_experiment.py sparse25 --train-per-bin 25
@@ -36,8 +36,10 @@ import teach
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 POOL = os.path.join(ROOT, "data", "rush_nw.txt")
 OUT = os.path.join(ROOT, "models", "teach")
-TEACHERS = {"random": teach.Random, "correct-after": teach.CorrectAfterMistake, "flag": teach.FlagMistakes,
-            "correct-before": teach.CorrectMistakes}
+TEACHERS = {"random": teach.Random, "correct-after": teach.CorrectAfterMistake, "correct-before": teach.CorrectMistakes,
+            "bayes": teach.Bayesian}
+# Kinds no longer available (their code is in future_old/), by the name saved runs keep their results under.
+RETIRED = {"flag": "flag mistakes"}
 # Settings a resumed run may change; anything else must match the saved run.
 RESUMABLE = {"rounds", "device", "resume", "test_only", "test_runs", "test_temperature", "out", "overwrite"}
 # Settings that change what testing measures; results are recomputed when they change.
@@ -49,7 +51,7 @@ TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
-    ap.add_argument("--teachers", nargs="+", default=["random:0.1", "correct-after:0.1", "flag:0.1"],
+    ap.add_argument("--teachers", nargs="+", default=["random:0.1", "correct-after:0.1"],
                     help=f"kind:probability for each teacher; kinds: {', '.join(TEACHERS)} (probability 1 if left out)")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--train-bins", nargs="+", default=["1-8", "9-12", "13-16", "17-20"],
@@ -69,7 +71,6 @@ def parse_args(argv=None):
     ap.add_argument("--max-steps", type=int, default=None, help="a fixed move cap instead")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--patience", type=int, default=3)
-    ap.add_argument("--flag-penalty", type=float, default=1.0)
     ap.add_argument("--test-temperature", type=float, default=1.0, help="0 = always the top move")
     ap.add_argument("--test-runs", type=int, default=3, help="test attempts per puzzle")
     ap.add_argument("--seed", type=int, default=0)
@@ -86,7 +87,18 @@ def parse_args(argv=None):
 
 def make_teacher(spec):
     kind, _, p = spec.partition(":")
+    if kind in RETIRED:
+        raise SystemExit(f"the {RETIRED[kind]} teacher is retired (see future_old/): drop {spec} from the teachers")
     return TEACHERS[kind](float(p) if p else 1.0)
+
+
+def teacher_name(spec):
+    """The name a teacher's results are saved under - for retired kinds too."""
+    kind, _, p = spec.partition(":")
+    if kind in RETIRED:
+        q = float(p) if p else 1.0
+        return RETIRED[kind] if q >= 1 else f"{RETIRED[kind]} {q}"
+    return make_teacher(spec).name
 
 
 def bins(specs):
@@ -167,7 +179,7 @@ def train(teacher, config, rounds, val, caps, run_dir):
         n_attempts=config["attempts"], max_steps=caps.__getitem__, seed=config["seed"],
         checkpoint_dir=os.path.join(run_dir, folder(teacher)), checkpoint_epochs=False, student="intuition",
         teacher=teacher, explore=config["explore"], memory=config["memory"], resume=config["resume"],
-        epochs=config["epochs"], patience=config["patience"], flag_penalty=config["flag_penalty"])
+        epochs=config["epochs"], patience=config["patience"])
 
 
 def test(teacher, config, test_puzzles, caps, run_dir):
@@ -219,8 +231,8 @@ def load_run(run, out=OUT):
         config = json.load(f)
     teachers = {}
     for spec in config["teachers"]:
-        teacher = make_teacher(spec)
-        teacher_dir = os.path.join(run_dir, folder(teacher))
+        teacher = teacher_name(spec)
+        teacher_dir = os.path.join(run_dir, teacher.replace(" ", "_"))
         entry = {"history": [], "results": {}}
         for key, name in (("history", "history.json"), ("results", "results.json")):
             path = os.path.join(teacher_dir, name)
@@ -229,7 +241,7 @@ def load_run(run, out=OUT):
                     entry[key] = json.load(f)
         if entry["results"]:
             entry["results"] = {int(r): runs for r, runs in entry["results"]["rounds"].items()}
-        teachers[teacher.name] = entry
+        teachers[teacher] = entry
     return {"config": config, "teachers": teachers}
 
 

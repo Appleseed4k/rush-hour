@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "play-page",
+      "runtimeExecutable": "/opt/miniconda3/envs/rush_hour/bin/python",
+      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "web"],
+      "port": 8765
+    }
+  ]
+}

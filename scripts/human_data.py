@@ -1,10 +1,18 @@
 """Loader for the Olieslagers et al. (2023) Rush Hour experiment (OSF 23vrb).
 
-The archive ships no puzzle layouts (data/raw_data/problems/ is empty, also on
-OSF), so only what the raw event log itself reveals is available: per attempt,
-the sequence of slides (piece, start/end top-left cell, timestamps). Boards
-cannot be rebuilt from it; matching against data/rush_nw.txt found no puzzle
-that fits, so the experiment's puzzles are not in that pool.
+The OSF archive ships no puzzle layouts (data/raw_data/rush_hour/problems/ is
+empty there); the 70 layouts come from the authors' GitHub repository
+(github.com/WeiJiMaLab/rush_hour, data/raw_data/problems/) and go in that
+folder. puzzle() turns one into this repo's state format. They are not in
+data/rush_nw.txt. Checked: every board is valid, and 117,130 of the 117,145
+recorded slides replay as legal moves (the rest are drags off the board).
+
+Lengths: the paper counts a puzzle solved once the red car's path to the
+exit is clear; this repo (lib.find_goal_states) once the red car reaches the
+edge - one move more. optimal_length() is the paper's (instance name's
+suffix - 2), distance() this repo's (+1, which breadth-first search confirms
+for all 70 puzzles). Compare move counts with distance(): trials() counts
+the final slide to the exit as a move.
 """
 import collections
 import csv
@@ -12,6 +20,7 @@ import os
 
 ARCHIVE = os.path.join(os.path.dirname(__file__), "..", "23vrb-osfstorage-archive")
 RAW = os.path.join(ARCHIVE, "data", "raw_data", "rush_hour", "all_subjects.csv")
+PROBLEMS = os.path.join(ARCHIVE, "data", "raw_data", "rush_hour", "problems")
 RED = 8  # the red car's piece id in the raw data
 
 
@@ -106,5 +115,119 @@ def load(path=RAW, filtered=True):
 
 
 def optimal_length(instance):
-    """The puzzle's optimal solution length, from its name (suffix = length + 2)."""
+    """The puzzle's optimal solution length as the paper counts it (until the
+    red car's path is clear), from its name (suffix = length + 2)."""
     return int(instance.rsplit("_", 1)[1]) - 2
+
+
+def distance(instance):
+    """The puzzle's optimal solution length as this repo counts it (until the
+    red car reaches the exit): the paper's + 1."""
+    return optimal_length(instance) + 1
+
+
+def puzzle(instance, folder=PROBLEMS):
+    """The puzzle's starting board in this repo's state format (as
+    lib.parse_puzzle_line gives): ("red", cells) first, then every other car
+    as (name, cells) sorted by name - names are the layout's car ids."""
+    import json
+    with open(os.path.join(folder, instance + ".json")) as f:
+        data = json.load(f)
+    cars = []
+    for car in data["cars"]:
+        row, col = divmod(car["position"], 6)
+        dr, dc = (0, 1) if car["orientation"] == "horizontal" else (1, 0)
+        cells = tuple((row + dr * k, col + dc * k) for k in range(car["length"]))
+        cars.append(("red" if car["id"] == "r" else car["id"], cells))
+    red = [c for c in cars if c[0] == "red"]
+    return tuple(red) + tuple(sorted(c for c in cars if c[0] != "red"))
+
+
+def puzzles(folder=PROBLEMS):
+    """{instance: starting board} for every layout in `folder`."""
+    return {f[:-5]: puzzle(f[:-5], folder) for f in sorted(os.listdir(folder)) if f.endswith(".json")}
+
+
+# --- per-puzzle summaries, for learning curves --------------------------------------------------
+
+def trials(path=RAW, filtered=True):
+    """One row per (participant, puzzle), in play order, as a pandas DataFrame:
+    subject, instance, trial (1 = first puzzle played), optimal (the paper's
+    length), distance (this repo's, one more - use it with moves),
+    solved, surrendered, attempts (1 + restarts), moves (over all attempts,
+    counted as pre_process.jl does: a drag_end whose move number the next
+    event doesn't share), seconds. Unsolved puzzles are kept. Puzzles shown
+    for an instant at the start and never played are left out."""
+    import pandas as pd
+    out = []
+    for subject, rows in read_events(path).items():
+        if filtered and not keep_subject(rows):
+            continue
+        by_instance = collections.OrderedDict()
+        for r in rows:
+            if r["event"] not in ("BONUS_FAIL", "BONUS_SUCCESS"):
+                by_instance.setdefault(r["instance"], []).append(r)
+        for instance, rs in by_instance.items():
+            events = [r for r in rs if r["event"] in ("start", "restart", "drag_end", "win")]
+            moves = sum(1 for k, r in enumerate(events)
+                        if r["event"] == "drag_end" and (k + 1 == len(events) or events[k + 1]["move"] != r["move"]))
+            seconds = (max(r["t"] for r in rs) - min(r["t"] for r in rs)) / 1000
+            if moves == 0 and seconds == 0:
+                continue
+            kinds = {r["event"] for r in rs}
+            out.append({"subject": subject, "instance": instance, "t0": min(r["t"] for r in rs),
+                        "optimal": optimal_length(instance), "distance": distance(instance),
+                        "solved": "win" in kinds,
+                        "surrendered": "surrender" in kinds,
+                        "attempts": 1 + sum(r["event"] == "restart" for r in rs), "moves": moves,
+                        "seconds": seconds})
+    df = pd.DataFrame(out)
+    df["trial"] = df.groupby("subject").t0.rank(method="first").astype(int)
+    return df.sort_values(["subject", "trial"]).drop(columns="t0").reset_index(drop=True)
+
+
+def trend(df, y, x="trial", person="subject", puzzle="instance", per=10, iterations=100):
+    """Within-person, within-puzzle trend of column `y` in `x` - how much `y`
+    changes per `per` trials for the same person, comparing like puzzles
+    with like - as (estimate, standard error clustered by person). Person
+    and puzzle effects are removed by alternating demeaning, so comparing
+    early and late trials isn't confounded by who plays more puzzles or by
+    which puzzles came when. Works for simulated students too (person =
+    student, puzzle = the session's puzzle index)."""
+    import numpy as np
+    Y, X = df[y].astype(float), df[x].astype(float)
+    for _ in range(iterations):
+        for g in (df[person], df[puzzle]):
+            Y = Y - Y.groupby(g).transform("mean")
+            X = X - X.groupby(g).transform("mean")
+    b = (X * Y).sum() / (X * X).sum()
+    score = (X * (Y - b * X)).groupby(df[person]).sum()
+    return per * b, per * float(np.sqrt((score ** 2).sum())) / (X * X).sum()
+
+
+SURRENDER_EDGES = (0, 0.5, 1, 1.5, 2, 3, 4, 6, 10)  # moves so far / optimal length
+
+
+def surrender_hazard(trials_df=None, edges=SURRENDER_EDGES):
+    """People's chance of giving up after a move, by how many moves they have
+    made on the puzzle so far relative to its optimal length (this repo's
+    distance, which counts the final slide out, as the moves do; all attempts
+    at it counted): per bin [edges[i], edges[i + 1]) (the last bin open
+    ended), surrenders / moves made in that bin. Puzzles solved count as
+    moves at risk with no surrender. Returns (edges, rates, counts) -
+    counts as (surrenders, moves) per bin. Pooled over puzzle lengths: the
+    shape is similar across them, and longer puzzles' higher surrender rates
+    come from the extra moves."""
+    import numpy as np
+    df = trials() if trials_df is None else trials_df
+    bounds = list(edges) + [np.inf]
+    counts = []
+    for a, b in zip(bounds, bounds[1:]):
+        at_risk = surrenders = 0
+        for moves, d, gave_up in zip(df.moves, df.distance, df.surrendered):
+            k = np.arange(1, moves + 1) / d
+            at_risk += int(((k >= a) & (k < b)).sum())
+            surrenders += bool(gave_up and moves > 0 and a <= moves / d < b)
+        counts.append((surrenders, at_risk))
+    rates = [s / n if n else 0.0 for s, n in counts]
+    return list(edges), rates, counts
