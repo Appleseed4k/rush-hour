@@ -392,9 +392,19 @@ def _dest_labels(board, reached, size, max_slide):
     """Dest-head (action indices, targets) for `board`: every on-board
     destination of every car, with target DEST_DECAY ** (k - 1) if
     reached[(car, positions)] = k, else 0."""
-    n_rows, n_cols = size
     sd = dict(board)
     dest_idx, dest_target = [], []
+    for car, direction, steps, moved in _destinations(board, size, max_slide):
+        k = reached.get((car, moved))
+        dest_idx.append(_move_index(sd, car, direction, steps, size[1], max_slide))
+        dest_target.append(DEST_DECAY ** (k - 1) if k is not None else 0.0)
+    return np.array(dest_idx, dtype=np.int16), np.array(dest_target, dtype=np.float32)
+
+
+def _destinations(board, size, max_slide):
+    """(car, direction, steps, positions moved to) for every on-board destination of every car, in the order of
+    _dest_labels's targets."""
+    n_rows, n_cols = size
     for car, cells in board:
         horizontal = cells[0][0] == cells[1][0]
         for direction in ("lr" if horizontal else "ud"):
@@ -403,10 +413,7 @@ def _dest_labels(board, reached, size, max_slide):
                 moved = tuple((i + di * steps, j + dj * steps) for i, j in cells)
                 if not all(0 <= i < n_rows and 0 <= j < n_cols for i, j in moved):
                     break
-                k = reached.get((car, moved))
-                dest_idx.append(_move_index(sd, car, direction, steps, n_cols, max_slide))
-                dest_target.append(DEST_DECAY ** (k - 1) if k is not None else 0.0)
-    return np.array(dest_idx, dtype=np.int16), np.array(dest_target, dtype=np.float32)
+                yield car, direction, steps, moved
 
 
 def optimal_destinations(state, distances, orientations, max_states=20_000):
@@ -618,18 +625,86 @@ def erase_loops(boards, moves, window=None):
     only a board last seen at most `window` moves earlier is recognized - a
     longer loop goes unnoticed and stays in the path (hindsight limited to
     recent boards); None recognizes every board."""
-    path, played, position, seen = [boards[0]], [], {boards[0]: 0}, {boards[0]: 0}
-    for t, (move, board) in enumerate(zip(moves, boards[1:]), 1):
+    kept = _kept_moves(boards, window)
+    return [boards[0]] + [boards[t + 1] for t in kept], [moves[t] for t in kept]
+
+
+def _kept_moves(boards, window=None):
+    """The indices of the moves erase_loops keeps, in order."""
+    kept, position, seen = [], {boards[0]: 0}, {boards[0]: 0}
+    for t, board in enumerate(boards[1:], 1):
         if board in position and (window is None or t - seen[board] <= window):
-            cut = position[board]
-            path, played = path[:cut + 1], played[:cut]
-            position = {b: i for i, b in enumerate(path)}
+            kept = kept[:position[board]]
+            position = {boards[0]: 0} | {boards[k + 1]: i + 1 for i, k in enumerate(kept)}
         else:
-            position[board] = len(path)
-            path.append(board)
-            played.append(move)
+            position[board] = len(kept) + 1
+            kept.append(t - 1)
         seen[board] = t
-    return path, played
+    return kept
+
+
+def shortcut_routes(boards, moves, taught=None, everywhere=False):
+    """Shortcut labels for a solved attempt (`boards`, start first, ending solved; `moves`; `taught`, per move,
+    whether a teacher showed it): hindsight over everything the student saw. The visited boards form a graph - two
+    are joined when one legal move turns one into the other (moves are reversible) - and the shortest route from a
+    board to the solved board through it is often far shorter than the path played, even with loops cut out.
+    Returns (boards, moves, taught) routes for attempt_examples: from each labelled board, one shortest route per
+    first move that starts one (so moves tied for shortest are all targets). Labelled boards: the ones on shortest
+    routes from the start, or with `everywhere` every visited board that reaches the solved board. A route's move is
+    taught when the teacher showed that move on that board in the attempt."""
+    taught = taught or [False] * len(moves)
+    shown = {(b, m) for b, m, t in zip(boards, moves, taught) if t}
+    visited = set(boards)
+    goal = boards[-1]
+    orient = car_orientations(boards[0])
+    adj = {b: [(m, n) for m, n in neighbors(b, orient) if n in visited] for b in visited}
+    dist, queue = {goal: 0}, [goal]
+    for b in queue:
+        for _, n in adj[b]:
+            if n not in dist:
+                dist[n] = dist[b] + 1
+                queue.append(n)
+
+    def route(b):
+        bs, ms = [b], []
+        while dist[b] > 0:
+            m, b = next((m, n) for m, n in adj[b] if dist.get(n) == dist[b] - 1)
+            ms.append(m)
+            bs.append(b)
+        return bs, ms
+
+    if everywhere:
+        starts = [b for b in visited if dist.get(b, 0) > 0]
+    else:
+        starts, frontier = set(), {boards[0]} if dist[boards[0]] > 0 else set()
+        while frontier:
+            starts |= frontier
+            frontier = {n for b in frontier for _, n in adj[b] if dist.get(n) == dist[b] - 1 and dist[n] > 0}
+    routes = []
+    for b in starts:
+        for m, n in adj[b]:
+            if dist.get(n) == dist[b] - 1:
+                bs, ms = route(n)
+                bs, ms = [b] + bs, [m] + ms
+                routes.append((bs, ms, [(x, y) in shown for x, y in zip(bs, ms)]))
+    return routes
+
+
+LABELS = ("own", "path", "all")
+
+
+def solved_routes(result, labels="own", window=None):
+    """What a solved attempt (a solve_intuition result) labels, as (boards, moves, taught) routes for
+    attempt_examples. `labels` "own": the path it played with loops cut out (erase_loops, recognizing boards within
+    `window` moves; None = all); "path" / "all": shortcut labels (shortcut_routes - the boards on shortest routes from
+    the start, or every visited board; `window` doesn't apply)."""
+    boards, moves, taught = result["boards"], result["moves"], result["taught"]
+    if labels == "own":
+        kept = _kept_moves(boards, window)
+        return [([boards[0]] + [boards[t + 1] for t in kept], [moves[t] for t in kept], [taught[t] for t in kept])]
+    if labels not in LABELS:
+        raise ValueError(f"labels: one of {LABELS}, not {labels!r}")
+    return shortcut_routes(boards, moves, taught, everywhere=labels == "all")
 
 
 def attempt_examples(attempts, size=(6, 6), max_slide=5):
@@ -699,10 +774,12 @@ def _shown_example(board, moves, size, max_slide):
                    np.zeros(0, dtype=np.int16), np.zeros(0, dtype=np.float32))
 
 
-def intuition_examples(results, size=(6, 6), max_slide=5, window=None, encode=1.0, rng=None):
+def intuition_examples(results, size=(6, 6), max_slide=5, window=None, encode=1.0, rng=None, labels="own"):
     """Examples from one puzzle's solve_intuition attempts (`results`). Solved
-    attempts teach their boards, loops cut out (erase_loops, recognizing
-    boards within `window` moves; None = all) - see attempt_examples. Every
+    attempts teach their boards along solved_routes(..., `labels`, `window`):
+    by default the path played with loops cut out (erase_loops, recognizing
+    boards within `window` moves; None = all), or shortcut labels ("path",
+    "all") - see attempt_examples. Every
     move the teacher showed teaches too, solved or not: its board with that
     move as the target, unless a solved attempt already labels the board.
 
@@ -720,7 +797,7 @@ def intuition_examples(results, size=(6, 6), max_slide=5, window=None, encode=1.
             if was_taught and kept():
                 shown.setdefault(board, set()).add(move)
         if result["solved"]:
-            attempts.append(erase_loops(result["boards"], result["moves"], window))
+            attempts += [(bs, ms) for bs, ms, _ in solved_routes(result, labels, window)]
     examples = [e for e in attempt_examples(attempts, size, max_slide) if kept()]
     covered = {e.state for e in examples}
     examples += [_shown_example(board, moves, size, max_slide) for board, moves in shown.items()
@@ -902,6 +979,29 @@ def _loss(agent, examples):
     has_distance = ~torch.isnan(distance)
     if has_distance.any():
         loss = loss + 0.5 * F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10)
+    return loss
+
+
+def _weighted_loss(agent, examples, weights):
+    """_loss with a weight per example: a number scales its move, dest and distance targets; a pair (number, array)
+    gives its dest targets their own weights (one per dest_idx entry, in order). Each term is still a mean over the
+    batch's targets, so weights below 1 mean less learning, not the same learning shared out differently."""
+    x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, examples)
+    policy, dest, value = agent.net.heads(x)
+    w = torch.tensor([a[0] if isinstance(a, tuple) else a for a in weights], dtype=torch.float32, device=x.device)
+    logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
+    loss = (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1) * w).mean()
+    if dest_mask.any():
+        w_dest = torch.zeros(dest.shape)
+        for r, (e, a) in enumerate(zip(examples, weights)):
+            w_dest[r, torch.from_numpy(e.dest_idx.astype(np.int64))] = \
+                torch.from_numpy(a[1]) if isinstance(a, tuple) else float(w[r])
+        terms = F.binary_cross_entropy_with_logits(dest[dest_mask], dest_target[dest_mask], reduction="none")
+        loss = loss + (terms * w_dest.to(x.device)[dest_mask]).mean()
+    has_distance = ~torch.isnan(distance)
+    if has_distance.any():
+        terms = F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10, reduction="none")
+        loss = loss + 0.5 * (terms * w[has_distance]).mean()
     return loss
 
 
@@ -1156,25 +1256,133 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
     return history
 
 
-def online_update(agent, examples, steps=1, batch_size=256):
+def agency_weights(examples, results, shown_weight, size=(6, 6), max_slide=5, window=None, labels="own"):
+    """Loss weights (see _weighted_loss) for intuition_examples(results, ...): what a teacher's shown move taught
+    counts `shown_weight`, the student's own play 1 - with `shown_weight` < 1 it learns less from being shown a move
+    than from finding one itself (the generation effect), at 0 nothing at all. An example on a board where a move
+    was shown weighs `shown_weight` throughout; on a solved path's other boards, so do the dest targets of
+    destinations a shown move first brought a car to (the rest of the example weighs 1; with several routes from a
+    board, as shortcut labels have, a destination any of them got from a shown move). `size`, `max_slide`, `window`
+    and `labels` as given to intuition_examples."""
+    shown = {b for r in results for b, t in zip(r["boards"], r["taught"]) if t}
+    given = {}  # path board -> destinations a shown move first brought a car to, later on the path
+    for r in results:
+        if r["solved"]:
+            for path, moves, taught in solved_routes(r, labels, window):
+                for i, board in enumerate(path[:-1]):
+                    first = {}
+                    for j in range(i, len(moves)):
+                        car = moves[j][0]
+                        first.setdefault((car, dict(path[j + 1])[car]), taught[j])
+                    given.setdefault(board, set()).update(entry for entry, t in first.items() if t)
+    weights = []
+    for e in examples:
+        if e.state in shown:
+            weights.append(shown_weight)
+        elif given.get(e.state):
+            dest = [shown_weight if (car, moved) in given[e.state] else 1.0
+                    for car, _, _, moved in _destinations(e.state, size, max_slide)]
+            weights.append((1.0, np.array(dest, dtype=np.float32)))
+        else:
+            weights.append(1.0)
+    return weights
+
+
+def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, window=None, labels="own"):
+    """Learning from its own moves, solved or not, by its sense of progress: `judge`'s value head (moves to go; a
+    frozen copy of the student's starting network) rates each move the student made itself by the moves to go
+    before it minus after. Among its last moves (`recent`, a deque this adds to), the clearest `tail` share each way
+    are labelled: a step back teaches "not that move here" (the targets are every other legal move - the policy loss
+    then pushes that move's probability down), a step forward "that move here" (it is the target). Moves a solved
+    path already labels (solved_routes with `labels` and `window`) and moves a teacher showed get no label; a step
+    back needs another legal move. Returns (examples, {"forward": n, "back": n})."""
+    covered = set()
+    for r in results:
+        if r["solved"]:
+            covered |= {(b, m) for bs, ms, _ in solved_routes(r, labels, window) for b, m in zip(bs, ms)}
+    encoder = StateEncoder(size)
+    judge.net.eval()
+    moves = []
+    for r in results:
+        with torch.no_grad():
+            v = judge.net.heads(torch.from_numpy(np.stack([encoder.encode_numpy(b) for b in r["boards"]])).float()
+                                .to(judge.device))[2].cpu().numpy() * 10
+        for t, (move, taught) in enumerate(zip(r["moves"], r["taught"])):
+            if not taught:
+                recent.append(v[t] - v[t + 1])
+                moves.append((r["boards"][t], move, v[t] - v[t + 1]))
+    if len(recent) < 50:
+        return [], {"forward": 0, "back": 0}
+    lo, hi = np.quantile(recent, [tail, 1 - tail])
+    examples, counts = [], {"forward": 0, "back": 0}
+    for board, move, progress in moves:
+        if (board, move) in covered or lo < progress < hi:
+            continue
+        sd = dict(board)
+        legal = [_move_index(sd, *m, size[1], max_slide) for m, _ in neighbors(board, car_orientations(board))]
+        idx = _move_index(sd, *move, size[1], max_slide)
+        targets = [idx] if progress >= hi else [i for i in legal if i != idx]
+        if targets:
+            examples.append(Example(board, encoder.encode_numpy(board), None, legal, targets,
+                                    np.zeros(0, dtype=np.int16), np.zeros(0, dtype=np.float32)))
+            counts["forward" if progress >= hi else "back"] += 1
+    return examples, counts
+
+
+def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency_step="off", rng=None):
     """Learns from `examples` the way a person learns from one puzzle: `steps`
     passes over just these examples (one gradient step per batch), no replay
-    of anything earlier, no validation, nothing to rewind to."""
-    examples = list(examples)
+    of anything earlier, no validation, nothing to rewind to. `weights`: one
+    per example (see _weighted_loss); None trains them all alike (_loss).
+
+    Adam divides each step by the recent size of the gradients, so it cancels a
+    weight shared by a whole batch: with `agency_step` "off" the weights only
+    set how examples count against each other, and a batch of shown moves at
+    weight 0.1 learns as much as one of the student's own. The other settings
+    make the weights also set how much is learned, by the batch's mean move
+    weight m (the number, or a pair's first entry); its loss is divided by m,
+    so only the step depends on it:
+    - "scale": the step is scaled by m (a tenth of a step at m = 0.1);
+    - "skip": the step is taken with probability m, else skipped (a full step
+      one time in ten at m = 0.1) - the same learning on average.
+    At m = 0 no step is taken. `rng` (default: the random module) shuffles and
+    skips."""
+    assert agency_step in ("off", "scale", "skip"), agency_step
+    rng = rng or random
+    examples = list(examples) if weights is None else list(zip(examples, weights))
+    costly = agency_step != "off" and weights is not None
+    base = [g["lr"] for g in agent.optimizer.param_groups]
     agent.net.train()
-    for _ in range(steps):
-        random.shuffle(examples)
-        for i in range(0, len(examples), batch_size):
-            loss = _loss(agent, examples[i:i + batch_size])
-            agent.optimizer.zero_grad()
-            loss.backward()
-            agent.optimizer.step()
+    try:
+        for _ in range(steps):
+            rng.shuffle(examples)
+            for i in range(0, len(examples), batch_size):
+                batch = examples[i:i + batch_size]
+                if costly:
+                    mean = float(np.mean([w[0] if isinstance(w, tuple) else w for _, w in batch]))
+                    if mean <= 0 or agency_step == "skip" and rng.random() >= mean:
+                        continue
+                    for g, lr in zip(agent.optimizer.param_groups, base):
+                        g["lr"] = lr * (mean if agency_step == "scale" else 1.0)
+                if weights is None:
+                    loss = _loss(agent, batch)
+                else:
+                    loss = _weighted_loss(agent, [e for e, _ in batch], [w for _, w in batch])
+                    if costly:
+                        loss = loss / mean
+                agent.optimizer.zero_grad()
+                loss.backward()
+                agent.optimizer.step()
+    finally:
+        for g, lr in zip(agent.optimizer.param_groups, base):
+            g["lr"] = lr
     agent._scores = {}
 
 
 def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,
                      window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
-                     surrender=None):
+                     surrender=None, shown_weight=1.0, judge=None, progress_weight=0.0, progress_tail=0.2,
+                     labels="own", agency_step="off"):
     """A session in which a pure-intuition student (`agent`) learns online, a
     few puzzles at a time, under human-like limits on learning:
 
@@ -1185,6 +1393,9 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
       probability `encode` (see intuition_examples);
     - limited hindsight: loops are cut out of a solved attempt only when it
       returned to a board seen within the last `window` moves (None: any);
+      or, with `labels` "path" / "all", shortcut labels instead: shortest
+      routes through every board the attempt visited (shortcut_routes;
+      `window` then doesn't apply);
     - no rewinding: no validation, no keeping an earlier, better version.
 
     `block` 1 learns after every puzzle. A larger block gives the network
@@ -1200,13 +1411,29 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
     SurrenderRule), the student may also give up on a puzzle - counting the
     moves of all its attempts at it - which ends the puzzle: no restart.
 
+    Agency (`shown_weight`, see agency_weights): what a shown move teaches
+    counts this much, the student's own play 1. Progress labels (`judge`, an
+    agent whose value head rates moves - see progress_examples): with
+    `progress_weight` > 0 the student also learns from its own moves, solved
+    or not, the clearest `progress_tail` share each way of its last 1000,
+    each label weighing `progress_weight`. At the defaults (1, no judge) it
+    learns as before. `agency_step` "scale" or "skip" (see online_update): weights below 1
+    also shrink the update, not only how examples count against each other -
+    with "off", a block where every move was shown learns at full strength.
+
     Returns one dict per puzzle, in order: puzzle (index), solved, surrendered, attempts,
     moves (all attempts), taught, interventions, examples learned
-    from. `on_puzzle(n, agent)`, if given, is called after each update with
+    from (progress labels included), progress_labels (by direction, with a
+    judge). `on_puzzle(n, agent)`, if given, is called after each update with
     the number of puzzles played so far - e.g. to snapshot the student."""
     rng = random.Random(seed)
+    # the updates' own shuffling and skipping, apart from play; "off" keeps the random module, as before
+    update_rng = random.Random(seed + 104729) if agency_step != "off" else None
     record = []
-    pending = []
+    pending, pending_w = [], []
+    progress = judge is not None and progress_weight > 0
+    weighted = shown_weight != 1 or progress
+    recent = deque(maxlen=1000)
     for i, state in enumerate(puzzles):
         results = []
         if teacher is not None:
@@ -1221,18 +1448,26 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
                 teacher.end_attempt(results[-1])
             if results[-1]["solved"] or results[-1]["surrendered"]:
                 break
-        examples = intuition_examples(results, agent.size, agent.max_slide, window, encode, rng)
+        examples = intuition_examples(results, agent.size, agent.max_slide, window, encode, rng, labels)
+        if weighted:
+            pending_w += agency_weights(examples, results, shown_weight, agent.size, agent.max_slide, window, labels)
+        extra, counts = progress_examples(results, judge, recent, progress_tail, agent.size, agent.max_slide,
+                                          window, labels) if progress else ([], None)
+        examples += extra
+        pending_w += [progress_weight] * len(extra)
         pending += examples
         record.append({"puzzle": i, "solved": results[-1]["solved"], "surrendered": results[-1]["surrendered"],
                        "attempts": len(results),
                        "moves": sum(len(r["moves"]) for r in results),
                        "taught": sum(sum(r["taught"]) for r in results),
                        "interventions": sum(sum(r["taught"]) for r in results), "examples": len(examples),
-                       "teacher_counts": dict(teacher.counts) if teacher is not None else {}})
+                       "teacher_counts": dict(teacher.counts) if teacher is not None else {}}
+                      | ({"progress_labels": counts} if progress else {}))
         if (i + 1) % block == 0 or i + 1 == len(puzzles):
             if pending:
-                online_update(agent, pending, steps)
-            pending = []
+                online_update(agent, pending, steps, weights=pending_w if weighted else None,
+                              agency_step=agency_step, rng=update_rng)
+            pending, pending_w = [], []
             if on_puzzle is not None:
                 on_puzzle(i + 1, agent)
     return record

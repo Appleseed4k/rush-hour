@@ -36,7 +36,8 @@ from them).
 
 Saved under <out>/<run>/: config.json, initial.pt, and per teacher a folder
 with sessions.json (per student, one record per puzzle), snapshots
-student{s}_puzzle{n}.pt (n = simulated puzzles played) and results.json (test attempts). Running a
+student{s}_puzzle{n}.pt (n = simulated puzzles played) and results.json (test attempts); progress/ says how
+far a run under way has got (progress(); run_queue.py turns it into a progress bar). Running a
 saved run again with the same settings adds the teachers it doesn't have yet (and finishes any that
 stopped before saving their sessions), leaving the others as they are. load_session()
 reads a run back; session_curve() and test_curve() summarize it, with
@@ -54,6 +55,7 @@ import os
 import random
 import shutil
 import statistics
+import time
 
 import torch
 from multiprocessing import Pool
@@ -69,6 +71,9 @@ TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_
 # that stopped early), skipping the ones already played. (flag_penalty: retired with the flag teacher; runs
 # saved before still have it.)
 SAME_RUN_IGNORES = {"teachers", "processes", "out", "test_only", "overwrite", "surrender_table", "flag_penalty"}
+# Settings added after runs were saved, and what those runs did: a saved run without one counts as having its default.
+ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 0.2, "labels": "own",
+                  "agency_step": "off"}
 
 
 # --- configuration -----------------------------------------------------------------------------
@@ -98,6 +103,21 @@ def parse_args(argv=None):
     ap.add_argument("--block", type=int, default=None,
                     help="puzzles per update (default: the multiplier - one update per human trial)")
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--shown-weight", type=float, default=1.0,
+                    help="agency: how much what a shown move teaches counts, the student's own play 1 "
+                         "(rl.agency_weights; 0: nothing learned from being shown)")
+    ap.add_argument("--agency-step", choices=["off", "scale", "skip"], default="off",
+                    help="how agency shrinks the update (rl.online_update): off = it doesn't (Adam cancels a weight "
+                         "shared by the whole batch); scale = each step scaled by the batch's mean weight; skip = "
+                         "each step taken with that probability")
+    ap.add_argument("--progress-weight", type=float, default=0.0,
+                    help="progress labels: the student also learns from its own moves by its starting network's "
+                         "sense of progress, each label weighing this (rl.progress_examples; 0: off)")
+    ap.add_argument("--progress-tail", type=float, default=0.2,
+                    help="share of its recent moves labelled each way (steps forward, steps back)")
+    ap.add_argument("--labels", choices=rl.LABELS, default="own",
+                    help="what a solved attempt teaches: own = the path played, loops cut out (--window); path / all = "
+                         "shortcut labels, shortest routes through the boards it visited (rl.shortcut_routes)")
     ap.add_argument("--surrender", action="store_true",
                     help="students may give up on a puzzle as people do (a rule fitted to the human data, "
                          "human_data.surrender_hazard); the move cap still applies")
@@ -195,8 +215,8 @@ def check_config(run_dir, config):
     if os.path.exists(path) and os.path.exists(os.path.join(run_dir, "initial.pt")):
         with open(path) as f:
             saved = json.load(f)
-        differs = sorted(k for k in set(saved) | set(config)
-                         if k not in SAME_RUN_IGNORES and saved.get(k) != config.get(k))
+        differs = sorted(k for k in set(saved) | set(config) if k not in SAME_RUN_IGNORES
+                         and saved.get(k, ADDED_SETTINGS.get(k)) != config.get(k, ADDED_SETTINGS.get(k)))
         if differs:
             raise SystemExit(f"{run_dir} exists with other settings ({', '.join(differs)}): use another run name, "
                              f"--test-only or --overwrite")
@@ -214,12 +234,56 @@ def check_config(run_dir, config):
 
 # --- running -----------------------------------------------------------------------------------
 
+def write_progress(run_dir, name, **values):
+    """Records how far a run has got in <run_dir>/progress/<name>.json (with the time), for progress() to read
+    while the run goes on: per teacher, "<folder>_sessions" (start), "<folder>_student<s>" (puzzles done, of
+    total) and "<folder>_tests" (attempts done, of total)."""
+    d = os.path.join(run_dir, "progress")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{name}.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(values | {"time": time.time()}, f)
+    os.replace(path + ".tmp", path)
+
+
+def progress(run, teachers, out=OUT):
+    """How far `run` has got with each of `teachers` (specs): {spec: (share of its sessions played, share of its
+    test attempts done)} - 1 for what is saved, from the progress files while a step is under way, else 0."""
+    run_dir = os.path.join(out, run)
+
+    def read(name):
+        try:
+            with open(os.path.join(run_dir, "progress", f"{name}.json")) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    shares = {}
+    for spec in teachers:
+        teacher_dir = os.path.join(run_dir, folder(spec))
+        if os.path.exists(os.path.join(teacher_dir, "sessions.json")):
+            played = 1.0
+        else:
+            start = read(f"{folder(spec)}_sessions")
+            students = [read(f"{folder(spec)}_student{s}") for s in range(start["students"])] if start else []
+            played = sum(p["done"] for p in students if p) / (start["students"] * start["puzzles"]) if start else 0.0
+        tests = read(f"{folder(spec)}_tests")
+        if tests is not None and tests["done"] < tests["total"]:
+            tested = tests["done"] / tests["total"]
+        else:
+            tested = float(played == 1.0 and os.path.exists(os.path.join(teacher_dir, "results.json")))
+        shares[spec] = (played, tested)
+    return shares
+
+
 def _student(job):
     """One simulated participant's session (in a worker, on the CPU): returns
     its per-puzzle record, saving snapshots at the test points."""
     student, spec, config, puzzles, caps, run_dir = job
     torch.set_num_threads(1)
     agent = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt"), lr=config["lr"])
+    progress_weight = config.get("progress_weight", 0.0)
+    judge = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt")) if progress_weight > 0 else None
     teacher_dir = os.path.join(run_dir, folder(spec))
     points = test_points(config, len(puzzles))
     saved = [0]
@@ -230,6 +294,7 @@ def _student(job):
             if saved[0] < p <= n:
                 agent.save(os.path.join(teacher_dir, f"student{student:02d}_puzzle{p:03d}.pt"))
         saved[0] = n
+        write_progress(run_dir, f"{folder(spec)}_student{student}", done=n, total=len(puzzles))
 
     record = rl.learning_session(
         agent, [s for _, _, s in puzzles], make_teacher(spec), max_attempts=config["max_attempts"],
@@ -238,7 +303,9 @@ def _student(job):
         window=None if config["window"] < 0 else config["window"], encode=config["encode"],
         steps=config["steps"], block=config.get("block", 1),
         seed=config["seed"] + 7919 * (student + 1),
-        on_puzzle=snapshot)
+        on_puzzle=snapshot, shown_weight=config.get("shown_weight", 1.0), judge=judge,
+        progress_weight=progress_weight, progress_tail=config.get("progress_tail", 0.2),
+        labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"))
     m = multiplier(config)
     for entry, (i, d, _) in zip(record, puzzles):  # trial: the human trial this puzzle counts toward
         entry.update(step=entry["puzzle"] + 1, trial=entry["puzzle"] // m + 1, puzzle=i, distance=d)
@@ -249,6 +316,9 @@ def run_sessions(spec, config, session, caps, run_dir):
     teacher_dir = os.path.join(run_dir, folder(spec))
     os.makedirs(teacher_dir, exist_ok=True)
     jobs = [(s, spec, config, order(session, s, config["seed"]), caps, run_dir) for s in range(config["students"])]
+    write_progress(run_dir, f"{folder(spec)}_sessions", students=config["students"], puzzles=len(session))
+    for s in range(config["students"]):
+        write_progress(run_dir, f"{folder(spec)}_student{s}", done=0, total=len(session))
     sessions = {}
     with Pool(config["processes"]) as pool:
         for student, record in tqdm(pool.imap_unordered(_student, jobs), total=len(jobs),
@@ -283,14 +353,20 @@ def test(spec, config, test_puzzles, caps, run_dir, n_puzzles):
              hash((config["seed"], i, r)) & 0xFFFFFFFF, rule)
             for file in files for i, (d, state) in enumerate(test_puzzles) for r in range(n_runs)]
     per_file = len(test_puzzles) * n_runs
+    write_progress(run_dir, f"{folder(spec)}_tests", done=0, total=len(jobs))
+    attempts = []
     with Pool(config["processes"]) as pool:
-        attempts = list(tqdm(pool.imap(_test_job, jobs, chunksize=8), total=len(jobs),
-                             desc=f"testing ({teacher_name(spec)})"))
+        for attempt in tqdm(pool.imap(_test_job, jobs, chunksize=8), total=len(jobs),
+                            desc=f"testing ({teacher_name(spec)})"):
+            attempts.append(attempt)
+            if len(attempts) % 200 == 0:
+                write_progress(run_dir, f"{folder(spec)}_tests", done=len(attempts), total=len(jobs))
     by_file = {file: attempts[k * per_file:(k + 1) * per_file] for k, file in enumerate(files)}
     for s, n in todo:
         results["students"].setdefault(str(s), {})[str(n)] = by_file[_snapshot(run_dir, spec, s, n)]
     with open(path, "w") as f:
         json.dump(results, f)
+    write_progress(run_dir, f"{folder(spec)}_tests", done=len(jobs), total=len(jobs))
     return results
 
 
