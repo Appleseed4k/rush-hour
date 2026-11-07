@@ -135,6 +135,136 @@ class Random(Teacher):
         return self.rng.random() < self.p
 
 
+def level_shares(state, distances=None):
+    """Per distance to the goal k (1 .. the farthest board): the share of all legal moves, over every board k
+    from the goal, that are optimal (lead to a board k - 1 away) - how rare the right move is at that distance.
+    Students who fail a long puzzle mostly stall at one distance, usually the one where this share is lowest."""
+    distances = distances or multi_bfs(state)
+    orientations = car_orientations(state)
+    down, total = Counter(), Counter()
+    for board, k in distances.items():
+        if k == 0:
+            continue
+        for _, nxt in neighbors(board, orientations):
+            total[k] += 1
+            down[k] += distances[nxt] == k - 1
+    return {k: down[k] / total[k] for k in sorted(total)}
+
+
+class Wall(Teacher):
+    """Helps only at the wall a student is stuck at: the closest it has got to the goal on this puzzle, when it
+    hasn't got any closer for `patience` x the puzzle's optimal length moves of its own (counted since its last new
+    closest approach). Then, once it is back at that distance, it shows the optimal move - the step through the
+    wall it keeps failing to find - and steps back; anywhere else, and before then, the student plays alone.
+
+    Why the student's progress, not the layout: in unhelped students' traced play (teach.Trace), failing students'
+    closest approaches cluster per puzzle (a wall), but the distance level whose moves are least often optimal
+    (level_shares) - raw or relative to the typical share at that distance - picks it out poorly (8-14% exactly),
+    and students spend almost no moves at a wall (median 0) before getting through or falling back. Being stuck,
+    by contrast, separates attempts that would fail from ones that would succeed: at 24-26 moves, 2 x length
+    stuck moves fires on 55% of attempts that went on to fail and 19% of ones that went on to solve; stuck
+    stretches grow with length, hence patience in units of it. About a third of failing attempts never come back
+    to their closest approach; this teacher doesn't help them.
+
+    counts: "shown", "stuck" (1 if it ever triggered), "best" (the closest approach at the end)."""
+
+    def __init__(self, patience=2.0):
+        super().__init__()
+        self.patience = float(patience)
+        self.name = f"wall {self.patience:g}"
+        self._for = None
+
+    def start(self, state, rng):
+        super().start(state, rng)
+        if self._for != state:  # a new puzzle (a later attempt at the same one carries on)
+            self._for = state
+            self._d = self.distances()[state]
+            self.best, self.since = self._d, 0
+
+    def wants_to_teach(self, state, step, proposal=None):
+        return self.since >= self.patience * self._d and self.distances()[state] == self.best > 0
+
+    def advise(self, state, step, proposal=None):
+        if not self.wants_to_teach(state, step):
+            return None
+        self.counts["shown"] += 1
+        self.counts["stuck"] = 1
+        return self.optimal_move(state)
+
+    def observe(self, state, move, next_state, taught):
+        k = self.distances()[next_state]
+        if k < self.best:
+            self.best, self.since = k, 0
+        elif not taught:
+            self.since += 1
+        self.counts["best"] = self.best
+
+
+class Stuck(Teacher):
+    """Wall's trigger, helping wherever the student is: once it has made `patience` x the puzzle's optimal length
+    moves of its own without getting closer to the goal than ever before on this puzzle, it shows the optimal move
+    on every turn - from wherever the student has wandered to - until the board is closer than the student's
+    closest approach (led back and through the wall), then steps back and the count starts again. Reaches the
+    failing attempts that never come back to their closest approach (about a third), which Wall can't.
+
+    counts: "shown", "stuck" (1 if it ever triggered), "best"."""
+
+    def __init__(self, patience=1.0):
+        super().__init__()
+        self.patience = float(patience)
+        self.name = f"stuck {self.patience:g}"
+        self._for = None
+
+    def start(self, state, rng):
+        super().start(state, rng)
+        if self._for != state:
+            self._for = state
+            self._d = self.distances()[state]
+            self.best, self.since = self._d, 0
+
+    def wants_to_teach(self, state, step, proposal=None):
+        return self.since >= self.patience * self._d and self.distances()[state] > 0
+
+    def advise(self, state, step, proposal=None):
+        if not self.wants_to_teach(state, step):
+            return None
+        self.counts["shown"] += 1
+        self.counts["stuck"] = 1
+        return self.optimal_move(state)
+
+    def observe(self, state, move, next_state, taught):
+        k = self.distances()[next_state]
+        if k < self.best:
+            self.best, self.since = k, 0
+        elif not taught:
+            self.since += 1
+        self.counts["best"] = self.best
+
+
+class Trace(Teacher):
+    """Never teaches: only records each attempt's path, for checking a teacher's model of the student offline
+    (e.g. Bayesian's calibration) against how unhelped students really play. counts["path"]: the distance to the
+    goal at the start and after each move, every attempt in a row; counts["max_distance"]: the farthest any
+    board of the puzzle is from the goal."""
+    name = "trace"
+
+    def __init__(self, _=1.0):
+        super().__init__()
+
+    def wants_to_teach(self, state, step, proposal=None):
+        return False
+
+    def advise(self, state, step, proposal=None):
+        return None
+
+    def observe(self, state, move, next_state, taught):
+        path = self.counts.setdefault("path", [])
+        if not path:
+            path.append(self.distances()[state])
+            self.counts["max_distance"] = max(self.distances().values())
+        path.append(self.distances()[next_state])
+
+
 def _acts(teacher):
     """Whether `teacher` acts on a mistake it noticed: always at q >= 1 (no
     random draw), else with probability q."""
@@ -483,20 +613,234 @@ class Bayesian(Teacher):
         K, cap = self._K, self._cap
         k = np.arange(K + 1)
         b = np.clip(k, 1, self.BINS) - 1
-        p = 1 / (1 + np.exp(-(self.skill[b][None, :] + math.exp(self.log_tau) * self.Z[:, None])))
+        p = 1 / (1 + np.exp(-(self.skill[b][None, :] + self._logit_extra(k)[None, :] + math.exp(self.log_tau) * self.Z[:, None])))
         worse = ((self.worse_strength * self.worse + self.worse_moves) / (self.worse_strength + self.mistakes))[b]
         persistence = _softmax(self.persistence_prior + self.persistence_loglik)
         hazard = persistence @ np.minimum(1.0, np.outer(self.S, self._human_rate(np.arange(cap + 1))))
         down, up, out = np.maximum(k - 1, 0), np.minimum(k + 1, K), k == 0
         value = np.broadcast_to(out.astype(float), p.shape)  # at the cap: solved only if red is out
         alone = value  # the same, never teaching
+        solve = value if self.TRACKS_SOLVE else None  # the chance of solving, following the plan
         self._advantage = np.empty((cap, len(self.Z), K + 1))
+        if self.KEEPS_ALONE:
+            self._alone = np.empty((cap, len(self.Z), K + 1))
         for m in range(cap - 1, -1, -1):
             after = np.where(out, 1.0, (1 - hazard[m + 1]) * value)  # value once the next move lands on k
             play = p * after[:, down] + (1 - p) * (worse * after[:, up] + (1 - worse) * after)
-            show = after[:, down] - self.cost
+            if solve is not None:
+                after_solve = np.where(out, 1.0, (1 - hazard[m + 1]) * solve)
+            show = self._show_value(after[:, down], after_solve[:, down] if solve is not None else None)
             self._advantage[m] = show - play
+            if solve is not None:
+                play_solve = p * after_solve[:, down] + (1 - p) * (worse * after_solve[:, up]
+                                                                   + (1 - worse) * after_solve)
+                solve = np.where(out, 1.0, np.where(show > play, after_solve[:, down], play_solve))
             value = np.where(out, 1.0, np.maximum(show, play))
             after = np.where(out, 1.0, (1 - hazard[m + 1]) * alone)
             alone = np.where(out, 1.0, p * after[:, down] + (1 - p) * (worse * after[:, up] + (1 - worse) * after))
+            if self.KEEPS_ALONE:
+                self._alone[m] = alone
         self.counts["predicted_solve"] = float(np.exp(self.LOG_PZ) @ alone[:, self._d])
+
+    TRACKS_SOLVE = False  # whether _plan also follows the chance of solving, for _show_value
+    KEEPS_ALONE = False  # whether _plan keeps the chance of solving untaught from every (moves made, difficulty, k)
+
+    def _logit_extra(self, k):
+        """Added to the skill logit on boards `k` (an array of distances) from the goal: none here."""
+        return np.zeros(len(k))
+
+    def _show_value(self, after_down, solve_down=None):
+        """The value of showing the move, given the value of the board it leads to (and, with TRACKS_SOLVE,
+        the chance of solving from there): that value, less the cost."""
+        return after_down - self.cost
+
+
+class LearningBayesian(Bayesian):
+    """Bayesian, aiming at what the student learns rather than at solving the puzzle in front of it. The student
+    learns from the puzzles it solves (their boards become examples), and a move it was shown teaches only
+    `agency` of what a move of its own does (rl.agency_weights). So a solved puzzle is worth about
+    1 - (1 - agency) x the share of its moves that were shown, an unsolved one nothing: help pays where it turns a
+    puzzle the student would fail into one it solves, and costs a share of that solve where it would have got
+    there alone.
+
+    Planned as Bayesian's, with that value: each move shown costs c = (1 - agency) / n times the chance of then
+    solving, n the moves a solved attempt at this puzzle is expected to take (the student's recent moves /
+    optimal on the puzzles it solved, times this one's optimal length). Summed over the moves shown, the plan's
+    value is then exactly E[solved x (1 - c x moves shown)] under the teacher's model of the student. There is
+    no budget: how much it shows follows from its beliefs - most where a solve is unlikely without help - and
+    falls as the student gets better. counts: as Bayesian's, with "cost" the per-move share c."""
+
+    TRACKS_SOLVE = True
+
+    def __init__(self, agency=0.0, ratio=2.5, **kwargs):
+        super().__init__(budget=1.0, cost_rate=0.0, **kwargs)  # budget unused: nothing adjusts the cost
+        self.agency = agency
+        self.name = f"bayes-learn {agency:g}"
+        self.ratio = ratio  # recent moves / optimal over the solved puzzles, as an average decaying by 0.9
+
+    def _begin_puzzle(self, state):
+        d = self.distances()[state]
+        self.cost = (1 - self.agency) / max(1.0, self.ratio * d)
+        super()._begin_puzzle(state)
+
+    def end_attempt(self, result):
+        if result["solved"]:
+            self.ratio = 0.9 * self.ratio + 0.1 * (self._offset + len(result["moves"])) / max(1, self._d)
+        super().end_attempt(result)
+
+    def _show_value(self, after_down, solve_down=None):
+        return after_down - self.cost * solve_down
+
+
+class TwoEnds(Bayesian):
+    """Bayesian's model of the student, recalibrated against unhelped students' traced play (teach.Trace): the
+    chance a move of the student's own is optimal depends on how far the board is from the goal AND from the
+    puzzle's start - high at both ends (the puzzles start at their farthest board, where no move can make things
+    worse; near the goal the plan is in view), low in the middle - as a logit per distance to the goal plus one
+    per distance below the starting distance (prior sd `start_sd`), each puzzle shifted as before. With only the
+    first, a long puzzle's hard middle borrowed the easy starts of short puzzles at the same distance, and the
+    teacher overrated long puzzles (24-26 moves: 0.73 predicted untaught against 0.43 solved). Both terms run
+    to 16, and evidence is kept longer (`decay` 0.998 over up to `window` 1000 puzzles), since long puzzles are
+    a fraction of the recent ones. On the trace: 24-26 moves 0.53 against 0.43, Brier 0.173 (Bayesian 0.200).
+
+    A mixin: Bayesian2 and LearningBayesian2 are Bayesian and LearningBayesian with this model."""
+
+    BINS = 16
+    START_BINS = 16
+
+    def __init__(self, *args, start_sd=1.0, decay=0.998, window=1000, **kwargs):
+        super().__init__(*args, decay=decay, window=window, **kwargs)
+        self.start_skill = np.zeros(self.START_BINS)
+        self.start_sd = start_sd
+
+    def _cells(self, k):
+        return min(k, self.BINS) - 1, min(max(self._d - k, 0), self.START_BINS - 1)
+
+    def _begin_puzzle(self, state):
+        self._d = self.distances()[state]  # _plan (in super's _begin_puzzle) reads it through _logit_extra
+        super()._begin_puzzle(state)
+        self._cell_counts = np.zeros((2, self.BINS, self.START_BINS))  # optimal, own moves per cell
+
+    def observe(self, state, move, next_state, taught):
+        self._moves += 1
+        if taught:
+            return
+        distances = self.distances()
+        k, after = distances[state], distances[next_state]
+        b, j = self._cells(k)
+        good = after == k - 1
+        self._optimal[b] += good
+        self._own[b] += 1
+        self._cell_counts[0, b, j] += good
+        self._cell_counts[1, b, j] += 1
+        if not good:
+            self._mistakes[b] += 1
+            self._worse[b] += after == k + 1
+        logit = self.skill[b] + self.start_skill[j] + math.exp(self.log_tau) * self.Z
+        self._shift += _log_sigmoid(logit) if good else _log_sigmoid(-logit)
+
+    def _end_puzzle(self):
+        if self._pending:  # the history keeps the moves per cell
+            self._optimal, self._own = self._cell_counts[0].ravel(), self._cell_counts[1].ravel()
+        super()._end_puzzle()
+
+    def _fit(self):
+        """As Bayesian._fit, with the distance-from-start terms: MAP, each puzzle's difficulty integrated out."""
+        from scipy.optimize import minimize
+        optimal = np.array([o for o, _ in self.history])
+        own = np.array([n for _, n in self.history])
+        weight = self.decay ** np.arange(len(own) - 1, -1, -1)
+        B, J, Z = self.BINS, self.START_BINS, self.Z
+        gb, sb = np.repeat(np.arange(B), J), np.tile(np.arange(J), B)
+
+        def objective(x):
+            skill, start, level, log_tau = x[:B], x[B:B + J], x[B + J], x[B + J + 1]
+            tau = math.exp(log_tau)
+            logit = (skill[gb] + start[sb])[None, :] + tau * Z[:, None]  # (difficulty, cell)
+            ll = optimal @ _log_sigmoid(logit).T + (own - optimal) @ _log_sigmoid(-logit).T + self.LOG_PZ
+            top = ll.max(1, keepdims=True)
+            lse = top[:, 0] + np.log(np.exp(ll - top).sum(1))
+            r = weight[:, None] * np.exp(ll - lse[:, None])
+            resid = r.T @ optimal - (r.T @ own) / (1 + np.exp(-logit))
+            value = -weight @ lse + ((skill - level) ** 2).sum() / (2 * self.spread ** 2) \
+                + (start ** 2).sum() / (2 * self.start_sd ** 2) \
+                + (level - self.prior_mean) ** 2 / (2 * self.prior_sd ** 2) \
+                + (log_tau - math.log(self.tau0)) ** 2 / (2 * self.tau_sd ** 2)
+            cell = resid.sum(0)
+            grad = np.empty(B + J + 2)
+            grad[:B] = -np.bincount(gb, cell, B) + (skill - level) / self.spread ** 2
+            grad[B:B + J] = -np.bincount(sb, cell, J) + start / self.start_sd ** 2
+            grad[B + J] = -(skill - level).sum() / self.spread ** 2 + (level - self.prior_mean) / self.prior_sd ** 2
+            grad[B + J + 1] = -tau * (resid.sum(1) @ Z) + (log_tau - math.log(self.tau0)) / self.tau_sd ** 2
+            return value, grad
+
+        x = minimize(objective, np.r_[self.skill, self.start_skill, self.level, self.log_tau], jac=True,
+                     method="L-BFGS-B").x
+        self.skill, self.start_skill = x[:B], x[B:B + J]
+        self.level, self.log_tau = float(x[B + J]), float(x[B + J + 1])
+
+    def _logit_extra(self, k):
+        return self.start_skill[np.clip(self._d - np.asarray(k), 0, self.START_BINS - 1)]
+
+
+class Bayesian2(TwoEnds, Bayesian):
+    """Bayesian with the recalibrated model of the student (TwoEnds)."""
+
+    def __init__(self, budget=0.1, **kwargs):
+        super().__init__(budget, **kwargs)
+        self.name = f"bayes2 {budget}"
+
+
+class LearningBayesian2(TwoEnds, LearningBayesian):
+    """LearningBayesian with the recalibrated model of the student (TwoEnds)."""
+
+    def __init__(self, agency=0.0, **kwargs):
+        super().__init__(agency, **kwargs)
+        self.name = f"bayes-learn2 {agency:g}"
+
+
+class StuckBayes(Bayesian2):
+    """Wall's "when" with Bayesian's "how much": it stays out until the student is stuck - `patience` x the
+    puzzle's optimal length moves of its own without a new closest approach of its own - and from then on, wherever
+    the student is, shows the optimal move whenever its model of the student (Bayesian2's, this puzzle's difficulty
+    updated by every move the student has made on it, being stuck included) gives it less than `theta` chance of
+    solving untaught from here, with the moves and patience it has left. So it leads the student only as far as
+    it thinks the student needs, and steps back in at once if the student slides back, without waiting out another
+    patience - until the student gets closer than ever by a move of its own, which closes the gate again.
+    No budget: the spending follows from theta and patience.
+
+    counts: as Bayesian's, plus "stuck" (1 if the gate ever opened) and "best"."""
+
+    KEEPS_ALONE = True
+
+    def __init__(self, theta=0.5, patience=1.0, **kwargs):
+        super().__init__(budget=0.0, **kwargs)  # no budget: nothing adjusts the cost (unused here)
+        self.theta, self.patience = float(theta), float(patience)
+        self.name = f"stuck-bayes {self.theta:g}" + (f" p{self.patience:g}" if self.patience != 1 else "")
+
+    def _begin_puzzle(self, state):
+        super()._begin_puzzle(state)
+        self.best, self.since = self._d, 0
+
+    def solve_alone(self, state, step):
+        """The model's chance of solving untaught from `state`, `step` moves into this attempt."""
+        k, m = self.distances()[state], self._offset + step
+        if k == 0:
+            return 1.0
+        if m >= self._cap:
+            return 0.0
+        return float(_softmax(self._shift) @ self._alone[m, :, min(k, self._K)])
+
+    def wants_to_teach(self, state, step, proposal=None):
+        if self.distances()[state] == 0 or self.since < self.patience * self._d:
+            return False
+        self.counts["stuck"] = 1
+        return self.solve_alone(state, step) < self.theta
+
+    def observe(self, state, move, next_state, taught):
+        super().observe(state, move, next_state, taught)
+        k = self.distances()[next_state]
+        if not taught:
+            self.since = 0 if k < self.best else self.since + 1
+        self.best = min(self.best, k)
+        self.counts["best"] = self.best

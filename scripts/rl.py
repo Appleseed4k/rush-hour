@@ -1,8 +1,10 @@
+import copy
 import io
 import json
 import os
 import random
 from collections import Counter, deque
+from types import SimpleNamespace
 from multiprocessing import Pool
 
 from tqdm import tqdm
@@ -248,6 +250,27 @@ class PolicyAgent():
         self.device = "cpu"
         self.to(device)
         self._scores = {}
+        self.train_device = None  # see train_on
+        self._trainer = None
+
+    def train_on(self, device):
+        """Has online_update train a copy of the network on `device` (e.g. "mps"), with its own Adam, while
+        play stays on this agent's device: one board at a time is faster on the CPU, a batch of 256 on the GPU.
+        After each update the copy's weights are copied back. None: train the network itself. Returns self."""
+        self.train_device, self._trainer = device, None
+        return self
+
+    def _learner(self):
+        """What online_update trains: this agent, or (with train_on) the copy on the training device - made
+        from the current weights the first time, then kept with its optimizer's state."""
+        if self.train_device is None:
+            return self
+        if self._trainer is None:
+            net = copy.deepcopy(self.net).to(self.train_device)
+            self._trainer = SimpleNamespace(
+                net=net, device=self.train_device, action_space=self.action_space,
+                optimizer=optim.Adam(net.parameters(), lr=self.optimizer.param_groups[0]["lr"]))
+        return self._trainer
 
     def to(self, device):
         """Moves the network to `device` (e.g. "mps" for training, "cpu" for
@@ -1346,11 +1369,13 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     - "skip": the step is taken with probability m, else skipped (a full step
       one time in ten at m = 0.1) - the same learning on average.
     At m = 0 no step is taken. `rng` (default: the random module) shuffles and
-    skips."""
+    skips. With agent.train_on(device), the steps run on a copy of the network
+    on that device, and the new weights are copied back at the end."""
     assert agency_step in ("off", "scale", "skip"), agency_step
     rng = rng or random
     examples = list(examples) if weights is None else list(zip(examples, weights))
     costly = agency_step != "off" and weights is not None
+    player, agent = agent, agent._learner()  # with train_on, train the copy on the training device
     base = [g["lr"] for g in agent.optimizer.param_groups]
     agent.net.train()
     try:
@@ -1376,7 +1401,9 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     finally:
         for g, lr in zip(agent.optimizer.param_groups, base):
             g["lr"] = lr
-    agent._scores = {}
+    if agent is not player:
+        player.net.load_state_dict({k: v.to(player.device) for k, v in agent.net.state_dict().items()})
+    player._scores = {}
 
 
 def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,

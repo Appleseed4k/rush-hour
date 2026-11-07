@@ -57,6 +57,12 @@ import shutil
 import statistics
 import time
 
+# One BLAS thread per process: the students run in parallel workers (one per core), and numpy's OpenBLAS otherwise
+# starts a thread per core in every one of them - a Bayesian teacher's refit after each puzzle then ran ~30x slower.
+# Set before numpy is first imported (spawned workers inherit the environment).
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import torch
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -73,7 +79,7 @@ TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_
 SAME_RUN_IGNORES = {"teachers", "processes", "out", "test_only", "overwrite", "surrender_table", "flag_penalty"}
 # Settings added after runs were saved, and what those runs did: a saved run without one counts as having its default.
 ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 0.2, "labels": "own",
-                  "agency_step": "off"}
+                  "agency_step": "off", "train_device": "cpu"}
 
 
 # --- configuration -----------------------------------------------------------------------------
@@ -110,6 +116,10 @@ def parse_args(argv=None):
                     help="how agency shrinks the update (rl.online_update): off = it doesn't (Adam cancels a weight "
                          "shared by the whole batch); scale = each step scaled by the batch's mean weight; skip = "
                          "each step taken with that probability")
+    ap.add_argument("--train-device", default="cpu",
+                    help="where the students' updates run (rl.PolicyAgent.train_on), e.g. mps: all the workers "
+                         "share the GPU; play and tests stay on the CPU. The GPU's arithmetic differs slightly, "
+                         "so compare runs made on the same device")
     ap.add_argument("--progress-weight", type=float, default=0.0,
                     help="progress labels: the student also learns from its own moves by its starting network's "
                          "sense of progress, each label weighing this (rl.progress_examples; 0: off)")
@@ -282,6 +292,8 @@ def _student(job):
     student, spec, config, puzzles, caps, run_dir = job
     torch.set_num_threads(1)
     agent = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt"), lr=config["lr"])
+    if config.get("train_device", "cpu") != "cpu":
+        agent.train_on(config["train_device"])
     progress_weight = config.get("progress_weight", 0.0)
     judge = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt")) if progress_weight > 0 else None
     teacher_dir = os.path.join(run_dir, folder(spec))

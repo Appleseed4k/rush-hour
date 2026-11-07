@@ -37,7 +37,9 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 POOL = os.path.join(ROOT, "data", "rush_nw.txt")
 OUT = os.path.join(ROOT, "models", "teach")
 TEACHERS = {"random": teach.Random, "correct-after": teach.CorrectAfterMistake, "correct-before": teach.CorrectMistakes,
-            "bayes": teach.Bayesian}
+            "bayes": teach.Bayesian, "bayes-learn": teach.LearningBayesian,
+            "bayes2": teach.Bayesian2, "bayes-learn2": teach.LearningBayesian2, "trace": teach.Trace,
+            "wall": teach.Wall, "stuck": teach.Stuck, "stuck-bayes": teach.StuckBayes}
 # Kinds no longer available (their code is in future_old/), by the name saved runs keep their results under.
 RETIRED = {"flag": "flag mistakes"}
 # Settings a resumed run may change; anything else must match the saved run.
@@ -86,10 +88,13 @@ def parse_args(argv=None):
 
 
 def make_teacher(spec):
-    kind, _, p = spec.partition(":")
+    """`kind`, `kind:p` or `kind:p,key=value,...` (extra keyword arguments, as numbers, to the teacher class)."""
+    head, *extra = spec.split(",")
+    kind, _, p = head.partition(":")
     if kind in RETIRED:
         raise SystemExit(f"the {RETIRED[kind]} teacher is retired (see future_old/): drop {spec} from the teachers")
-    return TEACHERS[kind](float(p) if p else 1.0)
+    kwargs = {k: float(v) for k, v in (e.split("=") for e in extra)}
+    return TEACHERS[kind](float(p) if p else 1.0, **kwargs)
 
 
 def teacher_name(spec):

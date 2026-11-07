@@ -78,11 +78,84 @@ def bfs(initial, orientations):
     return distance
 
 
-def multi_bfs(state):
-    """Distance-to-goal for every state reachable from `state`."""
+def multi_bfs(state, n_rows=6, n_cols=6):
+    """Distance-to-goal for every state reachable from `state`: the same dict, in the same order, as
+    bfs(find_goal_states(bfs([state], ...)), ...) - a forward search listing the states, then one backward from
+    the goal states - but several times faster. Each car is reduced to its position along its axis (the lowest
+    cell it covers), a board to the tuple of those plus a bitmask of the occupied cells, and moves are generated
+    once, in the forward search, in neighbors()' order, then reused backward."""
+    names = [name for name, _ in state]
     orientations = car_orientations(state)
-    distances = bfs([state], orientations)
-    return bfs(find_goal_states(distances), orientations)
+    cars = []  # per car: (index, horizontal, length, bound, {anchor: cell mask}, {cell: bit} along the axis)
+    positions_at = []  # per car: {anchor: positions tuple}, as neighbors() would build it
+    for k, (name, positions) in enumerate(state):
+        horizontal = orientations[name] == "h"
+        axis = [j for _, j in positions] if horizontal else [i for i, _ in positions]
+        lo, length = min(axis), max(axis) - min(axis) + 1
+        bound = n_cols if horizontal else n_rows
+        di, dj = (0, 1) if horizontal else (1, 0)
+        at, masks = {}, {}
+        for anchor in range(bound - length + 1):
+            shift = anchor - lo
+            cells = tuple((i + di * shift, j + dj * shift) for i, j in positions)
+            at[anchor] = cells
+            masks[anchor] = sum(1 << (i * n_cols + j) for i, j in cells)
+        cross = positions[0][0] if horizontal else positions[0][1]
+        bits = {e: 1 << ((cross * n_cols + e) if horizontal else (e * n_cols + cross)) for e in range(bound)}
+        cars.append((k, horizontal, length, bound, masks, bits))
+        positions_at.append(at)
+
+    def anchors_of(st):
+        out = []
+        for (name, positions), (_, horizontal, _, _, _, _) in zip(st, cars):
+            out.append(min(j for _, j in positions) if horizontal else min(i for i, _ in positions))
+        return tuple(out)
+
+    start = anchors_of(state)
+    occupied = 0
+    for (k, _, _, _, masks, _), a in zip(cars, start):
+        occupied |= masks[a]
+    # forward: every reachable board, with its moves in neighbors()' order (each direction's slides by 1, 2, ...;
+    # "l" before "r", "u" before "d" - the lower end first, as MOVES lists them)
+    adjacency = {}
+    queue = deque([(start, occupied)])
+    adjacency[start] = None
+    while queue:
+        board, occ = queue.popleft()
+        nxt = []
+        for k, horizontal, length, bound, masks, bits in cars:
+            a = board[k]
+            free = occ & ~masks[a]
+            for delta in (-1, 1):
+                steps = 1
+                while True:
+                    edge = a - steps if delta < 0 else a + length - 1 + steps
+                    if not 0 <= edge < bound or free & bits[edge]:
+                        break
+                    b = a + delta * steps
+                    new = board[:k] + (b,) + board[k + 1:]
+                    nxt.append(new)
+                    if new not in adjacency:
+                        adjacency[new] = None
+                        queue.append((new, free | masks[b]))
+                    steps += 1
+        adjacency[board] = nxt
+
+    def full(board):
+        return tuple((names[k], positions_at[k][a]) for k, a in enumerate(board))
+
+    # goal states in the forward search's order (find_goal_states: red's second cell in the last column)
+    goals = [board for board in adjacency if positions_at[0][board[0]][1][1] == n_cols - 1]
+    distance = {board: 0 for board in goals}
+    queue = deque(goals)
+    while queue:
+        board = queue.popleft()
+        d = distance[board] + 1
+        for new in adjacency[board]:
+            if new not in distance:
+                distance[new] = d
+                queue.append(new)
+    return {full(board): d for board, d in distance.items()}
 
 
 def sample_puzzles(output_path, min_distance=1, max_distance=51, num=1, source_path="data/rush_nw.txt"):
