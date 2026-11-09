@@ -263,7 +263,14 @@ def write_progress(run_dir, name, **values):
     path = os.path.join(d, f"{name}.json")
     with open(path + ".tmp", "w") as f:
         json.dump(values | {"time": time.time()}, f)
-    os.replace(path + ".tmp", path)
+    for wait in (0.05, 0.2, 1.0, None):  # on Windows a reader (run_queue watch, a scanner) can lock the file briefly
+        try:
+            os.replace(path + ".tmp", path)
+            return
+        except PermissionError:
+            if wait is None:
+                return  # progress is only for watching: a missed update must never stop the run
+            time.sleep(wait)
 
 
 def progress(run, teachers, out=OUT):
