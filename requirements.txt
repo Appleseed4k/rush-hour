@@ -1,0 +1,17 @@
+# Python dependencies for rush-hour.
+#
+# Windows/Linux with an NVIDIA GPU: install the CUDA build of torch first,
+# because the default PyPI wheel on Windows is CPU-only:
+#   python -m pip install torch --index-url https://download.pytorch.org/whl/cu132
+#   python -m pip install -r requirements.txt
+#
+# macOS: just `pip install -r requirements.txt` (PyPI torch includes MPS support).
+
+numpy>=2.5
+torch>=2.15
+tqdm>=4.70
+scikit-learn>=1.9
+pandas>=3.1
+matplotlib>=3.11
+scipy>=1.18
+ipykernel>=7.4

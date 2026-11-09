@@ -28,6 +28,17 @@ import session_experiment as se
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_SHARE = 0.75  # share of a teacher run's time spent playing the sessions (the rest testing)
+WINDOWS = os.name == "nt"  # no process groups, setsid or /bin/sh there: see launch, _play, stop and _alive
+
+if WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32")
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
 
 
 def _path(name, out):
@@ -47,6 +58,18 @@ def _save(name, record, out=se.OUT):
 
 
 def _alive(pid):
+    if WINDOWS:
+        # Not os.kill(pid, 0): on Windows that ends the process. Ask for its exit code instead.
+        if not isinstance(pid, int):
+            return False
+        handle = _kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(_kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            _kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -84,10 +107,24 @@ def launch(name, runs, out=se.OUT):
     record["finished"], record["pid"] = None, None
     _save(name, record, out)
     log = os.path.join(out, "queues", f"{name}.log")
-    # Started through a shell that exits at once, so the queue doesn't stay this process's child (a finished child
-    # would linger as a zombie, still "alive", until this process ends); the queue records its own pid.
-    subprocess.run(["/bin/sh", "-c", 'nohup "$0" -u "$1" run "$2" "$3" >> "$4" 2>&1 < /dev/null &',
-                    sys.executable, os.path.abspath(__file__), name, out, log], cwd=HERE, check=True)
+    if WINDOWS:
+        # No zombies on Windows, so a plain detached child will do: no console window, its own process group, and
+        # (where the job allows it) out of this process's job, so closing the notebook or terminal doesn't end it.
+        # UTF-8 output, since a log file would otherwise get the ANSI code page. The queue records its own pid.
+        argv = [sys.executable, "-u", os.path.abspath(__file__), "run", name, out]
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        with open(log, "a") as f:
+            options = dict(cwd=HERE, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+            try:
+                subprocess.Popen(argv, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options)
+            except OSError:  # the job doesn't allow breaking away
+                subprocess.Popen(argv, creationflags=flags, **options)
+    else:
+        # Started through a shell that exits at once, so the queue doesn't stay this process's child (a finished
+        # child would linger as a zombie, still "alive", until this process ends); the queue records its own pid.
+        subprocess.run(["/bin/sh", "-c", 'nohup "$0" -u "$1" run "$2" "$3" >> "$4" 2>&1 < /dev/null &',
+                        sys.executable, os.path.abspath(__file__), name, out, log], cwd=HERE, check=True)
     for _ in range(100):
         if _load(name, out)["pid"] is not None:
             break
@@ -97,7 +134,8 @@ def launch(name, runs, out=se.OUT):
 
 def _play(name, out):
     """The background process: each run in turn (a failed run is logged and skipped)."""
-    os.setsid()  # its own process group, runs and their workers included, so stop() ends them all
+    if not WINDOWS:  # (on Windows, stop() ends the process tree instead)
+        os.setsid()  # its own process group, runs and their workers included, so stop() ends them all
     record = _load(name, out)
     record["pid"] = os.getpid()
     _save(name, record, out)
@@ -121,15 +159,23 @@ def stop(name, out=se.OUT):
     if not _alive(pid):
         print(f"{name} isn't running")
         return
-    os.killpg(pid, signal.SIGTERM)
-    for _ in range(50):
-        try:
-            os.killpg(pid, 0)
-        except OSError:
-            break
-        time.sleep(0.2)
+    if WINDOWS:
+        # No process groups to signal: end the queue's process tree (the run and its workers) at once.
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        for _ in range(50):
+            if not _alive(pid):
+                break
+            time.sleep(0.2)
     else:
-        os.killpg(pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGTERM)
+        for _ in range(50):
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            os.killpg(pid, signal.SIGKILL)
     print(f"stopped {name}")
 
 

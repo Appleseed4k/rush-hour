@@ -351,7 +351,8 @@ def main():
     ap.add_argument("--rollout-per-bin", type=int, default=20)
     ap.add_argument("--traces", type=int, default=15, help="AND-OR traces per puzzle for 'traces' labels")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available()
+                    else ("mps" if torch.backends.mps.is_available() else "cpu"))
     ap.add_argument("--out", help="write results as JSON here")
     args = ap.parse_args()
 
