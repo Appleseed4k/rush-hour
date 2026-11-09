@@ -11,3 +11,8 @@ rush_nw_tensors.pt
 rush_nw.txt
 rush.txt
 .vscode/
+sokoban/data/raw/
+sokoban/data/*.log
+sokoban/data/boxoban_medium_valid.txt
+sokoban/data/eval_*.csv
+sokoban/visualization/

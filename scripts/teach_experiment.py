@@ -39,7 +39,8 @@ OUT = os.path.join(ROOT, "models", "teach")
 TEACHERS = {"random": teach.Random, "correct-after": teach.CorrectAfterMistake, "correct-before": teach.CorrectMistakes,
             "bayes": teach.Bayesian, "bayes-learn": teach.LearningBayesian,
             "bayes2": teach.Bayesian2, "bayes-learn2": teach.LearningBayesian2, "trace": teach.Trace,
-            "wall": teach.Wall, "stuck": teach.Stuck, "stuck-bayes": teach.StuckBayes}
+            "wall": teach.Wall, "stuck": teach.Stuck, "stuck-bayes": teach.StuckBayes, "stuck-bayes1": teach.StuckBayes1,
+            "hint": teach.Hint, "hint-bayes": teach.HintBayes}
 # Kinds no longer available (their code is in future_old/), by the name saved runs keep their results under.
 RETIRED = {"flag": "flag mistakes"}
 # Settings a resumed run may change; anything else must match the saved run.

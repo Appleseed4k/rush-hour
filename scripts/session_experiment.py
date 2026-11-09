@@ -206,6 +206,15 @@ def test_points(config, n_puzzles):
     return sorted(set(range(0, n_puzzles + 1, config["test_every"] * multiplier(config))) | {0, n_puzzles})
 
 
+def _same_key(setting, value):
+    """A setting's value as check_config compares it: --init by its path inside the repo, so a run saved on one
+    machine (an absolute path there) can be added to on another."""
+    if setting != "init" or value is None:
+        return value
+    path, repo = value.replace("\\", "/"), "/" + os.path.basename(os.path.abspath(te.ROOT)) + "/"
+    return path.split(repo, 1)[1] if repo in path else path
+
+
 def check_config(run_dir, config):
     """Saves config.json for a new run; for --test-only, returns the saved
     config with the test settings updated."""
@@ -226,7 +235,8 @@ def check_config(run_dir, config):
         with open(path) as f:
             saved = json.load(f)
         differs = sorted(k for k in set(saved) | set(config) if k not in SAME_RUN_IGNORES
-                         and saved.get(k, ADDED_SETTINGS.get(k)) != config.get(k, ADDED_SETTINGS.get(k)))
+                         and _same_key(k, saved.get(k, ADDED_SETTINGS.get(k)))
+                         != _same_key(k, config.get(k, ADDED_SETTINGS.get(k))))
         if differs:
             raise SystemExit(f"{run_dir} exists with other settings ({', '.join(differs)}): use another run name, "
                              f"--test-only or --overwrite")

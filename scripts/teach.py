@@ -241,6 +241,43 @@ class Stuck(Teacher):
         self.counts["best"] = self.best
 
 
+class Hint(Stuck):
+    """Stuck's trigger, help as a hint: once the student has made `patience` x the puzzle's optimal length moves of
+    its own without getting closer to the goal than ever before, it shows `k` optimal moves in a row, from wherever
+    the student is, then hands the puzzle back - and stays out until the student is stuck that long again (its
+    count starts over after the hint), however it does in the meantime. Help in bursts of a fixed size, with no
+    model of the student: against StuckBayes (bursts as long as its model says the student needs, and back in
+    whenever it slides) and take-over (StuckBayes with theta 1: every move once stuck) at matched spend.
+
+    counts: "shown", "hints" (bursts started), "stuck" (1 if it ever triggered), "best"."""
+
+    def __init__(self, k=3, patience=1.0):
+        super().__init__(patience)
+        self.k = int(k)
+        self.name = f"hint {self.k}" + (f" p{self.patience:g}" if self.patience != 1 else "")
+
+    def start(self, state, rng):
+        new = self._for != state
+        super().start(state, rng)
+        if new:
+            self.left = 0  # moves left in the current hint
+
+    def advise(self, state, step, proposal=None):
+        if self.distances()[state] == 0:
+            return None
+        if self.left == 0:
+            if self.since < self.patience * self._d:
+                return None
+            self.left = self.k
+            self.counts["hints"] += 1
+            self.counts["stuck"] = 1
+        self.left -= 1
+        if self.left == 0:
+            self.since = 0  # handed back: the student gets a full patience before the next hint
+        self.counts["shown"] += 1
+        return self.optimal_move(state)
+
+
 class Trace(Teacher):
     """Never teaches: only records each attempt's path, for checking a teacher's model of the student offline
     (e.g. Bayesian's calibration) against how unhelped students really play. counts["path"]: the distance to the
@@ -799,28 +836,61 @@ class LearningBayesian2(TwoEnds, LearningBayesian):
         self.name = f"bayes-learn2 {agency:g}"
 
 
-class StuckBayes(Bayesian2):
-    """Wall's "when" with Bayesian's "how much": it stays out until the student is stuck - `patience` x the
-    puzzle's optimal length moves of its own without a new closest approach of its own - and from then on, wherever
-    the student is, shows the optimal move whenever its model of the student (Bayesian2's, this puzzle's difficulty
-    updated by every move the student has made on it, being stuck included) gives it less than `theta` chance of
-    solving untaught from here, with the moves and patience it has left. So it leads the student only as far as
-    it thinks the student needs, and steps back in at once if the student slides back, without waiting out another
-    patience - until the student gets closer than ever by a move of its own, which closes the gate again.
+class StuckGate:
+    """Wall's "when" with Bayesian's "how much", on whichever Bayesian model of the student it is mixed into
+    (StuckBayes: the calibrated one, StuckBayes1: the original): it stays out until the student is stuck -
+    `patience` x the puzzle's optimal length moves of its own without a new closest approach of its own - and from
+    then on, wherever the student is, shows the optimal move whenever its model of the student (this puzzle's
+    difficulty updated by every move the student has made on it, being stuck included) gives it less than `theta`
+    chance of solving untaught from here, with the moves and patience it has left. So it leads the student only as
+    far as it thinks the student needs, and steps back in at once if the student slides back, without waiting out
+    another patience - until the student gets closer than ever by a move of its own, which closes the gate again.
     No budget: the spending follows from theta and patience.
+
+    Ablation switches, each removing one part of the model (all on by default; the name says which are off):
+    - `patience` 0: no gate - the solve-chance rule alone, from the first move ("p0");
+    - `update` 0: the belief about this puzzle's difficulty is never updated by the student's moves on it - the
+      plan still averages over the prior ("no-update");
+    - `refit` n: the model of the student (skill per distance, level, tau, how mistakes go, persistence) learns
+      from the first n puzzles only, then stays fixed for the rest of the session ("frozen<n>");
+    - `giveup` 0: the plan has no chance of the student giving up - only the move cap ends a puzzle
+      ("no-giveup");
+    - `backward` 0: every mistake is sideways - the plan never has the student move away from the goal
+      ("no-backward").
 
     counts: as Bayesian's, plus "stuck" (1 if the gate ever opened) and "best"."""
 
     KEEPS_ALONE = True
+    KIND = "stuck-bayes"
 
-    def __init__(self, theta=0.5, patience=1.0, **kwargs):
+    def __init__(self, theta=0.5, patience=1.0, update=1, refit=math.inf, giveup=1, backward=1, **kwargs):
+        if not backward:
+            kwargs.update(worse=0.0, worse_strength=1e12)  # the prior share of backward mistakes, 0, never moves
         super().__init__(budget=0.0, **kwargs)  # no budget: nothing adjusts the cost (unused here)
         self.theta, self.patience = float(theta), float(patience)
-        self.name = f"stuck-bayes {self.theta:g}" + (f" p{self.patience:g}" if self.patience != 1 else "")
+        self.update, self.refit, self.giveup, self.backward = bool(update), refit, bool(giveup), bool(backward)
+        self.fitted = 0  # puzzles the model of the student has learned from
+        self.name = f"{self.KIND} {self.theta:g}" + (f" p{self.patience:g}" if self.patience != 1 else "") \
+            + ("" if self.update else " no-update") + (f" frozen{self.refit:g}" if self.refit != math.inf else "") \
+            + ("" if self.giveup else " no-giveup") + ("" if self.backward else " no-backward")
 
     def _begin_puzzle(self, state):
         super()._begin_puzzle(state)
         self.best, self.since = self._d, 0
+
+    def _end_puzzle(self):
+        if self._pending and self.fitted >= self.refit:
+            self._pending = False  # frozen: the finished puzzle teaches the model nothing
+            return
+        self.fitted += self._pending
+        super()._end_puzzle()
+
+    def _observe_persistence(self, result):
+        if self.fitted < self.refit:
+            super()._observe_persistence(result)
+
+    def _human_rate(self, moves):
+        return super()._human_rate(moves) if self.giveup else np.zeros(np.shape(moves))
 
     def solve_alone(self, state, step):
         """The model's chance of solving untaught from `state`, `step` moves into this attempt."""
@@ -839,8 +909,60 @@ class StuckBayes(Bayesian2):
 
     def observe(self, state, move, next_state, taught):
         super().observe(state, move, next_state, taught)
+        if not self.update:
+            self._shift = self.LOG_PZ.copy()
         k = self.distances()[next_state]
         if not taught:
             self.since = 0 if k < self.best else self.since + 1
         self.best = min(self.best, k)
         self.counts["best"] = self.best
+
+
+class StuckBayes(StuckGate, Bayesian2):
+    """StuckGate on the calibrated model of the student (Bayesian2: distance to the goal and from the start)."""
+
+
+class StuckBayes1(StuckGate, Bayesian):
+    """StuckGate on the original model of the student (Bayesian: distance to the goal only, evidence kept for
+    fewer puzzles). It overrates long puzzles (TwoEnds), so it needs a higher theta for the same spend - yet the
+    original Bayesian taught better than the calibrated one at matched spend: does the same hold here?"""
+
+    KIND = "stuck-bayes1"
+
+
+class HintBayes(StuckBayes):
+    """StuckBayes as hint and hand back: the same gate (stuck for `patience` x the puzzle's optimal length moves of
+    its own) and the same help (the optimal move while its model gives the student under `theta` chance of solving
+    alone), but each rescue is one burst. Once the chance is back at `theta` or above - or `k` moves have been
+    shown in a row - it hands the puzzle back and the gate closes: the student has to be stuck that long again
+    before more help, even if it slides back at once (where StuckBayes steps straight back in). With k = inf the
+    two differ only in that; a finite k also caps every burst. theta 1 with k = inf would be take-over.
+
+    counts: as StuckBayes's, plus "hints" (bursts started)."""
+
+    def __init__(self, theta=0.5, k=math.inf, patience=1.0, **kwargs):
+        super().__init__(theta, patience, **kwargs)
+        self.k = k
+        self.name = f"hint-bayes {self.theta:g}" + (f" k{self.k:g}" if self.k != math.inf else "") \
+            + (f" p{self.patience:g}" if self.patience != 1 else "")
+
+    def _begin_puzzle(self, state):
+        super()._begin_puzzle(state)
+        self.burst = None  # moves shown in the current hint, None outside one
+
+    def wants_to_teach(self, state, step, proposal=None):
+        if self.distances()[state] == 0:
+            return False
+        if self.burst is None:  # the gate: stuck, and the model says the student needs help
+            if self.since < self.patience * self._d:
+                return False
+            self.counts["stuck"] = 1
+            if self.solve_alone(state, step) >= self.theta:
+                return False
+            self.burst = 0
+            self.counts["hints"] += 1
+        elif self.burst >= self.k or self.solve_alone(state, step) >= self.theta:
+            self.burst, self.since = None, 0  # handed back: a full patience before the next hint
+            return False
+        self.burst += 1
+        return True
