@@ -12,6 +12,10 @@ solutions.
 | `label.py` | `StateSpace` (every reachable position, push edges, distance to goal) and the CLI that writes dataset files |
 | `and_or.py` | The AND-OR planner: `solve_pass()` (one pass) and `play()` (passes until solved, restarting on deadlock) |
 | `evaluate.py` | Planner variants against optimal push counts, binned by distance |
+| `teach.py` | Teachers that show the student the optimal push (the counterpart of `scripts/teach.py`): the `Teacher` interface and `Random(p)` |
+| `teach_experiment.py` | Teachers against the AND-OR student: solve rate, pushes and restarts against pushes shown |
+| `student.py` | A student that learns online (policy network over pushes, shortcut or own labels): the counterpart of `scripts/rl.py`'s intuition student and `learning_session` |
+| `sessions.py` | Learning sessions with teachers, tested on held-out Boxoban levels: the counterpart of `scripts/session_experiment.py` (`pretrain`, `run`, `summary`) |
 | `visualize.py` | Frame-by-frame PNGs, a trajectory plot and a GIF of the solver playing a level, written to `visualization/<level>/` (gitignored) |
 | `test_level.py` | Checks `StateSpace` against a naive 0-1 BFS solver, plus solution replay, distance consistency, deadlock-test soundness and planner replay |
 | `data/*.txt` | Labelled levels (format below) |
@@ -124,6 +128,25 @@ module docstring has the details.
   `test_level.py`. Lapses and random fallbacks can still deadlock the board,
   so `play()` restarts the level when `Level.deadlocked` fires, when no push is
   legal, or after `patience` (20) passes in a row with no plan.
+- **Playing a pass**: `play()` plays a pass's pushes one at a time and stops
+  as soon as the level is solved, even partway through a pass. It used to
+  apply whole passes, which could push a box back off a solved board. That
+  changed one of 60 check runs, Microban 18 at γ = 0.05, from 43 pushes to
+  39.
+- **Failed deliveries are remembered within a pass.** `deliver` backtracks
+  over every way of cutting a route into straight segments. On a long route
+  that can't be completed, that used to mean tens of thousands of PushNodes,
+  none of them counted against the OrNode budget. Microban 155, a 175-push
+  route, took 2.6 s per pass and over an hour per experiment. A delivery that
+  fails from a given state fails in any search order, so each one is now
+  tried once per pass. That pass now takes milliseconds, and the slowest
+  sampled attempts are about 2.5x faster. Plans are the same, but the
+  planner makes fewer random draws, so seeded runs (including the table
+  below, made before this change) now come out slightly differently.
+- **`max_visits`** caps one `play()` attempt's total search (OrNodes plus
+  PushNodes). It stops unsolved once the cap is reached, so no attempt can
+  run for hours. `teach_experiment.py` uses 300,000 nodes, about 4 s.
+  Attempts that solved used at most about 5,400.
 - **When a pass finds no full plan**, it delivers any one box it can
   ("partial"). Failing that, it plays one random push ("random").
 
@@ -178,6 +201,73 @@ What these show so far:
   On Microban at γ = 0, 76% of passes find nothing and fall back to a random
   push. That's why the restart counts are high: about 40 restarts per run.
 
+## Teaching (`teach.py`, `teach_experiment.py`)
+
+`teach.py` mirrors `scripts/teach.py`. A teacher knows the level's oracle
+distances and, when it chooses to, shows an optimal push (one that brings
+the board a push closer to solved). The interface is the same:
+`start(level, rng)`, `advise(state, step, proposal)`, `observe(...)` and
+`end_attempt(result)`. It adds `restart(state)`, because a Sokoban student
+restarts. `Random(p)` shows the push on each turn with probability p.
+
+- **The student** is `and_or.play(level, teacher=...)`. Each turn the teacher
+  may show a push instead of the student's. After it does, the student drops
+  the rest of its pass and plans again from the new board.
+- **Unlike Rush Hour, a board can be past saving.** On a deadlocked board no
+  push is optimal, so the teacher shows nothing until the student restarts.
+- **The student doesn't learn yet** (there's no policy network), so the
+  experiment measures only the help within an attempt, not learning across
+  rounds as `scripts/teach_experiment.py` does.
+
+```bash
+python teach_experiment.py data/microban1.txt data/boxoban_hard.txt --n 150 --seeds 3 --processes 9
+```
+
+This took 12 minutes. Every teacher plays the same 148 Microban and 150
+Boxoban hard levels with the same 3 seeds; Microban 93, 144, 145, 146 and 153
+are over the 1M-state oracle limit. Below, **solved** is the share of
+attempts solved (± about 0.02) and **shown** is pushes shown per attempt.
+
+| set | γ | teacher | solved | shown | share of pushes shown | restarts |
+|---|---|---|---|---|---|---|
+| Boxoban hard | 0 | none | 0.36 | 0 | 0 | 25.4 |
+| | | random 0.05 | 0.53 | 5.3 | 0.02 | 21.0 |
+| | | random 0.1 | 0.62 | 9.2 | 0.05 | 17.8 |
+| | | random 0.2 | 0.73 | 17.0 | 0.10 | 14.4 |
+| | | random 0.5 | 0.95 | 25.1 | 0.32 | 5.0 |
+| | | random 1 | 1.00 | 17.4 | 1.00 | 0 |
+| | 0.05 | none | 0.43 | 0 | 0 | 29.4 |
+| | | random 0.1 | 0.54 | 12.3 | 0.05 | 25.6 |
+| | | random 0.5 | 0.92 | 30.2 | 0.33 | 6.5 |
+| Microban I | 0 | none | 0.31 | 0 | 0 | 48.7 |
+| | | random 0.05 | 0.40 | 8.3 | 0.03 | 40.4 |
+| | | random 0.1 | 0.42 | 16.3 | 0.06 | 36.7 |
+| | | random 0.2 | 0.50 | 29.8 | 0.13 | 28.9 |
+| | | random 0.5 | 0.69 | 58.8 | 0.37 | 13.1 |
+| | 0.05 | none | 0.31 | 0 | 0 | 53.1 |
+| | | random 0.1 | 0.41 | 17.7 | 0.06 | 43.3 |
+| | | random 0.5 | 0.68 | 69.8 | 0.38 | 15.9 |
+
+The run prints the full table, with every teacher and solve rates by optimal
+length. Per-attempt rows go to `data/eval_teach.csv` (gitignored); reprint
+the table from it with `python teach_experiment.py --summarize`.
+
+- **A few shown pushes go a long way on Boxoban hard.** Showing about 5 pushes
+  per attempt, 2% of those played, raises the solve rate from 0.36 to 0.53.
+  Showing a third of the pushes solves 95%.
+- **Microban gains less per push shown.** Its long levels (40+ optimal pushes)
+  stay mostly unsolved even at p = 0.5. The student's structural gaps
+  (above) aren't fixed by one push here and there.
+- **Lapses help the untaught student on Boxoban hard** (0.43 at γ = 0.05
+  against 0.36 at γ = 0). With γ = 0 the student repeats the same failing plan;
+  a lapse varies it. With a teacher, γ = 0 is better, because a shown push
+  already provides that variety.
+- **Caveat: the search cap.** On Microban at γ = 0, 6% of attempts hit
+  `--max-visits` (300,000 nodes) for every teacher with p < 1. On three levels
+  (78, 116 and 126) every uncapped attempt solved, so some capped attempts
+  would probably have solved too: the γ = 0 Microban solve rates are slightly
+  low. No other setting hit the cap.
+
 ## Visualizing a solve (`visualize.py`)
 
 Like `scripts/lib.py`'s `visualize()`, it writes `move_000.png`,
@@ -187,7 +277,9 @@ distance per push, with restarts and pass boundaries marked), and a
 
 - The arrow is the push just played, coloured by its role in the AND-OR tree:
   blue for a delivery, orange for clearing a blocker (the caption gives its
-  depth), red for a lapse, purple for a random fallback.
+  depth), red for a lapse, purple for a random fallback. Green is a push the
+  teacher showed (`--teacher random:0.2`); those pushes are also marked on
+  the trajectory plot.
 - The box being delivered has a blue outline, and its goal a dashed blue ring.
 - Boxes are lettered so they can be followed from frame to frame.
 

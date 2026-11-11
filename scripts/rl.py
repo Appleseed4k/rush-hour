@@ -666,11 +666,14 @@ def _kept_moves(boards, window=None):
     return kept
 
 
-def shortcut_routes(boards, moves, taught=None, everywhere=False):
+def shortcut_routes(boards, moves, taught=None, everywhere=False, window=None):
     """Shortcut labels for a solved attempt (`boards`, start first, ending solved; `moves`; `taught`, per move,
     whether a teacher showed it): hindsight over everything the student saw. The visited boards form a graph - two
     are joined when one legal move turns one into the other (moves are reversible) - and the shortest route from a
     board to the solved board through it is often far shorter than the path played, even with loops cut out.
+    `window` limits the hindsight: two boards are joined only if the student was at them within `window` moves of
+    each other (None: any), so a connection between boards far apart in the attempt goes unnoticed; the moves
+    played are always joined, so every visited board still gets a label.
     Returns (boards, moves, taught) routes for attempt_examples: from each labelled board, one shortest route per
     first move that starts one (so moves tied for shortest are all targets). Labelled boards: the ones on shortest
     routes from the start, or with `everywhere` every visited board that reaches the solved board. A route's move is
@@ -680,7 +683,17 @@ def shortcut_routes(boards, moves, taught=None, everywhere=False):
     visited = set(boards)
     goal = boards[-1]
     orient = car_orientations(boards[0])
-    adj = {b: [(m, n) for m, n in neighbors(b, orient) if n in visited] for b in visited}
+    if window is None:
+        adj = {b: [(m, n) for m, n in neighbors(b, orient) if n in visited] for b in visited}
+    else:
+        times = {}
+        for t, b in enumerate(boards):
+            times.setdefault(b, []).append(t)
+
+        def near(a, b):
+            return any(abs(x - y) <= window for x in times[a] for y in times[b])
+
+        adj = {b: [(m, n) for m, n in neighbors(b, orient) if n in visited and near(b, n)] for b in visited}
     dist, queue = {goal: 0}, [goal]
     for b in queue:
         for _, n in adj[b]:
@@ -720,14 +733,15 @@ def solved_routes(result, labels="own", window=None):
     """What a solved attempt (a solve_intuition result) labels, as (boards, moves, taught) routes for
     attempt_examples. `labels` "own": the path it played with loops cut out (erase_loops, recognizing boards within
     `window` moves; None = all); "path" / "all": shortcut labels (shortcut_routes - the boards on shortest routes from
-    the start, or every visited board; `window` doesn't apply)."""
+    the start, or every visited board; connections noticed only between boards visited within `window` moves of
+    each other, None = any)."""
     boards, moves, taught = result["boards"], result["moves"], result["taught"]
     if labels == "own":
         kept = _kept_moves(boards, window)
         return [([boards[0]] + [boards[t + 1] for t in kept], [moves[t] for t in kept], [taught[t] for t in kept])]
     if labels not in LABELS:
         raise ValueError(f"labels: one of {LABELS}, not {labels!r}")
-    return shortcut_routes(boards, moves, taught, everywhere=labels == "all")
+    return shortcut_routes(boards, moves, taught, everywhere=labels == "all", window=window)
 
 
 def attempt_examples(attempts, size=(6, 6), max_slide=5):
@@ -1422,7 +1436,7 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
       returned to a board seen within the last `window` moves (None: any);
       or, with `labels` "path" / "all", shortcut labels instead: shortest
       routes through every board the attempt visited (shortcut_routes;
-      `window` then doesn't apply);
+      `window` then limits which connections between visited boards are noticed);
     - no rewinding: no validation, no keeping an earlier, better version.
 
     `block` 1 learns after every puzzle. A larger block gives the network

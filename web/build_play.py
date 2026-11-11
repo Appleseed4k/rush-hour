@@ -6,9 +6,13 @@ writes them into play_template.html.
 
 The teacher is "none", "delay:<seconds>" (the default, delay:10: after that
 long without a move, the page makes an optimal move for the player) or
-"bayes:<seconds>[:<name>=<value>,...]" (after that long, a Bayesian teacher
-decides whether to make the move; its parameters a, b, cost, quit and worse
-are described in the template's teacher section), e.g. bayes:10:cost=0.05.
+"bayes3:<seconds>[:<name>=<value>,...]" (after that long, the Bayesian teacher
+- scripts/teach.py's Bayesian3, ported - makes the move if its model gives the
+player under theta chance of solving alone; parameters by teach.py's names),
+e.g. bayes3:10 or bayes3:10:theta=0.3. The page gives its owner a slider for
+the wait, for testing.
+
+    python web/build_play.py --teacher bayes3:10 --out web/rush_hour_play_bayes.html
 
 The default sample (250 puzzles from each of the distance bins 1-8, 9-12,
 13-16 and 17-20 of data/rush_nw.txt, seed 2026) is the one the published
@@ -47,7 +51,8 @@ def sample(pool=POOL, bins=BINS, per_bin=250, seed=2026):
     return chosen
 
 
-BAYES_PARAMETERS = {"a", "b", "cost", "quit", "worse"}
+BAYES_PARAMETERS = {"theta", "decay", "window", "step_factor", "min_steps", "prior_mean", "prior_sd", "spread",
+                    "tau", "tau_sd", "worse", "worse_strength"}  # Bayes3's, as in the template
 
 
 def check_teacher(spec):
@@ -60,12 +65,12 @@ def check_teacher(spec):
     kind, _, rest = spec.partition(":")
     seconds, _, params = rest.partition(":")
     ok = spec == "none" or (kind == "delay" and not params and number(seconds) and float(seconds) > 0) or (
-        kind == "bayes" and number(seconds) and float(seconds) > 0 and all(
+        kind == "bayes3" and number(seconds) and float(seconds) > 0 and all(
             name in BAYES_PARAMETERS and number(value)
             for name, _, value in (item.partition("=") for item in params.split(",") if params)))
     if not ok:
         raise argparse.ArgumentTypeError(
-            f"teacher {spec!r}: use none, delay:<seconds> or bayes:<seconds>[:<name>=<value>,...] "
+            f"teacher {spec!r}: use none, delay:<seconds> or bayes3:<seconds>[:<name>=<value>,...] "
             f"with names from {sorted(BAYES_PARAMETERS)}")
     return spec
 

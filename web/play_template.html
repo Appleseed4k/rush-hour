@@ -1,7 +1,7 @@
 <!--
 Rush Hour play page. Built by web/build_play.py, which puts the puzzle sample
 in place of the PUZZLES marker below and the teacher ("none", "delay:<seconds>" or
-"bayes:<seconds>[:<name>=<value>,...]", see the teacher section) in place of the
+"bayes3:<seconds>[:<name>=<value>,...]", see the teacher section) in place of the
 TEACHER marker; published as a claude.ai artifact with
 capabilities {"db": {"rules": [{"path": "plays", "read": "owner", "write": "owner"},
 {"path": "plays/{self}", "read": "interact", "write": "interact"}]}, "user": {},
@@ -153,6 +153,14 @@ button.act[disabled] { opacity: 0.4; cursor: default; }
 button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight: 400; }
 .problem { margin: 0; font-size: 0.85rem; color: var(--warn); }
 
+/* The owner's testing slider for the teacher's wait: quiet, under the controls. */
+.tuning { display: flex; align-items: center; gap: 12px; font-size: 0.9rem; color: var(--muted); }
+.tuning[hidden] { display: none; }
+.tuning .note { font-size: 0.8rem; }
+.tuning input { flex: 1; min-width: 0; accent-color: var(--fg); }
+.tuning input:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.tuning output { min-width: 4.5em; text-align: right; color: var(--fg); font-variant-numeric: tabular-nums; }
+
 @media (prefers-reduced-motion: reduce) {
   .car.settle, .car.leaving, .car.teaching { transition: none; }
   .car.taught::before { animation: none; }
@@ -173,6 +181,12 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
     <button class="act quiet" id="export" type="button" hidden>Export games</button>
   </div>
 
+  <div class="tuning" id="tuning" hidden>
+    <label for="delay">Teacher wait <span class="note">(testing)</span></label>
+    <input type="range" id="delay" min="0" max="30" step="1">
+    <output id="delay-out" for="delay"></output>
+  </div>
+
   <p class="problem" id="problem" role="status" hidden></p>
 </div>
 
@@ -184,15 +198,244 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
   });
   const TEACHER = "/*TEACHER*/";
   const [KIND, SECONDS, PARAMS] = TEACHER.split(":");
-  const DELAY = KIND === "delay" || KIND === "bayes" ? Number(SECONDS) * 1000 : null;
-  const BAYES = { a: 1, b: 1, cost: 0.02, quit: 0.005, worse: 0.35 };  // the Bayesian teacher's parameters
-  if (KIND === "bayes" && PARAMS) {
+  // The teacher's wait, ms (null: no teacher). The owner's testing slider may change it; games record when.
+  let delay = KIND === "delay" || KIND === "bayes3" ? Number(SECONDS) * 1000 : null;
+  const BAYES3 = {};  // parameters given in the spec, over Bayes3's defaults
+  if (KIND === "bayes3" && PARAMS) {
     for (const item of PARAMS.split(",")) {
       const [name, value] = item.split("=");
-      BAYES[name] = Number(value);
+      BAYES3[name] = Number(value);
     }
   }
-  const bayes = KIND === "bayes" ? { a: BAYES.a, b: BAYES.b } : null;  // its posterior over the player's skill
+
+  // BAYES3-MODEL-START
+  // The Bayesian teacher's model of the player: scripts/teach.py's Bayesian3 ("bayes3"), ported line for line
+  // (the simulated students' default teacher). Distances are to the goal; a board's distance is k, and `moves`
+  // counts every move made on the puzzle so far (restarts and the teacher's included), as `_offset + step` does.
+  // - Skill: a logit per distance to the goal (1, 2, ..., 10, 11 or more) that a move of the player's own is
+  //   optimal, drawn around their overall level; refitted (MAP) after every puzzle, older puzzles weighted by
+  //   `decay` per puzzle since (the last `window` kept).
+  // - This puzzle's difficulty for them: a shift of all those logits, normal with sd tau (fitted), updated after
+  //   every move of their own on it.
+  // - Mistakes: the share that go a move further from the goal rather than sideways, per distance.
+  // - The plan: from k, each move of their own goes to k - 1 with their skill there, else to k + 1 (that share)
+  //   or stays at k, until red is out or the move cap (`step_factor` x the optimal length, at least
+  //   `min_steps`). Backward induction gives their chance of solving alone from every (moves made, difficulty, k).
+  // The teacher shows the optimal move when that chance, averaged over its belief about this puzzle's
+  // difficulty, is under `theta`.
+  const B3 = { BINS: 11, Z: Array.from({ length: 13 }, (_, i) => -3 + 0.5 * i) };
+  B3.LOG_PZ = (() => {
+    const e = B3.Z.map((z) => -0.5 * z * z);
+    const s = Math.log(e.reduce((a, x) => a + Math.exp(x), 0));
+    return e.map((x) => x - s);
+  })();
+  const logSigmoid = (x) => (x >= 0 ? -Math.log1p(Math.exp(-x)) : x - Math.log1p(Math.exp(x)));
+  const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+  function softmax(x) {
+    const top = Math.max(...x), e = x.map((v) => Math.exp(v - top)), s = e.reduce((a, v) => a + v, 0);
+    return e.map((v) => v / s);
+  }
+
+  // Minimises f (returning [value, gradient]) from x0: L-BFGS with a backtracking line search.
+  function lbfgs(f, x0, maxIter = 500) {
+    let x = x0.slice(), [fx, g] = f(x);
+    let S = [], Y = [];
+    for (let it = 0; it < maxIter; it++) {
+      if (Math.max(...g.map(Math.abs)) < 1e-6) break;
+      const q = g.slice(), alpha = [];
+      for (let i = S.length - 1; i >= 0; i--) {
+        alpha[i] = dot(S[i], q) / dot(Y[i], S[i]);
+        for (let j = 0; j < q.length; j++) q[j] -= alpha[i] * Y[i][j];
+      }
+      const last = S.length - 1;
+      const gamma = last >= 0 ? dot(S[last], Y[last]) / dot(Y[last], Y[last]) : 1 / Math.max(1, Math.sqrt(dot(g, g)));
+      const r = q.map((v) => v * gamma);
+      for (let i = 0; i < S.length; i++) {
+        const beta = dot(Y[i], r) / dot(Y[i], S[i]);
+        for (let j = 0; j < r.length; j++) r[j] += S[i][j] * (alpha[i] - beta);
+      }
+      let dir = r.map((v) => -v), slope = dot(g, dir);
+      if (!(slope < 0)) { S = []; Y = []; dir = g.map((v) => -v); slope = -dot(g, g); }
+      let t = 1, xn = x, fn = fx, gn = g;
+      for (let ls = 0; ls < 60; ls++, t *= 0.5) {
+        xn = x.map((v, j) => v + t * dir[j]);
+        [fn, gn] = f(xn);
+        if (Number.isFinite(fn) && fn <= fx + 1e-4 * t * slope) break;
+      }
+      if (!(Number.isFinite(fn) && fn <= fx)) break;  // no step lowers it: as good as it gets
+      const s = xn.map((v, j) => v - x[j]), y = gn.map((v, j) => v - g[j]);
+      if (dot(s, y) > 1e-12) {
+        S.push(s); Y.push(y);
+        if (S.length > 10) { S.shift(); Y.shift(); }
+      }
+      const small = fx - fn <= 1e-12 * Math.max(1, Math.abs(fx));
+      x = xn; fx = fn; g = gn;
+      if (small) break;
+    }
+    return x;
+  }
+
+  class Bayes3 {
+    constructor(params) {
+      this.P = Object.assign({ theta: 0.45, decay: 0.99, window: 300, step_factor: 10, min_steps: 50,
+        prior_mean: 0, prior_sd: 1.5, spread: 1, tau: 0.5, tau_sd: 0.5, worse: 0.35, worse_strength: 10 }, params);
+      const B = B3.BINS;
+      this.skill = new Array(B).fill(this.P.prior_mean);
+      this.level = this.P.prior_mean;
+      this.logTau = Math.log(this.P.tau);
+      this.history = [];  // per puzzle: [optimal moves, moves] of the player's own, per distance bin
+      this.worseMoves = new Array(B).fill(0);
+      this.mistakes = new Array(B).fill(0);
+      this.pending = false;
+    }
+
+    beginPuzzle(d, K) {  // d: the start's distance; K: the largest distance of any board of the puzzle
+      this.endPuzzle();
+      const B = B3.BINS;
+      this.d = d;
+      this.K = K;
+      this.cap = Math.max(this.P.min_steps, Math.round(this.P.step_factor * d));
+      this.optimal = new Array(B).fill(0);
+      this.own = new Array(B).fill(0);
+      this.worse = new Array(B).fill(0);
+      this.mist = new Array(B).fill(0);
+      this.shift = B3.LOG_PZ.slice();  // log belief over the puzzle's difficulty, at the points Z (units of tau)
+      this.pending = true;
+      this.plan();
+    }
+
+    observe(k, after, taught) {  // a move from distance k to `after`; shown moves say nothing about skill
+      if (!this.pending || taught || k === 0) return;
+      const b = Math.min(k, B3.BINS) - 1, good = after === k - 1, tau = Math.exp(this.logTau);
+      this.own[b] += 1;
+      if (good) this.optimal[b] += 1;
+      else {
+        this.mist[b] += 1;
+        if (after === k + 1) this.worse[b] += 1;
+      }
+      B3.Z.forEach((z, i) => {
+        const logit = this.skill[b] + tau * z;
+        this.shift[i] += logSigmoid(good ? logit : -logit);
+      });
+    }
+
+    solveAlone(k, moves) {  // the chance of solving untaught from distance k, `moves` made on the puzzle
+      if (k === 0) return 1;
+      if (moves >= this.cap) return 0;
+      const w = softmax(this.shift), K1 = this.K + 1, base = moves * B3.Z.length * K1, kk = Math.min(k, this.K);
+      return w.reduce((s, wz, z) => s + wz * this.alone[base + z * K1 + kk], 0);
+    }
+
+    wantsToTeach(k, moves) { return k > 0 && this.solveAlone(k, moves) < this.P.theta; }
+
+    puzzleShift() {  // the belief's mean shift of this puzzle's logits, against a typical puzzle
+      const tau = Math.exp(this.logTau);
+      return dot(softmax(this.shift), B3.Z.map((z) => tau * z));
+    }
+
+    beliefs() {  // what it believes about the player, for the record
+      const r = (x) => Math.round(x * 1e4) / 1e4, B = B3.BINS;
+      const share = (b) => (this.P.worse_strength * this.P.worse + this.worseMoves[b]) /
+        (this.P.worse_strength + this.mistakes[b]);
+      return { skill: this.skill.map(r), level: r(this.level), tau: r(Math.exp(this.logTau)),
+        worse: Array.from({ length: B }, (_, b) => r(share(b))), puzzles: this.history.length };
+    }
+
+    endPuzzle() {  // folds the finished puzzle's evidence into the beliefs about the player
+      if (!this.pending) return;
+      this.pending = false;
+      this.history.push([this.optimal, this.own]);
+      if (this.history.length > this.P.window) this.history.shift();
+      for (let b = 0; b < B3.BINS; b++) {
+        this.worseMoves[b] = this.P.decay * this.worseMoves[b] + this.worse[b];
+        this.mistakes[b] = this.P.decay * this.mistakes[b] + this.mist[b];
+      }
+      this.fit();
+    }
+
+    fit() {  // MAP skill per distance, overall level and tau, each puzzle's difficulty integrated out
+      const B = B3.BINS, Z = B3.Z, NZ = Z.length, P = this.P, H = this.history.length;
+      const weight = this.history.map((_, h) => Math.pow(P.decay, H - 1 - h));
+      const logTau0 = Math.log(P.tau);
+      const objective = (x) => {
+        const skill = x.slice(0, B), level = x[B], logTau = x[B + 1], tau = Math.exp(logTau);
+        const up = Z.map((z) => skill.map((s) => logSigmoid(s + tau * z)));  // log chance optimal [z][b]
+        const down = Z.map((z) => skill.map((s) => logSigmoid(-(s + tau * z))));
+        const rOpt = Z.map(() => new Array(B).fill(0)), rOwn = Z.map(() => new Array(B).fill(0));
+        let value = 0;
+        this.history.forEach(([opt, own], h) => {
+          const ll = Z.map((_, z) => {
+            let s = B3.LOG_PZ[z];
+            for (let b = 0; b < B; b++) if (own[b]) s += opt[b] * up[z][b] + (own[b] - opt[b]) * down[z][b];
+            return s;
+          });
+          const top = Math.max(...ll), lse = top + Math.log(ll.reduce((a, v) => a + Math.exp(v - top), 0));
+          value -= weight[h] * lse;
+          for (let z = 0; z < NZ; z++) {
+            const r = weight[h] * Math.exp(ll[z] - lse);
+            for (let b = 0; b < B; b++) { rOpt[z][b] += r * opt[b]; rOwn[z][b] += r * own[b]; }
+          }
+        });
+        const grad = new Array(B + 2).fill(0);
+        let gTau = 0;
+        for (let z = 0; z < NZ; z++) {
+          let row = 0;
+          for (let b = 0; b < B; b++) {
+            const resid = rOpt[z][b] - rOwn[z][b] / (1 + Math.exp(-(skill[b] + tau * Z[z])));
+            grad[b] -= resid;
+            row += resid;
+          }
+          gTau += row * Z[z];
+        }
+        const sp2 = P.spread * P.spread;
+        let dev = 0;
+        for (let b = 0; b < B; b++) {
+          value += (skill[b] - level) ** 2 / (2 * sp2);
+          grad[b] += (skill[b] - level) / sp2;
+          dev += skill[b] - level;
+        }
+        value += (level - P.prior_mean) ** 2 / (2 * P.prior_sd ** 2) + (logTau - logTau0) ** 2 / (2 * P.tau_sd ** 2);
+        grad[B] = -dev / sp2 + (level - P.prior_mean) / P.prior_sd ** 2;
+        grad[B + 1] = -tau * gTau + (logTau - logTau0) / P.tau_sd ** 2;
+        return [value, grad];
+      };
+      const x = lbfgs(objective, [...this.skill, this.level, this.logTau]);
+      this.skill = x.slice(0, B);
+      this.level = x[B];
+      this.logTau = x[B + 1];
+    }
+
+    plan() {  // this.alone[(moves made, difficulty, k)]: the chance of solving untaught from there
+      const B = B3.BINS, Z = B3.Z, NZ = Z.length, K = this.K, K1 = K + 1, cap = this.cap, P = this.P;
+      const tau = Math.exp(this.logTau);
+      const bin = (k) => Math.min(Math.max(k, 1), B) - 1;
+      const p = new Float64Array(NZ * K1), worse = new Float64Array(K1);
+      for (let k = 0; k <= K; k++) {
+        const b = bin(k);
+        worse[k] = (P.worse_strength * P.worse + this.worseMoves[b]) / (P.worse_strength + this.mistakes[b]);
+        for (let z = 0; z < NZ; z++) p[z * K1 + k] = 1 / (1 + Math.exp(-(this.skill[b] + tau * Z[z])));
+      }
+      this.alone = new Float64Array(cap * NZ * K1);
+      let alone = new Float64Array(NZ * K1);  // at the cap: solved only if red is out
+      for (let z = 0; z < NZ; z++) alone[z * K1] = 1;
+      for (let m = cap - 1; m >= 0; m--) {
+        const next = new Float64Array(NZ * K1);
+        for (let z = 0; z < NZ; z++) {
+          const o = z * K1;
+          next[o] = 1;
+          for (let k = 1; k <= K; k++) {
+            const pk = p[o + k], w = worse[k];
+            next[o + k] = pk * alone[o + k - 1] + (1 - pk) * (w * alone[o + Math.min(k + 1, K)] + (1 - w) * alone[o + k]);
+          }
+        }
+        alone = next;
+        this.alone.set(alone, m * NZ * K1);
+      }
+    }
+  }
+  // BAYES3-MODEL-END
+  const model = KIND === "bayes3" ? new Bayes3(BAYES3) : null;
+
   const SESSION =(crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^a-zA-Z0-9-]/g, "");
   const order = POOL.map((p) => p.index);
   for (let i = order.length - 1; i > 0; i--) {
@@ -206,6 +449,9 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
   const nextBtn = document.getElementById("next");
   const exportBtn = document.getElementById("export");
   const problemEl = document.getElementById("problem");
+  const tuningEl = document.getElementById("tuning");
+  const delayInput = document.getElementById("delay");
+  const delayOut = document.getElementById("delay-out");
 
   // --- recording -----------------------------------------------------------------------------
   const rec = { db: null, uid: null, ready: false, failed: false };
@@ -227,6 +473,8 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
       this.restarts = [];
       this.checks = [];    // the Bayesian teacher's decisions, each time the delay ran out
       this.beliefs = null; // what it believed about the player when the puzzle started
+      this.delay = delay === null ? null : delay / 1000;  // the teacher's wait at the start, seconds
+      this.delayChanges = [];  // the owner's testing slider, if moved during the game
       this.outcome = "playing";
       this.endedAt = null;
       this.dirty = true;
@@ -236,9 +484,11 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
     elapsed() { return Math.round(performance.now() - this.t0); }
     body() {
       return {
-        version: 2,
+        version: 3,
         session: SESSION,
         teacher: TEACHER,
+        delay: this.delay,
+        delayChanges: this.delayChanges,
         number: this.number,
         poolIndex: this.puzzle.index,
         board: this.puzzle.board,
@@ -294,12 +544,34 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
     }
   }
 
+  // The teacher's wait, for testing: shown to the owner, and anywhere outside claude.ai.
+  function offerTuning() {
+    if (delay === null) return;
+    const label = () => { delayOut.textContent = delay === 0 ? "at once" : delay / 1000 + " s"; };
+    delayInput.value = String(delay / 1000);
+    label();
+    tuningEl.hidden = false;
+    delayInput.addEventListener("input", () => {
+      delay = Number(delayInput.value) * 1000;
+      label();
+    });
+    delayInput.addEventListener("change", () => {
+      if (game) {
+        game.delayChanges.push({ t: game.elapsed(), afterMove: game.moves.length, seconds: delay / 1000 });
+        game.touch(false);
+      }
+      armTeacher();
+    });
+  }
+
   async function startRecording() {
     if (!window.claude || typeof window.claude.use !== "function") {
       showProblem("Games aren't being saved: open this page on claude.ai.");
+      offerTuning();
       return;
     }
     const [db, user] = await Promise.all([window.claude.use("db"), window.claude.use("user")]);
+    if (user && user.isOwner()) offerTuning();
     const uid = user ? await user.id() : null;
     if (!db || !uid) {
       showProblem("Games aren't being saved: sign in to claude.ai.");
@@ -431,7 +703,10 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
   }
 
   function newPuzzle() {
-    flushObserved();
+    if (model && game) {  // the finished puzzle's evidence goes into the model before the next one starts
+      syncModel();
+      model.endPuzzle();
+    }
     if (game && game.outcome === "playing") {
       game.outcome = "left";
       game.endedAt = new Date().toISOString();
@@ -440,7 +715,7 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
     const puzzle = POOL[order[played % order.length]];
     played += 1;
     game = new Game(puzzle, played);
-    if (bayes) game.beliefs = { a: bayes.a, b: bayes.b };
+    if (model) game.beliefs = model.beliefs();
     cars = parse(puzzle.board);
     startCars = JSON.parse(JSON.stringify(cars));
     solved = false;
@@ -459,12 +734,12 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
   function move(ch, steps, taught) {
     const car = cars[ch];
     const from = [car.r, car.c];
-    const before = bayes ? boardKey() : 0;
+    const before = model ? boardKey() : 0;
     if (car.h) car.c += steps; else car.r += steps;
     const m = { car: ch, fromRow: from[0], fromCol: from[1], toRow: car.r, toCol: car.c, t: game.elapsed() };
     if (taught) m.taught = true;
     game.moves.push(m);
-    if (bayes) observed.push([before, boardKey(), Boolean(taught)]);
+    if (model) observed.push([before, boardKey(), Boolean(taught)]);
     game.touch(false);
     render();
     if (ch === "A" && car.c + car.len - 1 === 5) win();
@@ -477,14 +752,15 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
   // one of those bringing the red car a move closer to the edge, a slide of any length being one
   // move as in the repo's distances. The clock stops while the page is hidden.
   //
-  // "bayes:<s>[:<name>=<value>,...]": the same clock, but when it runs out the teacher steps in only if it judges
-  // the player needs it - the simplest Bayesian teacher. Its belief: the player's chance p that a move of their
-  // own is optimal, one number for every board, with a Beta(a, b) prior updated by every move they make themselves
-  // (shown moves say nothing about it), over the whole visit. Its model of the player: from k moves from the goal,
-  // each move goes to k - 1 with probability p, else to k + 1 (a share `worse` of mistakes) or stays at k, and
-  // before each move they give up with probability `quit`. It shows a move when, at its posterior mean of p, one
-  // optimal move now (the player then going on alone) raises their chance of solving the puzzle by more than
-  // `cost`; otherwise the clock starts again. Parameters (BAYES) may be set in the spec, e.g. bayes:10:cost=0.05.
+  // "bayes3:<s>[:<name>=<value>,...]": the same clock, but when it runs out the Bayesian teacher (Bayes3, above)
+  // makes the move only if its model gives the player under `theta` (0.45) chance of solving the puzzle alone
+  // from here; otherwise it waits for the player's next move, which starts the clock again. Once it has shown a
+  // move, the clock starts again too, so while the chance stays low it goes on showing a move per `s` seconds -
+  // as far as the player needs, then hands the puzzle back. Its beliefs about the player last the whole visit.
+  // Parameters may be set in the spec, by teach.py's names, e.g. bayes3:10:theta=0.3.
+  //
+  // The owner (and anyone opening the page outside claude.ai) gets a slider for the wait, for testing; 0 means at
+  // once, as the simulated sessions' teacher. Games record the wait and any change to it.
   let teachTimer = null;
   let teachPending = false;  // the delay ran out mid-drag: teach when the drag ends, unless it moves a car
   let teaching = false;      // the teacher's car is sliding: input waits
@@ -544,7 +820,7 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
 
   function startSearch() {
     search = null;
-    if (DELAY === null) return;
+    if (delay === null) return;
     const s = { puzzle: game.puzzle, steps: solve(game.puzzle), result: null };
     search = s;
     const run = () => {
@@ -568,60 +844,43 @@ button.act.quiet { border-color: var(--muted); color: var(--muted); font-weight:
     return search.result;
   }
 
-  let observed = [];  // [board before, board after, taught] per move the Bayesian teacher hasn't counted yet
+  let observed = [];   // [board before, board after, taught] per move the model hasn't counted yet
+  let modelGame = null;  // the game whose puzzle the model has begun
   const boardKey = () => key(Object.keys(startCars).map((ch) => (cars[ch].h ? cars[ch].c : cars[ch].r)));
 
-  // Counts the current puzzle's moves made since the last call into the posterior (they need its distances).
-  function flushObserved() {
-    if (!bayes || !observed.length) return;
-    const { dist } = solver();
-    for (const [before, after, taught] of observed.splice(0)) {
-      if (taught) continue;
-      if (dist.get(after) === dist.get(before) - 1) bayes.a += 1; else bayes.b += 1;
+  // Brings the model up to date with the current game: begins its puzzle if it hasn't yet, and counts the moves
+  // made since the last call (both need the puzzle's distances, so this waits for its search).
+  function syncModel() {
+    if (!model || !game) return;
+    const { dist, far } = solver();
+    if (modelGame !== game) {
+      modelGame = game;
+      model.beginPuzzle(dist.get(key(Object.keys(startCars).map((ch) => (startCars[ch].h ? startCars[ch].c : startCars[ch].r)))), far);
     }
-  }
-
-  // How much more likely the player is to solve the puzzle from k moves out if shown one optimal move now (then
-  // going on alone) than if left to make this move themselves, for skill p; far = the puzzle's largest distance.
-  // V[j] = the chance of solving from j alone, by value iteration.
-  function advantage(k, p, far) {
-    const { quit, worse } = BAYES;
-    const V = new Array(far + 1).fill(0);
-    V[0] = 1;
-    const play = (j) => p * V[j - 1] + (1 - p) * (worse * V[Math.min(j + 1, far)] + (1 - worse) * V[j]);
-    for (let sweep = 0; sweep < 100000; sweep++) {
-      let change = 0;
-      for (let j = 1; j <= far; j++) {
-        const v = (1 - quit) * play(j);
-        change = Math.max(change, Math.abs(v - V[j]));
-        V[j] = v;
-      }
-      if (change < 1e-10) break;
-    }
-    return V[k - 1] - play(k);
+    for (const [before, after, taught] of observed.splice(0)) model.observe(dist.get(before), dist.get(after), taught);
   }
 
   function armTeacher() {
     clearTimeout(teachTimer);
     teachPending = false;
-    if (DELAY === null || solved || !game || document.visibilityState === "hidden") return;
-    teachTimer = setTimeout(teach, DELAY);
+    if (delay === null || solved || !game || document.visibilityState === "hidden") return;
+    teachTimer = setTimeout(teach, delay);
   }
 
   function teach() {
     if (solved || teaching) return;
     if (drag) { teachPending = true; return; }
-    const { letters, next, dist, far } = solver();
+    const { letters, next, dist } = solver();
     const pos = letters.map((ch) => (cars[ch].h ? cars[ch].c : cars[ch].r));
     const d = dist.get(key(pos));
-    if (bayes) {
-      flushObserved();
-      const p = bayes.a / (bayes.a + bayes.b), gain = advantage(d, p, far), shown = gain > BAYES.cost;
+    if (model) {
+      syncModel();
+      const moves = game.moves.length, chance = model.solveAlone(d, moves), shown = chance < model.P.theta;
       const round = (x) => Math.round(x * 1e4) / 1e4;
-      game.checks.push({ t: game.elapsed(), afterMove: game.moves.length, distance: d, p: round(p),
-        advantage: round(gain), shown });
+      game.checks.push({ t: game.elapsed(), afterMove: moves, distance: d, delay: delay / 1000,
+        solveAlone: round(chance), shift: round(model.puzzleShift()), shown });
       game.touch(false);
-      if (!shown) { armTeacher(); return; }
+      if (!shown) return;  // the player's next move starts the clock again
     }
     const options = next(pos).filter((q) => dist.get(key(q)) === d - 1);
     if (!options.length) return;

@@ -132,6 +132,69 @@ def check_freeze_and_planner(levels):
     print(f"deadlock test sound: flagged {flagged} of {unsolvable} unsolvable states; planner passes replay")
 
 
+def check_teacher(levels):
+    """Random(0) plays exactly like no teacher; Random(1) solves every level
+    in its optimal number of pushes; at p = 0.5 every push it shows is
+    optimal, and the log, moves and taught count agree with each other."""
+    from and_or import play
+    from teach import Random, Teacher
+    for level in levels:
+        space = StateSpace(level)
+        optimal = space.dist[0]
+        if optimal < 0:
+            continue
+        plain = play(level, gamma=0.05, max_pushes=150, seed=0)
+        zero = play(level, gamma=0.05, max_pushes=150, seed=0, teacher=Random(0))
+        assert zero == plain and zero["taught"] == 0, level.name
+        full = play(level, gamma=0.05, max_pushes=500, seed=0, teacher=Random(1))
+        assert full["solved"] and full["pushes"] == full["taught"] == optimal and full["restarts"] == 0, level.name
+
+        class Checking(Random):
+            def observe(self, state, push, next_state, taught):
+                assert not taught or self.mistake_kind(state, next_state) is None, level.name
+
+        teacher = Checking(0.5)
+        half = play(level, gamma=0.05, max_pushes=150, seed=1, teacher=teacher)
+        assert half["taught"] == teacher.counts["shown"]
+        assert half["taught"] == sum(e["kind"] == "taught" for e in half["log"])
+        assert half["pushes"] == sum(len(e["moves"]) for e in half["log"])
+        assert half["solved"] == level.solved(_replay(level, half["moves"])), level.name
+        assert Teacher.distance(teacher, level.start) == optimal
+    print(f"teachers ok on {len(levels)} levels")
+
+
+def check_student_labels(levels):
+    """student.labels_of: every label is legal and no shorter than the
+    oracle's distance; on an optimal attempt (a teacher showing every push)
+    shortcut labels are exactly the oracle's distances and optimal pushes."""
+    import torch
+    from student import Agent, labels_of, solve_intuition
+    from teach import Random
+    torch.manual_seed(0)
+    agent = Agent()
+    n = 0
+    for level in levels:
+        space = StateSpace(level)
+        optimal = space.dist[0]
+        if optimal <= 0:
+            continue
+        for teacher in (None, Random(0.5), Random(1.0)):
+            result = solve_intuition(agent, level, max(50, 5 * optimal), teacher=teacher, rng=random.Random(0))
+            exact = teacher is not None and teacher.p == 1.0
+            assert not exact or (result["solved"] and result["pushes"] == optimal)
+            for labels in ("own", "all"):
+                for window in (None, 3):
+                    for key, (d, targets) in labels_of(level, result, labels, window).items():
+                        state = level.from_key(key)
+                        true = space.distance(state)
+                        assert true is not None and d >= true and targets <= set(level.pushes(state)), level.name
+                        if exact and labels == "all" and window is None:
+                            assert d == true and all(space.distance(level.apply(state, p)) == true - 1
+                                                     for p in targets), level.name
+                        n += 1
+    print(f"student labels ok ({n} labels)")
+
+
 def _replay(level, moves):
     state = level.start
     for push in moves:
@@ -151,6 +214,8 @@ def main():
     for name, rows in microban:
         print(f"microban {name}: {check_level(Level(rows, name), rows)}")
     check_freeze_and_planner([Level(rows, name) for name, rows in microban])
+    check_teacher([Level(rows, name) for name, rows in microban])
+    check_student_labels([lv for lv in (Level(rows, name) for name, rows in microban) if lv.height <= 10 and lv.width <= 10][:20])
     if args.boxoban:
         files = glob.glob(os.path.join(HERE, "data", "raw", "boxoban-levels", "medium", "valid", "*.txt"))
         rng = random.Random(0)

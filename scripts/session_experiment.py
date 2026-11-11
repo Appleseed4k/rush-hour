@@ -87,8 +87,9 @@ ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
-    ap.add_argument("--teachers", nargs="+", default=["none", "random:0.1", "correct-after:0.1"],
-                    help=f"none, or kind:probability; kinds: {', '.join(te.TEACHERS)}")
+    ap.add_argument("--teachers", nargs="+", default=["none", "bayes3"],
+                    help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(te.TEACHERS)} "
+                         "(default: no teacher and bayes3, the default teacher)")
     ap.add_argument("--students", type=int, default=10, help="simulated participants per teacher")
     ap.add_argument("--session-bins", nargs="+", default=["6-6", "10-10", "13-13", "15-15"],
                     help="optimal-length bins the session's puzzles are drawn from, evenly (default: the human "
@@ -98,8 +99,9 @@ def parse_args(argv=None):
     ap.add_argument("--explore", type=float, default=1.0, help="the student's sampling temperature")
     ap.add_argument("--memory", type=int, default=10, help="recent boards the student avoids returning to")
     ap.add_argument("--window", type=int, default=10,
-                    help="hindsight: loops are cut only if they return to a board from the last WINDOW moves "
-                         "(-1: any board)")
+                    help="hindsight: loops are cut only if they return to a board from the last WINDOW moves; with "
+                         "--labels path / all, connections are noticed only between boards visited within WINDOW "
+                         "moves of each other (-1: any board)")
     ap.add_argument("--encode", type=float, default=1.0,
                     help="probability that each label, move shown or mistake pointed out is learned")
     ap.add_argument("--steps", type=int, default=1, help="passes over each update's examples")
@@ -127,7 +129,7 @@ def parse_args(argv=None):
                     help="share of its recent moves labelled each way (steps forward, steps back)")
     ap.add_argument("--labels", choices=rl.LABELS, default="own",
                     help="what a solved attempt teaches: own = the path played, loops cut out (--window); path / all = "
-                         "shortcut labels, shortest routes through the boards it visited (rl.shortcut_routes)")
+                         "shortcut labels, shortest routes through the boards it visited (rl.shortcut_routes; --window)")
     ap.add_argument("--surrender", action="store_true",
                     help="students may give up on a puzzle as people do (a rule fitted to the human data, "
                          "human_data.surrender_hazard); the move cap still applies")

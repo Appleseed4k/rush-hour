@@ -40,7 +40,7 @@ TEACHERS = {"random": teach.Random, "correct-after": teach.CorrectAfterMistake, 
             "bayes": teach.Bayesian, "bayes-learn": teach.LearningBayesian,
             "bayes2": teach.Bayesian2, "bayes-learn2": teach.LearningBayesian2, "trace": teach.Trace,
             "wall": teach.Wall, "stuck": teach.Stuck, "stuck-bayes": teach.StuckBayes, "stuck-bayes1": teach.StuckBayes1,
-            "hint": teach.Hint, "hint-bayes": teach.HintBayes}
+            "hint": teach.Hint, "hint-bayes": teach.HintBayes, "bayes3": teach.Bayesian3}
 # Kinds no longer available (their code is in future_old/), by the name saved runs keep their results under.
 RETIRED = {"flag": "flag mistakes"}
 # Settings a resumed run may change; anything else must match the saved run.
@@ -95,7 +95,8 @@ def make_teacher(spec):
     if kind in RETIRED:
         raise SystemExit(f"the {RETIRED[kind]} teacher is retired (see future_old/): drop {spec} from the teachers")
     kwargs = {k: float(v) for k, v in (e.split("=") for e in extra)}
-    return TEACHERS[kind](float(p) if p else 1.0, **kwargs)
+    cls = TEACHERS[kind]
+    return cls(float(p) if p else getattr(cls, "DEFAULT", 1.0), **kwargs)  # a kind may set its own default
 
 
 def teacher_name(spec):

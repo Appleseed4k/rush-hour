@@ -9,7 +9,7 @@ saves all of them as one JSON file:
                 "moveCount", "attempts", "moves": [{"car", "fromRow", "fromCol",
                 "toRow", "toCol", "t", "taught"}], "restarts": [{"t", "afterMove"}],
                 "checks": [{"t", "afterMove", "distance", "p", "advantage", "shown"}],
-                "beliefs": {"a", "b"}}]}
+                "beliefs": {"a", "b"}, "delay", "delayChanges": [{"t", "afterMove", "seconds"}]}]}
 
 `board` is the puzzle's rush_nw.txt bitboard and `distance` this repo's length
 (the red car reaches the edge). The page counts a puzzle solved when the red
@@ -29,6 +29,17 @@ optimal, the gain in their chance of solving it predicted from one move shown,
 and whether it showed one), `beliefs` its Beta(a, b) posterior when the game
 started (null for other teachers). Games saved before there was a teacher
 (version 1) have no teacher key: "none".
+
+From version 3 the Bayesian teacher is "bayes3:<seconds>[:<name>=<value>,...]"
+(scripts/teach.py's Bayesian3, ported): after that long without a move it makes
+the move if its model gives the player under theta chance of solving alone.
+Its checks are {"t", "afterMove", "distance", "delay", "solveAlone", "shift",
+"shown"} - the chance it gave, and its mean belief of how much harder (below
+0) or easier the puzzle is for the player, in logits - and beliefs is
+{"skill" (a logit per distance 1..11+), "level", "tau", "worse" (the share of
+mistakes going backward, per distance), "puzzles"} at the game's start. Every
+game records `delay`, the teacher's wait in seconds at its start (null: no
+teacher), and `delayChanges`, when the owner's testing slider changed it.
 """
 import json
 import os

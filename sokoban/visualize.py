@@ -5,13 +5,14 @@ scripts/lib.py's visualize() for Rush Hour.
     python visualize.py --source hard/000:12              # a specific level
     python visualize.py --dataset data/microban1.txt --source "microban/microban1:3"
     python visualize.py --gamma 0.05 --want-restart       # show lapses and a restart
+    python visualize.py --teacher random:0.2              # a teacher showing optimal pushes (green)
 
 Writes into visualization/<level>/:
     move_000.png ...  the board before the first push and after every push.
                       The arrow is the push just played, coloured by what the
                       AND-OR tree played it for: delivering a box (blue), clearing
                       a blocker (orange, with its depth), a lapse (red) or a random
-                      fallback (purple). The box being delivered is outlined in blue
+                      fallback (purple), or a push the teacher showed (green). The box being delivered is outlined in blue
                       and its goal ringed. Boxes are lettered so they can be followed.
     trajectory.png    oracle distance to the goal after each push, with restarts
                       and pass boundaries marked.
@@ -26,8 +27,10 @@ import string
 from and_or import play
 from label import StateSpace
 from level import Level
+from teach import make_teacher
 
-ROLE_COLORS = {"deliver": "royalblue", "blocker": "darkorange", "lapse": "crimson", "random": "purple"}
+ROLE_COLORS = {"deliver": "royalblue", "blocker": "darkorange", "lapse": "crimson", "random": "purple",
+               "taught": "seagreen"}
 WALL, FLOOR, BOX, BOX_ON_GOAL, PLAYER, GOAL = "#3d3d3d", "#efe9dc", "#d9a441", "#6aa84f", "#2b6cb0", "#c0392b"
 
 
@@ -81,6 +84,8 @@ def describe(info, box, level):
         return "lapse: the pass gives up for a random push"
     if role == "random":
         return "no plan found: random push"
+    if role == "taught":
+        return "the teacher shows an optimal push (the student then replans)"
     gi, gj = level.coords(info["goal"])
     if role == "deliver":
         return f"delivering box {box} to goal ({gi},{gj})"
@@ -108,6 +113,7 @@ def render(level, outcome, out_dir, space=None, gif=True, frame_ms=450):
     figsize = (max(level.width * scale, 5.5), level.height * scale + 1.1)
 
     frames, trace, pass_starts, restarts = [], [space.distance(level.start)], [], []
+    push_frames, push_roles = [], []
 
     def save(state, ids, title, subtitle, **kw):
         fig, ax = plt.subplots(figsize=figsize)
@@ -121,9 +127,11 @@ def render(level, outcome, out_dir, space=None, gif=True, frame_ms=450):
     state, ids, n = level.start, dict(start_ids), 0
     d0 = space.distance(state)
     save(state, ids, f"{level.name}: start", f"optimal {d0} pushes")
-    target_id, task = None, None
-    for k, entry in enumerate(outcome["log"], 1):
-        pass_starts.append(n)
+    target_id, task, k = None, None, 0
+    for entry in outcome["log"]:
+        if entry["kind"] != "taught" and entry["moves"]:
+            k += 1  # student passes that played something (a teacher may cut one short before its first push)
+            pass_starts.append(n)
         for push, info in zip(entry["moves"], entry["roles"]):
             ids_before = ids
             if info["role"] in ("deliver", "blocker") and (k, info["box"], info["goal"]) != task:
@@ -136,10 +144,13 @@ def render(level, outcome, out_dir, space=None, gif=True, frame_ms=450):
             n += 1
             dist = space.distance(state)
             trace.append(dist)
+            push_frames.append(len(trace) - 1)
+            push_roles.append(info["role"])
             target = next((c for c, letter in ids.items() if letter == target_id), None) \
                 if info["role"] in ("deliver", "blocker") else None
             dist_text = "deadlock" if dist == -1 else f"{dist} to go"
-            save(state, ids, f"push {n} - pass {k} ({entry['kind']}) - {dist_text}",
+            where = "teacher" if entry["kind"] == "taught" else f"pass {k} ({entry['kind']})"
+            save(state, ids, f"push {n} - {where} - {dist_text}",
                  describe(info, target_id, level), push=push, role=info["role"], target=target,
                  goal=info.get("goal"))
         if entry["restart"]:
@@ -149,7 +160,9 @@ def render(level, outcome, out_dir, space=None, gif=True, frame_ms=450):
             n += 1
             save(state, ids, f"restart {len(restarts)}", "deadlock detected (or no plan for too long): back to the start")
     if level.solved(state):
-        save(state, ids, f"solved in {outcome['pushes']} pushes", f"optimal {d0}, {outcome['restarts']} restart(s)")
+        shown = f", {outcome['taught']} shown by the teacher" if outcome["taught"] else ""
+        save(state, ids, f"solved in {outcome['pushes']} pushes{shown}",
+             f"optimal {d0}, {_plural(outcome['restarts'], 'restart')}")
 
     fig, ax = plt.subplots(figsize=(7, 3.2))
     xs = range(len(trace))
@@ -165,9 +178,14 @@ def render(level, outcome, out_dir, space=None, gif=True, frame_ms=450):
     ax.set_xlabel("frame (push, or restart)")
     ax.set_ylabel("pushes to goal (oracle)")
     ax.set_ylim(bottom=0)
-    ax.set_title(f"{level.name}: optimal {d0}, solver used {outcome['pushes']} pushes "
-                 f"({_plural(len(outcome['log']), 'pass')}, {_plural(outcome['restarts'], 'restart')})", fontsize=10)
-    if dead or restarts:
+    passes = sum(e["kind"] != "taught" and bool(e["moves"]) for e in outcome["log"])
+    shown = f", {outcome['taught']} shown by the teacher" if outcome["taught"] else ""
+    ax.set_title(f"{level.name}: optimal {d0}, solver used {outcome['pushes']} pushes{shown}\n"
+                 f"({_plural(passes, 'pass')}, {_plural(outcome['restarts'], 'restart')})", fontsize=10)
+    taught_x = [x for x, r in zip(push_frames, push_roles) if r == "taught"]
+    if taught_x:
+        ax.scatter(taught_x, [trace[x] for x in taught_x], color="seagreen", zorder=4, s=18, label="taught")
+    if dead or restarts or taught_x:
         ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "trajectory.png"), dpi=110)
@@ -196,7 +214,8 @@ def pick(rows, args):
         if not args.min_pushes <= optimal <= args.max_pushes:
             continue
         level = Level.from_line(board, source)
-        outcome = play(level, gamma=args.gamma, max_pushes=args.max_solver_pushes, seed=args.seed)
+        outcome = play(level, gamma=args.gamma, max_pushes=args.max_solver_pushes, seed=args.seed,
+                       teacher=make_teacher(args.teacher))
         roles = [r for e in outcome["log"] for r in e["roles"]]
         depth = max((r.get("depth", 0) for r in roles), default=0)
         restarts_ok = outcome["restarts"] > 0 if args.want_restart else outcome["restarts"] <= args.max_restarts
@@ -211,6 +230,7 @@ def main(argv=None):
     parser.add_argument("--source", help="the level's source field, e.g. hard/000:12 (default: auto-pick)")
     parser.add_argument("--gamma", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--teacher", default=None, help="a teacher from teach.py, e.g. random:0.2 (default none)")
     parser.add_argument("--min-pushes", type=int, default=15, help="auto-pick: optimal pushes at least")
     parser.add_argument("--max-pushes", type=int, default=35, help="auto-pick: optimal pushes at most")
     parser.add_argument("--min-depth", type=int, default=2, help="auto-pick: deepest blocker chain at least")
@@ -228,14 +248,17 @@ def main(argv=None):
             raise SystemExit(f"{args.source} not in {args.dataset}")
         optimal, board, source = match[0]
         level = Level.from_line(board, source)
-        outcome = play(level, gamma=args.gamma, max_pushes=args.max_solver_pushes, seed=args.seed)
+        outcome = play(level, gamma=args.gamma, max_pushes=args.max_solver_pushes, seed=args.seed,
+                       teacher=make_teacher(args.teacher))
     else:
         level, outcome = pick(rows, args)
     slug = level.name.replace("/", "_").replace(":", "_").replace(" ", "_").replace("'", "")
+    if args.teacher:
+        slug += "_" + args.teacher.replace(":", "")
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "visualization", slug)
     frames = render(level, outcome, out)
     print(f"{level.name}: solved={outcome['solved']} pushes={outcome['pushes']} restarts={outcome['restarts']} "
-          f"passes={outcome['passes']}\n{len(frames)} frames -> {out}")
+          f"taught={outcome['taught']} passes={outcome['passes']}\n{len(frames)} frames -> {out}")
 
 
 if __name__ == "__main__":

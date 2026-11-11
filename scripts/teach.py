@@ -20,7 +20,10 @@ move shown is one unit of the teaching budget (an intervention).
 Bayesian(budget) is adaptive: it keeps beliefs about the student, updated
 from every move the student makes, and shows the optimal move when that is
 worth more to the student's chance of solving the puzzle than it costs -
-spending about `budget` of all moves, like Random(budget).
+spending about `budget` of all moves, like Random(budget). Bayesian3
+("bayes3"), the default teacher, keeps that model of the student but shows
+the move whenever the model gives the student under theta (0.45) chance of
+solving alone from here - no budget, no cost.
 
 The interface, used by rl.solve_intuition during a student's attempt:
 - start(state, rng): an attempt at the puzzle starting from `state` begins;
@@ -862,17 +865,21 @@ class StuckGate:
 
     KEEPS_ALONE = True
     KIND = "stuck-bayes"
+    PATIENCE, GIVEUP = 1.0, 1  # the defaults; the name tags only settings that differ from them
 
-    def __init__(self, theta=0.5, patience=1.0, update=1, refit=math.inf, giveup=1, backward=1, **kwargs):
+    def __init__(self, theta=0.5, patience=None, update=1, refit=math.inf, giveup=None, backward=1, **kwargs):
+        patience = self.PATIENCE if patience is None else patience
+        giveup = self.GIVEUP if giveup is None else giveup
         if not backward:
             kwargs.update(worse=0.0, worse_strength=1e12)  # the prior share of backward mistakes, 0, never moves
         super().__init__(budget=0.0, **kwargs)  # no budget: nothing adjusts the cost (unused here)
         self.theta, self.patience = float(theta), float(patience)
         self.update, self.refit, self.giveup, self.backward = bool(update), refit, bool(giveup), bool(backward)
         self.fitted = 0  # puzzles the model of the student has learned from
-        self.name = f"{self.KIND} {self.theta:g}" + (f" p{self.patience:g}" if self.patience != 1 else "") \
+        self.name = f"{self.KIND} {self.theta:g}" + (f" p{self.patience:g}" if self.patience != self.PATIENCE else "") \
             + ("" if self.update else " no-update") + (f" frozen{self.refit:g}" if self.refit != math.inf else "") \
-            + ("" if self.giveup else " no-giveup") + ("" if self.backward else " no-backward")
+            + ("" if self.giveup == bool(self.GIVEUP) else (" giveup" if self.giveup else " no-giveup")) \
+            + ("" if self.backward else " no-backward")
 
     def _begin_puzzle(self, state):
         super()._begin_puzzle(state)
@@ -928,6 +935,31 @@ class StuckBayes1(StuckGate, Bayesian):
     original Bayesian taught better than the calibrated one at matched spend: does the same hold here?"""
 
     KIND = "stuck-bayes1"
+
+
+class Bayesian3(StuckBayes1):
+    """The default teacher: the original Bayesian model of the student with a plain threshold rule. On every turn
+    it shows the optimal move if its model gives the student less than `theta` (0.45) chance of solving the
+    puzzle untaught from here, within the moves left before the cap; otherwise the student plays. So it steps in
+    only as far as it thinks the student needs, hands the puzzle back, and steps back in if the student slides.
+
+    It is StuckBayes1 with no gate (patience 0) and no give-up model (only the move cap ends a puzzle in its plan):
+    the most parsimonious teacher of the ablations (notebooks/rush_hour_stuck_bayes.ipynb, agency 0). Its saved
+    runs there are under "stuck-bayes1 0.45 p0 no-giveup", the same teacher. What it keeps, each needed:
+    - skill per distance to the goal, refitted after every puzzle (older puzzles count less);
+    - this puzzle's difficulty for the student, updated by every move of its own on it (without: -0.12 learning
+      at matched spend, 7/8 students worse);
+    - mistakes going backward as well as sideways (without: -0.15).
+    The gate, the give-up model, the calibration (Bayesian2) and Bayesian's cost-benefit rule with a spending
+    target were each dropped at no loss; against that rule, on the same model, it learned 0.13 ± 0.04 more.
+    StuckGate's ablation switches still work, tagged against these defaults (e.g. patience=1 adds "p1")."""
+
+    KIND = "bayes3"
+    PATIENCE, GIVEUP = 0.0, 0
+    DEFAULT = 0.45  # theta when the spec gives none ("bayes3")
+
+    def __init__(self, theta=DEFAULT, **kwargs):
+        super().__init__(theta, **kwargs)
 
 
 class HintBayes(StuckBayes):

@@ -89,6 +89,11 @@ class Planner:
     # the pass's PushNodes played, kept or not.
     task: tuple = None
     roles: dict = field(default_factory=dict)
+    # PushNodes this pass has solved (not budgeted, but counted for play's
+    # max_visits), and the deliveries already known to fail in this pass:
+    # (state, box, goal, protected) keys.
+    push_visits: int = 0
+    failed: set = field(default_factory=set)
 
     def tick(self):
         self.or_visits += 1
@@ -218,6 +223,7 @@ class PushNode:
         return state, moves
 
     def solve(self):
+        self.p.push_visits += 1
         blockers = self.blockers(self.state)
         if blockers is None:
             return None
@@ -311,9 +317,16 @@ def segments(level, b, goal):
 def deliver(p, state, b, goal, protected):
     """(state, moves) with the box at b pushed onto goal, segment by segment,
     or None. Backtracks over segment choices; each PushNode's own search is
-    first-found, as in Rush Hour."""
+    first-found, as in Rush Hour. A delivery that fails is remembered for
+    the rest of the pass: without it, a long route that can't be completed
+    is retried along every way of cutting it into segments (Microban 155).
+    Failing is the same whatever order the choices are tried in, so this
+    changes only the planner's speed and how many random draws it makes."""
     if b == goal:
         return state, []
+    key = (state, b, goal, protected)
+    if key in p.failed:
+        return None
     s_of = p.level.shifts
     for d, k in p.order(state, segments(p.level, b, goal), lambda c: [(b, c[0])]):
         result = PushNode(p, state, b, d, k, protected=protected).solve()
@@ -326,6 +339,7 @@ def deliver(p, state, b, goal, protected):
             raise Lapse(lapse.state, moves + lapse.moves) from None
         if rest is not None:
             return rest[0], moves + rest[1]
+    p.failed.add(key)
     return None
 
 
@@ -376,6 +390,7 @@ class Pass:
     kind: str
     or_visits: int = 0
     roles: list = field(default_factory=list)
+    push_visits: int = 0
 
 
 def push_roles(p, state, moves, kind):
@@ -398,8 +413,10 @@ def push_roles(p, state, moves, kind):
 
 def solve_pass(p, state):
     """One pass from `state` (see Pass), with each push's role attached."""
+    p.push_visits, p.failed = 0, set()
     result = _solve_pass(p, state)
     result.roles = push_roles(p, state, result.moves, result.kind)
+    result.push_visits = p.push_visits
     return result
 
 
@@ -434,39 +451,94 @@ def _solve_pass(p, state):
     return Pass(p.level.apply(state, move), [move], "random", visits + p.or_visits)
 
 
-def play(level, gamma=0.0, max_pushes=500, on_deadlock="restart", patience=20, seed=None, **settings):
+def play(level, gamma=0.0, max_pushes=500, on_deadlock="restart", patience=20, seed=None, teacher=None,
+         max_visits=None, **settings):
     """Repeated passes from the start until the level is solved or
     `max_pushes` pushes have been played (restarts don't reset the count).
 
-    When a pass leaves the board in a detected deadlock (Level.deadlocked),
-    or with no legal push, or after `patience` passes in a row that found no
-    plan at all (a deadlock the quick test misses, most often), the level
-    restarts (`on_deadlock="restart"`) or play stops ("stop").
+    A pass is planned from the current board and its pushes are played one
+    at a time. When a pass ends leaving the board in a detected deadlock
+    (Level.deadlocked), or with no legal push, or after `patience` passes in
+    a row that found no plan at all (a deadlock the quick test misses, most
+    often), the level restarts (`on_deadlock="restart"`) or play stops
+    ("stop").
+
+    With a `teacher` (see teach.py), every turn the teacher may show a push
+    instead; it is played, and the student drops the rest of its pass and
+    plans a new one from the board the teacher left. The student's next push
+    is planned only if the teacher asks for it or doesn't teach, so a teacher
+    that teaches without looking costs the student no random draws.
+
+    `max_visits` caps the attempt's planning: once its passes have visited
+    that many search nodes (OrNodes and PushNodes) in total, play stops
+    unsolved ("capped"). It bounds the time one attempt can take,
+    deterministically: a student that keeps failing to plan can otherwise
+    spend two full pass budgets on every push.
 
     Returns a dict: solved, pushes, restarts, passes ({kind: count}), moves
-    (the pushes since the last restart) and log: one dict per pass with its
-    kind, the moves it played, their roles (see push_roles) and whether the
-    level restarted after it."""
-    p = Planner(level, gamma=gamma, rng=random.Random(seed), **settings)
-    state, moves, pushes, restarts, idle = level.start, [], 0, 0, 0
+    (the pushes since the last restart), taught (pushes the teacher showed),
+    visits (search nodes visited by all passes), capped (stopped by max_visits),
+    and log: one dict per pass with its kind, the moves it played, their
+    roles (see push_roles) and whether the level restarted after it. A push
+    the teacher showed is its own entry, of kind "taught" and role "taught"."""
+    rng = random.Random(seed)
+    p = Planner(level, gamma=gamma, rng=rng, **settings)
+    if teacher is not None:
+        teacher.start(level, rng)
+    state, moves, pushes, restarts, idle, taught, visits = level.start, [], 0, 0, 0, 0, 0
     kinds, log = {}, []
-    while not level.solved(state) and pushes < max_pushes:
-        result = solve_pass(p, state)
-        kinds[result.kind] = kinds.get(result.kind, 0) + 1
-        room = max_pushes - pushes
-        played = result.moves[:room]
-        for push in played:
-            state = level.apply(state, push)
-        moves.extend(played)
-        pushes += len(played)
-        log.append({"kind": result.kind, "moves": played, "roles": result.roles[:len(played)], "restart": False})
-        idle = idle + 1 if result.kind == "random" else 0
-        if level.solved(state):
-            break
-        if result.kind == "stuck" or level.deadlocked(state[0]) or idle >= patience:
+    queue = []      # (push, role) still to play in the current pass, next last
+    planned = []    # the kind of the pass the queue belongs to, once planned this turn
+
+    def propose():
+        """The student's next push: the next one of its pass, planning a new
+        pass first if none is under way (None if no push is legal)."""
+        nonlocal idle, visits
+        if not queue and not planned:
+            result = solve_pass(p, state)
+            visits += result.or_visits + result.push_visits
+            kinds[result.kind] = kinds.get(result.kind, 0) + 1
+            log.append({"kind": result.kind, "moves": [], "roles": [], "restart": False})
+            queue.extend(reversed(list(zip(result.moves, result.roles))))
+            planned.append(result.kind)
+            idle = idle + 1 if result.kind == "random" else 0
+        return queue[-1][0] if queue else None
+
+    while not level.solved(state) and pushes < max_pushes and (max_visits is None or visits < max_visits):
+        planned.clear()
+        push = teacher.advise(state, pushes, propose) if teacher is not None else None
+        if push is not None:
+            queue.clear()
+            idle = 0
+            taught += 1
+            log.append({"kind": "taught", "moves": [push], "roles": [{"role": "taught"}], "restart": False})
+            kinds["taught"] = kinds.get("taught", 0) + 1
+        else:
+            push = propose()
+            if push is not None:
+                _, role = queue.pop()
+                log[-1]["moves"].append(push)
+                log[-1]["roles"].append(role)
+        if push is not None:
+            before, state = state, level.apply(state, push)
+            moves.append(push)
+            pushes += 1
+            if teacher is not None:
+                teacher.observe(before, push, state, log[-1]["kind"] == "taught")
+            if level.solved(state) or queue:
+                continue
+        # the student's pass is over (or there was nothing to play): restart if it left the board hopeless
+        if push is None or level.deadlocked(state[0]) or idle >= patience:
             if on_deadlock != "restart":
                 break
             log[-1]["restart"] = True
             state, moves, idle, restarts = level.start, [], 0, restarts + 1
-    return {"solved": level.solved(state), "pushes": pushes, "restarts": restarts, "passes": kinds,
-            "moves": moves, "log": log}
+            queue.clear()
+            if teacher is not None:
+                teacher.restart(state)
+    result = {"solved": level.solved(state), "pushes": pushes, "restarts": restarts, "passes": kinds,
+              "moves": moves, "taught": taught, "visits": visits,
+              "capped": max_visits is not None and visits >= max_visits and not level.solved(state), "log": log}
+    if teacher is not None:
+        teacher.end_attempt(result)
+    return result
