@@ -680,7 +680,7 @@ def solve(state, heuristic=None, gamma=0.0, horizon=None, root_check=False, libr
     `gamma`, the probability an OrNode abandons its subgoal for a random
     legal move instead (see GammaLapse) - 0 (the default) never lapses. Left
     as an explicit parameter rather than a module constant so callers (e.g.
-    rush_hour.ipynb) can tune it directly instead of editing this file.
+    notebooks/old/p1_apprentice.ipynb) can tune it directly instead of editing this file.
 
     `horizon`, if given, plays only the first `horizon` moves of the pass's
     plan and discards the rest, so the caller replans from the new board: 1

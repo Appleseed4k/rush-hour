@@ -1,6 +1,6 @@
 """What a teacher's help does to the student's hindsight labels, at each hindsight window.
 
-Run from scripts/:  python hindsight_teacher_labels.py [puzzles] [students] [processes]
+Run from scripts/p6_hindsight/:  python hindsight_teacher_labels.py [puzzles] [students] [processes]
 Replays the first `puzzles` puzzles of teach_shortcut_agency1's sessions (its settings and seeds, learning as in the
 run, so the teacher acts as it did there) for each teacher below, records every attempt, and labels the solved ones
 with each label variant of hindsight_labels.py (own, W = 1, 3, 5, 10, inf). Every third puzzle is scored against
@@ -8,7 +8,8 @@ exact distances (multi_bfs), which is the slow part.
 
 Per teacher and variant: labels per puzzle (over all scored puzzles, unsolved ones giving none), labels on boards
 off every optimal path from the start, distance / true distance, and the share of target moves that are optimal.
-Output: models/sessions/hindsight_teacher_labels.json (or env LABEL_OUT)."""
+Output: models/sessions/hindsight_teacher_labels.json (or env LABEL_OUT), overall and per session length bin.
+Env LABEL_RUN and LABEL_TEACHERS (space-separated specs) replay another run or other teachers."""
 import json, os, random, sys
 from multiprocessing import Pool
 
@@ -16,14 +17,15 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the shared scripts
 import rl
 import session_experiment as se
 import teach_experiment as te
 from hindsight_labels import VARIANTS, labels, score
 from lib import bfs, car_orientations, multi_bfs
 
-RUN = "teach_shortcut_agency1"
-TEACHERS = ["none", "random:0.3", "bayes3:0.45", "bayes3:0.9", "bayes3:0.97"]
+RUN = os.environ.get("LABEL_RUN", "teach_shortcut_agency1")  # env: another run, with its settings and seeds
+TEACHERS = os.environ.get("LABEL_TEACHERS", "none random:0.3 bayes3:0.45 bayes3:0.9 bayes3:0.97").split()
 KEEP = ["own", "walk (W=1)", "W=3", "W=5", "W=10", "W=inf (all)"]
 VARIANTS = [(n, o) for n, o in VARIANTS if n in KEEP]
 EVERY = 3
@@ -54,7 +56,7 @@ def play(job):
         window=None if config["window"] < 0 else config["window"], encode=config["encode"],
         steps=config["steps"], block=config.get("block", 1), seed=config["seed"] + 7919 * (student + 1),
         shown_weight=config.get("shown_weight", 1.0), labels=config.get("labels", "own"),
-        agency_step=config.get("agency_step", "off"))
+        agency_step=config.get("agency_step", "off"), even_batches=config.get("even_batches", False))
     rl.solve_intuition = original
     assert len(captured) == len(puzzles)  # one attempt per puzzle
     out = []
@@ -96,9 +98,16 @@ if __name__ == "__main__":
         shown = np.mean([sh for sp, _, _, sh in done if sp == spec])
         result[spec] = {"shown": shown, "solved": np.mean([r["solved"] for r in rows]),
                         "moves per puzzle": np.mean([r["moves"] for r in rows]), "scored": len(rows),
-                        "table": summarise(rows)}
+                        "table": summarise(rows), "by_bin": {}}
+        for b in se.load_session(RUN, se.OUT)["config"]["session_bins"]:  # the same, per session length bin
+            lo, hi = map(int, b.split("-"))
+            in_bin = [r for r in rows if lo <= r["d"] <= hi]
+            if any(r["solved"] for r in in_bin):
+                result[spec]["by_bin"][b] = {"scored": len(in_bin), "solved": np.mean([r["solved"] for r in in_bin]),
+                                             "moves per puzzle": np.mean([r["moves"] for r in in_bin]),
+                                             "table": summarise(in_bin)}
     out = os.environ.get("LABEL_OUT", os.path.join(se.OUT, "hindsight_teacher_labels.json"))
-    json.dump({"puzzles": n, "students": students, "every": EVERY, "teachers": result}, open(out, "w"), indent=1,
+    json.dump({"run": RUN, "puzzles": n, "students": students, "every": EVERY, "teachers": result}, open(out, "w"), indent=1,
               default=float)
     import pandas as pd
     pd.set_option("display.width", 250)

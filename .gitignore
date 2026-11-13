@@ -1,7 +1,6 @@
 __pycache__/
 .venv/
 future_old/
-visualization/
 solve_attempts/
 solve_attempts_hint/
 models/

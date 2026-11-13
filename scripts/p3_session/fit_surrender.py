@@ -27,9 +27,11 @@ means in units of their standard errors) and the fit at scales 0 and 1.
 import argparse
 import json
 import os
+import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the shared scripts
 import human_data as hd
 import rl
 import session_experiment as se

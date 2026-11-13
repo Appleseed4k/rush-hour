@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+import math
 import os
 import random
 from collections import Counter, deque
@@ -1366,7 +1367,8 @@ def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, wi
     return examples, counts
 
 
-def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency_step="off", rng=None):
+def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency_step="off", rng=None,
+                  even_batches=False):
     """Learns from `examples` the way a person learns from one puzzle: `steps`
     passes over just these examples (one gradient step per batch), no replay
     of anything earlier, no validation, nothing to rewind to. `weights`: one
@@ -1384,7 +1386,12 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
       one time in ten at m = 0.1) - the same learning on average.
     At m = 0 no step is taken. `rng` (default: the random module) shuffles and
     skips. With agent.train_on(device), the steps run on a copy of the network
-    on that device, and the new weights are copied back at the end."""
+    on that device, and the new weights are copied back at the end.
+
+    Batches: by default `batch_size` examples each, the last holding what is left - which Adam steps as far
+    as a full one, so a pass over 517 examples takes two steps on 256 and a third on just 5. `even_batches`
+    splits each pass into the same number of batches, ceil(n / batch_size), of equal size instead (3 of
+    about 172): the same number of steps, none of them on a handful of examples."""
     assert agency_step in ("off", "scale", "skip"), agency_step
     rng = rng or random
     examples = list(examples) if weights is None else list(zip(examples, weights))
@@ -1395,8 +1402,13 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     try:
         for _ in range(steps):
             rng.shuffle(examples)
-            for i in range(0, len(examples), batch_size):
-                batch = examples[i:i + batch_size]
+            if even_batches:
+                k = max(1, math.ceil(len(examples) / batch_size))
+                bounds = [round(j * len(examples) / k) for j in range(k + 1)]
+            else:
+                bounds = list(range(0, len(examples), batch_size)) + [len(examples)]
+            for i, j in zip(bounds[:-1], bounds[1:]):
+                batch = examples[i:j]
                 if costly:
                     mean = float(np.mean([w[0] if isinstance(w, tuple) else w for _, w in batch]))
                     if mean <= 0 or agency_step == "skip" and rng.random() >= mean:
@@ -1423,7 +1435,7 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
 def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,
                      window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
                      surrender=None, shown_weight=1.0, judge=None, progress_weight=0.0, progress_tail=0.2,
-                     labels="own", agency_step="off"):
+                     labels="own", agency_step="off", even_batches=False):
     """A session in which a pure-intuition student (`agent`) learns online, a
     few puzzles at a time, under human-like limits on learning:
 
@@ -1461,6 +1473,7 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
     learns as before. `agency_step` "scale" or "skip" (see online_update): weights below 1
     also shrink the update, not only how examples count against each other -
     with "off", a block where every move was shown learns at full strength.
+    `even_batches` (see online_update): each update's batches of equal size, not 256 and a remainder.
 
     Returns one dict per puzzle, in order: puzzle (index), solved, surrendered, attempts,
     moves (all attempts), taught, interventions, examples learned
@@ -1507,7 +1520,7 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
         if (i + 1) % block == 0 or i + 1 == len(puzzles):
             if pending:
                 online_update(agent, pending, steps, weights=pending_w if weighted else None,
-                              agency_step=agency_step, rng=update_rng)
+                              agency_step=agency_step, rng=update_rng, even_batches=even_batches)
             pending, pending_w = [], []
             if on_puzzle is not None:
                 on_puzzle(i + 1, agent)
@@ -1597,7 +1610,7 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
     move sampled from softmax(logits / temperature) with `rng` (default: the
     random module). With a `teacher` (see teach.py), each turn the teacher
     may show the optimal move instead, which is played; it can look at the
-    move the student would have played (teach.CorrectMistakes does).
+    move the student would have played (the archived CorrectMistakes did).
 
     `surrender`, if given, is a function of the number of moves played so
     far: after each move that doesn't solve the puzzle, the student gives

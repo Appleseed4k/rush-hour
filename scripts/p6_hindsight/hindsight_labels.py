@@ -1,6 +1,6 @@
 """Hindsight label variants scored against exact distances, on attempts by the starting network.
 
-Run from scripts/:  python hindsight_labels.py [per_bin] [processes]   (the notebook used 150, 8)
+Run from scripts/p6_hindsight/:  python hindsight_labels.py [per_bin] [processes]   (the notebook used 150, 8)
 Plays `per_bin` session puzzles per bin of teach_shortcut_agency1 (its settings: temperature 1, memory 10, cap
 max(50, 10 d), giving up at 0.4x people's rates), then labels every solved attempt with each variant:
 
@@ -19,6 +19,7 @@ from multiprocessing import Pool
 
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the shared scripts
 import rl
 import session_experiment as se
 import teach_experiment as te

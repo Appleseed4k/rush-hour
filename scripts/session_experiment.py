@@ -79,7 +79,7 @@ TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_
 SAME_RUN_IGNORES = {"teachers", "processes", "out", "test_only", "overwrite", "surrender_table", "flag_penalty"}
 # Settings added after runs were saved, and what those runs did: a saved run without one counts as having its default.
 ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 0.2, "labels": "own",
-                  "agency_step": "off", "train_device": "cpu"}
+                  "agency_step": "off", "train_device": "cpu", "even_batches": False}
 
 
 # --- configuration -----------------------------------------------------------------------------
@@ -118,6 +118,10 @@ def parse_args(argv=None):
                     help="how agency shrinks the update (rl.online_update): off = it doesn't (Adam cancels a weight "
                          "shared by the whole batch); scale = each step scaled by the batch's mean weight; skip = "
                          "each step taken with that probability")
+    ap.add_argument("--even-batches", action=argparse.BooleanOptionalAction, default=None,
+                    help="each update's batches of equal size (rl.online_update) instead of 256 each and a remainder, "
+                         "on which Adam steps as far as on a full batch (default: on for a new run; a saved run "
+                         "keeps what it was played with, off if saved before this setting existed)")
     ap.add_argument("--train-device", default="cpu",
                     help="where the students' updates run (rl.PolicyAgent.train_on), e.g. mps: all the workers "
                          "share the GPU; play and tests stay on the CPU. The GPU's arithmetic differs slightly, "
@@ -236,6 +240,8 @@ def check_config(run_dir, config):
     if os.path.exists(path) and os.path.exists(os.path.join(run_dir, "initial.pt")):
         with open(path) as f:
             saved = json.load(f)
+        if config.get("even_batches") is None:  # not given: keep the saved run's batching
+            config["even_batches"] = saved.get("even_batches", ADDED_SETTINGS["even_batches"])
         differs = sorted(k for k in set(saved) | set(config) if k not in SAME_RUN_IGNORES
                          and _same_key(k, saved.get(k, ADDED_SETTINGS.get(k)))
                          != _same_key(k, config.get(k, ADDED_SETTINGS.get(k))))
@@ -248,6 +254,8 @@ def check_config(run_dir, config):
             json.dump(saved, f, indent=1)
         return saved
     # (a config.json without initial.pt is a run that stopped before any student started: start it afresh)
+    if config.get("even_batches") is None:
+        config["even_batches"] = True  # a new run's default
     os.makedirs(run_dir, exist_ok=True)
     with open(path, "w") as f:
         json.dump(config, f, indent=1)
@@ -336,7 +344,8 @@ def _student(job):
         seed=config["seed"] + 7919 * (student + 1),
         on_puzzle=snapshot, shown_weight=config.get("shown_weight", 1.0), judge=judge,
         progress_weight=progress_weight, progress_tail=config.get("progress_tail", 0.2),
-        labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"))
+        labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"),
+        even_batches=config.get("even_batches", False))
     m = multiplier(config)
     for entry, (i, d, _) in zip(record, puzzles):  # trial: the human trial this puzzle counts toward
         entry.update(step=entry["puzzle"] + 1, trial=entry["puzzle"] // m + 1, puzzle=i, distance=d)
