@@ -13,6 +13,12 @@ levels from that block's attempts alone (--steps passes). Student s plays
 the same order with the same random numbers under every teacher, so teachers
 compare student by student.
 
+Updates keep BatchNorm on the starting network's statistics (--freeze-norm):
+with blocks of a few dozen examples, letting them drift made an untaught
+student worse, as did --lr 1e-3 (a 1,000-level probe from the same start:
+held-out solve rate 0.12 -> 0.06 at 1e-3 with drifting statistics, 0.20 at
+1e-4, 0.225 at 1e-4 frozen).
+
 Tests: every --test-every levels, each student's current network plays the
 held-out test levels untaught (--test-runs attempts each, the same random
 numbers for everyone). A test attempt scores pushes / optimal, an unsolved
@@ -46,6 +52,9 @@ POOL = os.path.join(HERE, "data", "boxoban_medium_valid.txt")
 OUT = os.path.join(HERE, "models", "sessions")
 PRETRAIN_OUT = os.path.join(HERE, "models", "pretrain")
 N_PRETRAIN = 10_000
+# Settings added after runs were saved, and the value those runs had.
+ADDED_SETTINGS = {"shown_unsolved": 1, "negative_weight": 0.0, "batch_size": 256, "even_batches": 0,
+                  "optimal_labels": 0, "balance": [], "dead": 0, "critic_beta": 0.0}
 
 
 def _threads():
@@ -119,7 +128,27 @@ def _initial_job(job):
     run_dir, config, test_rows = job
     _threads()
     from student import Agent
-    return _test(Agent.load(os.path.join(run_dir, "initial.pt")), test_rows, config)
+    agent = Agent.load(os.path.join(run_dir, "initial.pt"))
+    _student_settings(agent, config)
+    return _test(agent, test_rows, config)
+
+
+def _balance_of(config, optimal):
+    """learning_session's `balance` from --balance (target shares per session bin), or None."""
+    shares = config.get("balance") or []
+    if not shares:
+        return None
+    bins = [tuple(map(int, b.split("-"))) for b in config["session_bins"]]
+    if len(shares) != len(bins):
+        raise SystemExit(f"--balance: one share per session bin ({len(bins)})")
+    target = {i: s / sum(shares) for i, s in enumerate(shares)}
+    return (lambda lv: next(i for i, (lo, hi) in enumerate(bins) if lo <= optimal[id(lv)] <= hi)), target
+
+
+def _student_settings(agent, config):
+    """The student's own settings (it uses them in tests too)."""
+    agent.dead = bool(config.get("dead", 0))
+    agent.critic_beta = float(config.get("critic_beta", 0.0))
 
 
 def _student_job(job):
@@ -130,6 +159,8 @@ def _student_job(job):
     from student import Agent, learning_session
     from teach import make_teacher
     agent = Agent.load(os.path.join(run_dir, "initial.pt"), lr=config["lr"])
+    agent.freeze_norm = bool(config.get("freeze_norm", 0))
+    _student_settings(agent, config)
     order = list(session_rows)
     random.Random(config["seed"] + 1000 + s).shuffle(order)
     levels = [Level.from_line(board) for _, board in order]
@@ -148,7 +179,13 @@ def _student_job(job):
     record = learning_session(agent, levels, make_teacher(spec), lambda lv: cap(optimal[id(lv)], config),
                               config["memory"], config["explore"], config["labels"],
                               None if config["window"] < 0 else config["window"], config["steps"],
-                              config["block"], config["seed"] + 7919 * (s + 1), on_puzzle)
+                              config["block"], config["seed"] + 7919 * (s + 1), on_puzzle,
+                              shown_unsolved=bool(config.get("shown_unsolved", 1)),
+                              negative_weight=config.get("negative_weight", 0.0),
+                              batch_size=config.get("batch_size", 256),
+                              even_batches=bool(config.get("even_batches", 0)),
+                              optimal_labels=bool(config.get("optimal_labels", 0)),
+                              balance=_balance_of(config, optimal))
     for entry, (opt, _) in zip(record, order):
         entry["optimal"] = opt
     out = {"record": record, "tests": tests, "seconds": round(time.perf_counter() - t0)}
@@ -164,7 +201,8 @@ def run(args):
     if os.path.exists(path):
         with open(path) as f:
             saved = json.load(f)
-        differs = [k for k in config if k not in ("teachers", "out", "init") and saved.get(k) != config[k]]
+        differs = [k for k in config if k not in ("teachers", "out", "init")
+                   and saved.get(k, ADDED_SETTINGS.get(k)) != config[k]]
         if differs:
             raise SystemExit(f"{run_dir} exists with other settings ({', '.join(differs)}); use another name")
         saved["teachers"] += [t for t in config["teachers"] if t not in saved["teachers"]]
@@ -241,6 +279,7 @@ def pretrain(args):
     record_so_far = []
     learning_session(agent, levels, make_teacher(args.teacher), lambda lv: cap(optimal[id(lv)], config),
                      labels=args.labels, steps=args.steps, block=args.block, seed=args.seed, on_puzzle=on_puzzle,
+                     replay=args.replay, updates=args.updates,
                      on_attempt=lambda i, result: record_so_far.append({"solved": result["solved"]}))
 
 
@@ -298,7 +337,9 @@ def summary(name, out=OUT):
         if not students:
             continue
         records = [e for st in students.values() for e in st["record"]]
-        shown = sum(e["taught"] for e in records) / max(1, sum(e["pushes"] for e in records))
+        # help: pushes shown, pushes taken back (undo) and restarts forced (restart), per push played
+        shown = (sum(e["taught"] + e.get("undone", 0) + e.get("forced", 0) for e in records)
+                 / max(1, sum(e["pushes"] for e in records)))
         points = sorted({int(p) for st in students.values() for p in st["tests"]})
         curve = []
         for p in points:
@@ -308,7 +349,7 @@ def summary(name, out=OUT):
         ends[spec] = end
         rows.append((spec, len(students), shown, statistics.fmean(e["solved"] for e in records),
                      mean_se(start - e[0] for e in end.values()), mean_se(e[1] for e in end.values()), curve))
-    print(f"{'teacher':14s} {'n':>3s} {'shown':>6s} {'solved as played':>17s} {'learning':>15s} {'end solved':>15s}")
+    print(f"{'teacher':14s} {'n':>3s} {'help':>6s} {'solved as played':>17s} {'learning':>15s} {'end solved':>15s}")
     for spec, n, shown, played, (lm, ls), (sm, ss), _ in rows:
         print(f"{spec:14s} {n:3d} {shown:6.3f} {played:17.2f} {lm:+8.2f} +- {ls:4.2f} {sm:8.2f} +- {ss:4.2f}")
     print("\ntest score along the session (mean over students; start", f"{start:.2f})")
@@ -345,10 +386,33 @@ def main(argv=None):
     r.add_argument("--init", default=None, help="the starting network (a .pt from pretrain)")
     r.add_argument("--session-bins", nargs="+", default=["8-11", "12-15", "16-19", "20-25"])
     r.add_argument("--per-bin", type=int, default=500, help="session levels per bin")
-    r.add_argument("--block", type=int, default=30, help="levels per update")
+    r.add_argument("--block", type=int, default=25, help="levels per update (a divisor of --test-every)")
     r.add_argument("--steps", type=int, default=3, help="passes over each update's examples")
-    r.add_argument("--lr", type=float, default=1e-4)
+    r.add_argument("--batch-size", type=int, default=256,
+                   help="examples per Adam step (smaller: more steps when a block has more examples)")
+    r.add_argument("--even-batches", type=int, default=0,
+                   help="1: split each pass into ceil(n / batch size) equal batches, with no small remainder batch")
+    r.add_argument("--balance", type=float, nargs="*", default=[],
+                   help="target share of the learning per session bin (e.g. 0.30 0.28 0.23 0.18); examples are "
+                        "weighted toward it (student.learning_session's balance)")
+    r.add_argument("--dead", type=int, default=0,
+                   help="1: the student learns which boards are dead from its detected deadlocks (a dead head) and "
+                        "skips pushes onto boards that look dead (student.dead_examples)")
+    r.add_argument("--critic-beta", type=float, default=0.0,
+                   help="> 0: weight a win's labels by the student's own value head's view of each push, "
+                        "min(1, exp(advantage / beta)) (student.critic_weights)")
+    r.add_argument("--optimal-labels", type=int, default=0,
+                   help="1: keep only the labels whose push the oracle calls optimal (student.optimal_only)")
+    r.add_argument("--lr", type=float, default=1e-4,
+                   help="1e-4 as in Rush Hour; at 1e-3 an untaught student gets worse over a session")
+    r.add_argument("--freeze-norm", type=int, default=1,
+                   help="1: BatchNorm keeps the starting network's statistics during updates (student.Agent.train_mode)")
     r.add_argument("--labels", choices=["own", "all"], default="all")
+    r.add_argument("--negative-weight", type=float, default=0.0,
+                   help="> 0: negative labels for pushes played into a detected deadlock, this much each "
+                        "(student.fatal_pushes)")
+    r.add_argument("--shown-unsolved", type=int, default=1,
+                   help="1: pushes the teacher showed teach in every attempt; 0: only in solved ones")
     r.add_argument("--window", type=int, default=-1, help="hindsight window in pushes (-1: none)")
     r.add_argument("--memory", type=int, default=10)
     r.add_argument("--explore", type=float, default=1.0)
@@ -372,6 +436,9 @@ def main(argv=None):
     p.add_argument("--block", type=int, default=30)
     p.add_argument("--steps", type=int, default=3)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--replay", type=int, default=None,
+                   help="replay buffer size in examples (default: none, online updates as in sessions)")
+    p.add_argument("--updates", type=int, default=40, help="with --replay: gradient steps per block")
     p.add_argument("--hidden", type=int, default=32)
     p.add_argument("--blocks", type=int, default=3)
     p.add_argument("--step-factor", type=float, default=5.0)

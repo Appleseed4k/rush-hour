@@ -12,7 +12,7 @@ solutions.
 | `label.py` | `StateSpace` (every reachable position, push edges, distance to goal) and the CLI that writes dataset files |
 | `and_or.py` | The AND-OR planner: `solve_pass()` (one pass) and `play()` (passes until solved, restarting on deadlock) |
 | `evaluate.py` | Planner variants against optimal push counts, binned by distance |
-| `teach.py` | Teachers that show the student the optimal push (the counterpart of `scripts/teach.py`): the `Teacher` interface and `Random(p)` |
+| `teach.py` | Teachers that show the student the optimal push (the counterpart of `scripts/teach.py`): the `Teacher` interface, `Random(p)`, `Guard(q)` (shows the optimal push when the next push would deadlock) `Undo(q)` (takes that push back; the student chooses again), `Restart(k)` (only forces restarts: on an oracle deadlock, and past k x optimal) and `Bayes(theta, act)` (a fitted model of the student; undoes, shows or restarts by its forecast of the chance of solving: a threshold, the planned value of a restart, or of an undo against a spending target) |
 | `teach_experiment.py` | Teachers against the AND-OR student: solve rate, pushes and restarts against pushes shown |
 | `student.py` | A student that learns online (policy network over pushes, shortcut or own labels): the counterpart of `scripts/rl.py`'s intuition student and `learning_session` |
 | `sessions.py` | Learning sessions with teachers, tested on held-out Boxoban levels: the counterpart of `scripts/session_experiment.py` (`pretrain`, `run`, `summary`) |
@@ -267,6 +267,120 @@ the table from it with `python teach_experiment.py --summarize`.
   (78, 116 and 126) every uncapped attempt solved, so some capped attempts
   would probably have solved too: the γ = 0 Microban solve rates are slightly
   low. No other setting hit the cap.
+
+## A student that learns (`student.py`, `sessions.py`)
+
+This is the counterpart of Rush Hour's session experiments (`scripts/rl.py`'s intuition student and
+`learning_session`, and `scripts/session_experiment.py`). The analysis is in
+**`notebooks/s1_teaching.ipynb`**, with figures in `notebooks/figures/s1_teaching/`.
+
+- **Student**: a policy network over pushes. Its input is walls, goals, boxes and the reachable region; it outputs a
+  push per cell and direction, plus a value head. It samples at temperature 1 and restarts when its quick deadlock
+  test fires.
+- **Learning**: it learns online from each block of 25 levels, using shortcut labels (`--labels all`) or its own
+  winning path (`own`), plus the pushes it was shown.
+- **Sessions**: 8 students per teacher play 2,000 Boxoban medium levels (8–25 pushes). Every 500 levels they are
+  tested untaught on 200 held-out levels. A test attempt scores pushes / optimal, an unsolved one counted at its cap.
+
+```bash
+python sessions.py pretrain --teacher random:0.5
+```
+
+```bash
+python sessions.py run shortcut_all --init models/pretrain/puzzle05400.pt --labels all
+```
+
+```bash
+python sessions.py summary shortcut_all
+```
+
+Results (start: held-out solve rate 0.13). **Learning** is the start score minus the end score.
+
+| teacher | interventions per push | learning, shortcut labels | learning, own labels | shortcut + negative labels | shortcut, batches of 64 | batches of 64, optimal labels only |
+|---|---|---|---|---|---|---|
+| none | 0% | **+0.34** | **+0.34** | −0.08 | +0.33 | **+0.45** |
+| random 0.1 | 6% | +0.10 | +0.07 | −0.01 | +0.13 | |
+| random 0.3 | 19% | +0.08 | +0.09 | +0.03 | +0.15 | |
+| random 1 | 100% | +0.23 | +0.23 | | +0.29 | |
+| guard 0.3 | 3.7% | +0.15 | | +0.00 | +0.21 | |
+| guard 1 | 18% | +0.22 | | | +0.31 | |
+| undo 0.3 | 3.9% | **+0.35** | | | **+0.40** | **+0.46** |
+| undo 1 | 41% | +0.25 | | | **+0.39** | **+0.45** |
+| restart dead | 12 restarts/level | +0.34 | | | | |
+| restart 1.5 | 13 restarts/level | +0.34 | | | | |
+| undo + restart 1.5 | | +0.29 | | | | |
+| bayes-undo 0.1 | 18% | | | | +0.26 | +0.36 |
+| bayes-undo 0.5 | 31% | | | | +0.33 | |
+| restart dead (batches of 64) | 12 restarts/level | | | | +0.37 | |
+| bayes-restart 0 | 13 restarts/level | | | | **+0.42** | |
+| bayes-undo-value 0.04 | 3.9% | | | | +0.38 | |
+| bayes-undo-value 0.18 | 18% | | | | +0.36 | |
+
+- **Help costs learning at every level, and partial help costs most** (with the default batches of up to 256). No
+  teacher beats every teacher, and full help beats both partial teachers, for 8 of 8 students in both runs. That makes
+  learning against help a U, not Rush Hour's inverted U.
+- **A deadlock guard** (`guard:q`, `teach.Guard`) steps in only when the student's next push would make the level
+  unsolvable, showing the optimal push instead (with probability q). It is the most efficient help so far: guard 1
+  ties full help at a fifth of the pushes shown and beats random 0.3 at the same spend (8/8). It still learns less
+  than no teacher (8/8).
+- **The label setting doesn't matter.** Pushes can't be undone, and the student restarts on deadlocks, so the boards it
+  visits rarely join up into shortcuts. Shortcut labels add about 3 examples per solved level over the winning path.
+- **Taking the push back removes the cost of help** (`undo:q`, `teach.Undo`). The undo teacher catches the same
+  pushes as the guard but shows nothing: it takes the push back and the student chooses again. Undo 0.3 steps in as
+  often as guard 0.3 and raises session solving as much, but learns +0.35 against +0.15 (8/8), tying no teacher
+  (6/8, −0.01 ± 0.02). So the guard's cost was the shown push steering the labelled route. But undo 0.3 solves 41%
+  more session levels than no teacher and learns no more: on these levels the student doesn't seem short of examples.
+  Undo 1 (+0.25) takes back 14 pushes per level, and with no restarts its labels span the whole wandering route.
+- **Forced restarts tie no teacher** (`restart:k`, `teach.Restart`; `undo+restart:k`). Restarting on oracle deadlocks
+  lifts session solving from 0.22 to 0.30 and learns +0.34, as does also restarting past 1.5 x optimal. Adding the
+  stray restart to undo 1 shortens its labelled wins and lifts it from +0.25 to +0.29 (7/8), still below no teacher.
+- **A fixed step budget, partly.** Each update is 3 passes in batches of up to 256, so blocks of 100 or 250 examples
+  get the same 3 Adam steps, and measured mid-session they move the weights the same distance. Equal batches
+  (`--even-batches 1`, Rush Hour's fix; run `shortcut_even`) keep the step count and change little (guard 0.3
+  +0.16, undo 1 +0.28). Batches of 64 (`--batch-size 64 --even-batches 1`, run `shortcut_b64`) make steps grow with
+  examples: no teacher gets twice the steps (6.4 per block) and learns the same (+0.33), while teachers with bigger
+  blocks get 3-3.5 times the steps and all learn more, most of all undo 1 (+0.25 to +0.39, 8/8) and guard 1 (+0.22 to
+  +0.31, 8/8). Undo 0.3 (+0.40, 7/8) and undo 1 (+0.39, 6/8) are the first teachers above no teacher (end score
+  −0.07 ± 0.03 and −0.06 ± 0.03). Shown pushes still cost: random 0.1 (+0.13), random 0.3 (+0.15) and guard 0.3
+  (+0.21) stay below no teacher (8/8).
+- **A Bayesian undo teacher** (`bayes-undo:θ`, `teach.Bayes`, the port of Rush Hour's `Bayesian3`) fits a model of
+  the student and takes back deadlocking pushes only while it forecasts under θ chance of solving untaught. It does
+  worse than undoing at random (batches of 64): θ 0.1 (18% of pushes) learns +0.26, below no teacher and both undo
+  teachers; θ 0.5 (31%) learns +0.33, tying no teacher and below undo 1 (39%, +0.39). It sends help to the hardest
+  levels and the ends of losing attempts. Its students end worse than no teacher's on the easiest held-out levels
+  (0.33 against 0.39) and no better on the hardest. Its rescued wins are long, but that isn't the cause: shortcut
+  labels keep 87% of a long win's labels optimal, and undo 1's wins are as long. `bayes-show:θ` shows the optimal push instead (not yet run).
+- **Only optimal labels** (`--optimal-labels 1`, run `shortcut_b64_opt`; `student.optimal_only`). Keeping only the
+  shortcut labels the oracle calls optimal drops about 7% of labelled boards and lifts every teacher tested (no teacher
+  +0.33 to +0.45, 8/8). The undo teachers' edge over no teacher disappears (all about +0.45), and bayes-undo 0.1
+  stays about 0.1 below, so label quality doesn't explain it. A lead: help shifts the examples toward the hardest
+  levels, and the easiest levels slip on held-out tests.
+- **Rebalancing by difficulty** (`--balance 0.30 0.28 0.23 0.18`, run `shortcut_b64_bal`) weights each update so
+  every difficulty bin keeps no teacher's share of the learning. It lifts bayes-undo 0.1 from +0.26 to +0.31 (7/8),
+  mostly on the easiest levels, and barely moves the others; bayes-undo 0.1 still trails no teacher by 0.06.
+- **Other rules on the Bayesian model work.** `bayes-restart:0` sends the student back to the start whenever its
+  plan says a fresh attempt raises the chance of solving (deadlocked boards the quick test missed, boards too far
+  from solved). It learns +0.42 with batches of 64, the best teacher there, above no teacher for 8/8 students and
+  above plain restart on deadlock (+0.37, 6/8). `bayes-undo-value:b` (Rush Hour's original Bayesian rule) undoes a
+  deadlocking push only when that raises the chance of solving by more than a cost tuned to spend b of the pushes:
+  at 18% it learns +0.36 against the threshold rule's +0.26 (8/8), and at 3.9% +0.38, tying undo 0.3. The
+  threshold rule's flaw was acting on attempts already lost.
+- **Negative labels for dead ends hurt** (`--negative-weight 1`, run `shortcut_neg`; `student.fatal_pushes`). The
+  push before each detected deadlock is labelled "not this push" by unlikelihood. Learning drops in every condition,
+  and no teacher becomes the worst. 72% of blamed pushes start from a board that was already deadlocked (the quick
+  test noticed late), and negatives outnumber positive examples about 2 to 1. The policy stays flat instead of
+  sharpening, so the student solves fewer session levels and gets fewer positive labels. Untested: oracle blame (the
+  push that actually created the deadlock) and a smaller weight.
+- **Why partial help hurts is open.** The notebook lists the candidates. `--shown-unsolved 0` tests one of them:
+  that pushes shown in failed attempts pull the student off what works for it.
+
+Settings that mattered:
+
+- **lr and BatchNorm.** At lr 1e-3 an untaught student got worse. Sessions use 1e-4, with BatchNorm frozen during
+  updates (`--freeze-norm 1`).
+- **Pretraining** with a teacher at p = 0.2 never got going.
+- **Not comparable across starts.** The runs share one starting network, so the tight standard errors say nothing
+  about variation across starts.
 
 ## Visualizing a solve (`visualize.py`)
 
