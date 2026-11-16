@@ -1,0 +1,31 @@
+shortcut_b64_opt_hind01: 16 student sessions to play, 2000 levels each, 200 test levels
+  1/16  841s  none student 0 (837s)
+  2/16  847s  none student 3 (842s)
+  3/16  847s  none student 6 (843s)
+  4/16  849s  none student 5 (845s)
+  5/16  857s  none student 1 (853s)
+  6/16  857s  none student 4 (853s)
+  7/16  868s  none student 2 (864s)
+  8/16  932s  none student 7 (830s)
+  9/16  1823s  undo:1 student 0 (982s)
+  10/16  1825s  undo:1 student 1 (978s)
+  11/16  1826s  undo:1 student 2 (979s)
+  12/16  1827s  undo:1 student 3 (978s)
+  13/16  1835s  undo:1 student 5 (977s)
+  14/16  1837s  undo:1 student 4 (979s)
+  15/16  1844s  undo:1 student 6 (975s)
+  16/16  1872s  undo:1 student 7 (940s)
+
+shortcut_b64_opt_hind01: labels all, window -1, 8 students; start score 4.74 (solved 0.13)
+teacher          n   help  solved as played        learning      end solved
+none             8  0.000              0.24    +0.44 +- 0.01     0.25 +- 0.00
+undo:1           8  0.416              0.91    +0.52 +- 0.02     0.31 +- 0.01
+
+test score along the session (mean over students; start 4.74)
+  none           500: 4.40  1000: 4.34  1500: 4.31  2000: 4.30
+  undo:1         500: 4.35  1000: 4.27  1500: 4.24  2000: 4.21
+
+end score, row minus column, paired by student (below 0: the row's students learned more; count = students better in the row)
+                                none                undo:1
+none                                   +0.09 +- 0.02 (1/8)
+undo:1           -0.09 +- 0.02 (7/8)                      

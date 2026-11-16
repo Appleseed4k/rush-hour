@@ -54,7 +54,8 @@ PRETRAIN_OUT = os.path.join(HERE, "models", "pretrain")
 N_PRETRAIN = 10_000
 # Settings added after runs were saved, and the value those runs had.
 ADDED_SETTINGS = {"shown_unsolved": 1, "negative_weight": 0.0, "batch_size": 256, "even_batches": 0,
-                  "optimal_labels": 0, "balance": [], "dead": 0, "critic_beta": 0.0}
+                  "optimal_labels": 0, "balance": [], "dead": 0, "critic_beta": 0.0,
+                  "hindsight": 0.0, "undo_negative": 0.0}
 
 
 def _threads():
@@ -149,6 +150,8 @@ def _student_settings(agent, config):
     """The student's own settings (it uses them in tests too)."""
     agent.dead = bool(config.get("dead", 0))
     agent.critic_beta = float(config.get("critic_beta", 0.0))
+    agent.hindsight = float(config.get("hindsight", 0.0))
+    agent.undo_negative = float(config.get("undo_negative", 0.0))
 
 
 def _student_job(job):
@@ -401,6 +404,13 @@ def main(argv=None):
     r.add_argument("--critic-beta", type=float, default=0.0,
                    help="> 0: weight a win's labels by the student's own value head's view of each push, "
                         "min(1, exp(advantage / beta)) (student.critic_weights)")
+    r.add_argument("--undo-negative", type=float, default=0.0,
+                   help="> 0: each push a teacher took back is a negative label of this weight "
+                        "('not that one', learned by unlikelihood; student.examples_from)")
+    r.add_argument("--hindsight", type=float, default=0.0,
+                   help="> 0: drop a win's labels whose push was undone later on the route (a box comes back to "
+                        "the cell it left) and that the student's network gave less than this probability "
+                        "(student.hindsight_filter)")
     r.add_argument("--optimal-labels", type=int, default=0,
                    help="1: keep only the labels whose push the oracle calls optimal (student.optimal_only)")
     r.add_argument("--lr", type=float, default=1e-4,

@@ -141,6 +141,8 @@ class Agent:
         self.freeze_norm = False  # see online_update
         self.dead = False  # learn the dead head from detected deadlocks, and look a push ahead with it in play
         self.critic_beta = 0.0  # > 0: weight a win's labels by the value head's view of each push (examples_from)
+        self.hindsight = 0.0  # > 0: drop a win's labels that look like detours in hindsight (hindsight_filter)
+        self.undo_negative = 0.0  # > 0: a push the teacher took back becomes a negative label of this weight
 
     def train_mode(self):
         """Training mode, with BatchNorm kept on its running statistics when
@@ -190,7 +192,7 @@ def solve_intuition(agent, level, max_pushes, memory=10, temperature=1.0, teache
     boards (Level.key, start first), its pushes as (push, taught) pairs, and
     "dead": True if it ended in a detected deadlock (the student restarted);
     and "undone": pushes the teacher took back (Teacher.veto) before they were
-    played, which don't count toward `max_pushes`; "forced": restarts the
+    played, which don't count toward `max_pushes`, and "vetoes": (board key, push) for each of them; "forced": restarts the
     teacher forced (Teacher.force_restart; also in "restarts", and the
     stretch they end is marked "forced")."""
     rng = rng or random
@@ -199,6 +201,7 @@ def solve_intuition(agent, level, max_pushes, memory=10, temperature=1.0, teache
     segments = [{"boards": [start_key], "moves": []}]
     recent = deque([start_key], maxlen=memory)
     pushes = restarts = taught = undone = forced = 0
+    vetoes = []
     if teacher is not None:
         teacher.start(level, rng)
     while pushes < max_pushes and not level.solved(state):
@@ -246,6 +249,7 @@ def solve_intuition(agent, level, max_pushes, memory=10, temperature=1.0, teache
             # would deadlock a solvable board, and such a board always has a push that doesn't, so this ends.
             while teacher is not None and teacher.veto(state, push):
                 undone += 1
+                vetoes.append((level.key(state), push))
                 vetoed.add(push)
                 proposed.clear()
                 push = propose()
@@ -260,7 +264,7 @@ def solve_intuition(agent, level, max_pushes, memory=10, temperature=1.0, teache
         segments[-1]["moves"].append((push, shown))
         recent.append(key)
     result = {"solved": level.solved(state), "pushes": pushes, "restarts": restarts, "taught": taught,
-              "undone": undone, "forced": forced, "segments": segments}
+              "undone": undone, "forced": forced, "vetoes": vetoes, "segments": segments}
     if teacher is not None:
         teacher.end_attempt(result)
     return result
@@ -373,6 +377,38 @@ def optimal_only(level, found):
     return out
 
 
+def hindsight_filter(agent, level, found, p_max):
+    """`found` (labels_of's result) without the boards whose label looks like a detour in hindsight, judged by the
+    student alone: a target push moves a box off a cell that a box fills again later on the labelled route (the
+    push was undone), and the student's network (before learning from this attempt) gave the target pushes less
+    than `p_max` in all. The route from a board follows the first of each board's target pushes (min) to the goal."""
+    if not found:
+        return found
+
+    def later_boxes(key):
+        out, seen = [], set()
+        while key in found and key not in seen:
+            seen.add(key)
+            key = level.key(level.apply(level.from_key(key), min(found[key][1])))
+            out.append(level.from_key(key)[0])
+        return out
+
+    out = {}
+    for b, (distance, targets) in found.items():
+        state = level.from_key(b)
+        undone = any(any((boxes >> p[0]) & 1 for boxes in later_boxes(level.key(level.apply(state, p))))
+                     for p in targets)
+        if undone:
+            boxes, player = state
+            region = level.reach(boxes, player)
+            legal = level.pushes_from(boxes, region)
+            probs = torch.softmax(agent.logits(level, boxes, region)[[action_index(level, p) for p in legal]], 0)
+            if sum(float(probs[legal.index(p)]) for p in targets) < p_max:
+                continue
+        out[b] = (distance, targets)
+    return out
+
+
 def critic_weights(agent, level, found):
     """{board: weight} for a win's labelled boards: the value head's view of the labelled push, advantage =
     value before - value after - 1 (0: a push that brings the board one closer; below: one that wastes pushes, or
@@ -414,10 +450,16 @@ def examples_from(agent, level, result, labels="all", window=None, shown_unsolve
     with `shown_unsolved` False, only in solved attempts. With
     `negative_weight` > 0, also a negative label for every push the student
     played into a detected deadlock (fatal_pushes), on a board with another
-    legal push: learned as "not this push here", weighing `negative_weight`."""
+    legal push: learned as "not this push here", weighing `negative_weight`.
+    With agent.undo_negative > 0, every push a teacher took back (result
+    "vetoes", solved or not) is a negative label on its board, weighing
+    agent.undo_negative: the teacher's "not that one", blamed on exactly the
+    push that would have deadlocked the level."""
     found = labels_of(level, result, labels, window)
     if optimal:
         found = optimal_only(level, found)
+    if agent.hindsight > 0:
+        found = hindsight_filter(agent, level, found, agent.hindsight)
     shown = {}
     for seg in (result["segments"] if shown_unsolved or result["solved"] else []):
         for b, (p, was_taught) in zip(seg["boards"], seg["moves"]):
@@ -434,6 +476,16 @@ def examples_from(agent, level, result, labels="all", window=None, shown_unsolve
                                 dead=False if agent.dead and b in found else None))
     if agent.dead:
         examples += dead_examples(agent, level, result)
+    if agent.undo_negative > 0:
+        vetoed = {}
+        for b, p in result.get("vetoes", []):
+            vetoed.setdefault(b, set()).add(p)
+        for b, pushes in vetoed.items():
+            boxes, player = level.from_key(b)
+            region = level.reach(boxes, player)
+            legal = [action_index(level, p) for p in level.pushes_from(boxes, region)]
+            examples.append(Example(agent.encoder.encode(level, boxes, region), legal, [], None,
+                                    [action_index(level, p) for p in pushes], agent.undo_negative))
     if negative_weight > 0:
         for b, pushes in fatal_pushes(result).items():
             boxes, player = level.from_key(b)

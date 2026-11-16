@@ -296,25 +296,25 @@ python sessions.py summary shortcut_all
 
 Results (start: held-out solve rate 0.13). **Learning** is the start score minus the end score.
 
-| teacher | interventions per push | learning, shortcut labels | learning, own labels | shortcut + negative labels | shortcut, batches of 64 | batches of 64, optimal labels only |
-|---|---|---|---|---|---|---|
-| none | 0% | **+0.34** | **+0.34** | −0.08 | +0.33 | **+0.45** |
-| random 0.1 | 6% | +0.10 | +0.07 | −0.01 | +0.13 | |
-| random 0.3 | 19% | +0.08 | +0.09 | +0.03 | +0.15 | |
-| random 1 | 100% | +0.23 | +0.23 | | +0.29 | |
-| guard 0.3 | 3.7% | +0.15 | | +0.00 | +0.21 | |
-| guard 1 | 18% | +0.22 | | | +0.31 | |
-| undo 0.3 | 3.9% | **+0.35** | | | **+0.40** | **+0.46** |
-| undo 1 | 41% | +0.25 | | | **+0.39** | **+0.45** |
-| restart dead | 12 restarts/level | +0.34 | | | | |
-| restart 1.5 | 13 restarts/level | +0.34 | | | | |
-| undo + restart 1.5 | | +0.29 | | | | |
-| bayes-undo 0.1 | 18% | | | | +0.26 | +0.36 |
-| bayes-undo 0.5 | 31% | | | | +0.33 | |
-| restart dead (batches of 64) | 12 restarts/level | | | | +0.37 | |
-| bayes-restart 0 | 13 restarts/level | | | | **+0.42** | |
-| bayes-undo-value 0.04 | 3.9% | | | | +0.38 | |
-| bayes-undo-value 0.18 | 18% | | | | +0.36 | |
+| teacher | interventions per push | learning, shortcut labels | learning, own labels | shortcut + negative labels | shortcut, batches of 64 | batches of 64, optimal labels only | batches of 64, hindsight filter 0.1 | optimal labels + hindsight filter |
+|---|---|---|---|---|---|---|---|---|
+| none | 0% | **+0.34** | **+0.34** | −0.08 | +0.33 | **+0.45** | +0.45 | +0.44 |
+| random 0.1 | 6% | +0.10 | +0.07 | −0.01 | +0.13 | | | |
+| random 0.3 | 19% | +0.08 | +0.09 | +0.03 | +0.15 | | | |
+| random 1 | 100% | +0.23 | +0.23 | | +0.29 | | | |
+| guard 0.3 | 3.7% | +0.15 | | +0.00 | +0.21 | | | |
+| guard 1 | 18% | +0.22 | | | +0.31 | | | |
+| undo 0.3 | 3.9% | **+0.35** | | | **+0.40** | **+0.46** | +0.46 | |
+| undo 1 | 41% | +0.25 | | | **+0.39** | **+0.45** | **+0.56** | +0.52 |
+| restart dead | 12 restarts/level | +0.34 | | | | | | |
+| restart 1.5 | 13 restarts/level | +0.34 | | | | | | |
+| undo + restart 1.5 | | +0.29 | | | | | | |
+| bayes-undo 0.1 | 18% | | | | +0.26 | +0.36 | | |
+| bayes-undo 0.5 | 31% | | | | +0.33 | | | |
+| restart dead (batches of 64) | 12 restarts/level | | | | +0.37 | | | |
+| bayes-restart 0 | 13 restarts/level | | | | **+0.42** | | +0.45 | |
+| bayes-undo-value 0.04 | 3.9% | | | | +0.38 | | | |
+| bayes-undo-value 0.18 | 18% | | | | +0.36 | | | |
 
 - **Help costs learning at every level, and partial help costs most** (with the default batches of up to 256). No
   teacher beats every teacher, and full help beats both partial teachers, for 8 of 8 students in both runs. That makes
@@ -365,6 +365,25 @@ Results (start: held-out solve rate 0.13). **Learning** is the start score minus
   deadlocking push only when that raises the chance of solving by more than a cost tuned to spend b of the pushes:
   at 18% it learns +0.36 against the threshold rule's +0.26 (8/8), and at 3.9% +0.38, tying undo 0.3. The
   threshold rule's flaw was acting on attempts already lost.
+- **Judging labels with the value head doesn't help** (`--critic-beta β`, runs `shortcut_b64_critic1`/`critic05`).
+  Weighting each label by the value head's view of the push ties plain labels at β = 1 (+0.33) and is worse at 0.5
+  (+0.28): it cuts good labels too. A dead head (`--dead 1`) can't learn deadlock from the student's own detected
+  deadlocks (offline), so it wasn't run in sessions.
+- **Wasted labels are few but pull hard.** On exact replays, 91-94% of labels are optimal under every teacher. The
+  wasted ones (no target optimal) each teach a detour (5.6 pushes on average) that the network finds surprising
+  (−log p 2.3 against 0.64), so 6-9% of labels carry 17-23% of the loss pull. Teachers with plain labels mostly
+  dilute that share.
+- **The hindsight filter** (`--hindsight p`, `student.hindsight_filter`; run `shortcut_b64_hind01`) is a rule the
+  student can apply itself: drop a label when a box its push moves comes back to the same cell later in the win, and
+  the network gave the push p < 0.1. With no teacher it learns +0.45 (7/8 over plain labels), tying oracle labels; p =
+  0.2 gives +0.40 (`shortcut_b64_hind02`). With the filter, **undo 1 learns +0.56**, above no teacher with the
+  filter (8/8, −0.11 ± 0.01), above undo 1 without it (8/8) and above undo 1 with oracle labels (7/8). Undo 0.3 and
+  bayes-restart 0 tie no teacher: their gain with plain labels was diluting the wasted labels. Help that brings more
+  of the student's own wins finally pays.
+- **Why the filter beats oracle labels under undo 1.** It also drops optimal labels the network finds very surprising
+  (p ≈ 0.03) on boxes parked and brought back, almost all in wins undo rescued: 6% of the labels the oracle keeps, but
+  31% of their pull. Adding the filter to oracle labels (`shortcut_b64_opt_hind01`) lifts undo 1 from +0.45 to +0.52
+  (7/8) and leaves no teacher unchanged, so dropping those labels explains most of the gap.
 - **Negative labels for dead ends hurt** (`--negative-weight 1`, run `shortcut_neg`; `student.fatal_pushes`). The
   push before each detected deadlock is labelled "not this push" by unlikelihood. Learning drops in every condition,
   and no teacher becomes the worst. 72% of blamed pushes start from a board that was already deadlocked (the quick

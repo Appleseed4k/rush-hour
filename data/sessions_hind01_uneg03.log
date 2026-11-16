@@ -1,0 +1,16 @@
+shortcut_b64_hind01_uneg03: 8 student sessions to play, 2000 levels each, 200 test levels
+  1/8  1028s  undo:1 student 7 (1024s)
+  2/8  1031s  undo:1 student 0 (1026s)
+  3/8  1032s  undo:1 student 6 (1027s)
+  4/8  1032s  undo:1 student 2 (1027s)
+  5/8  1033s  undo:1 student 4 (1029s)
+  6/8  1034s  undo:1 student 5 (1030s)
+  7/8  1035s  undo:1 student 1 (1031s)
+  8/8  1036s  undo:1 student 3 (1032s)
+
+shortcut_b64_hind01_uneg03: labels all, window -1, 8 students; start score 4.74 (solved 0.13)
+teacher          n   help  solved as played        learning      end solved
+undo:1           8  0.407              0.90    +0.56 +- 0.02     0.32 +- 0.01
+
+test score along the session (mean over students; start 4.74)
+  undo:1         500: 4.34  1000: 4.27  1500: 4.26  2000: 4.18
