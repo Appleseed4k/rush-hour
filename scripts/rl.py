@@ -1391,9 +1391,12 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     Batches: by default `batch_size` examples each, the last holding what is left - which Adam steps as far
     as a full one, so a pass over 517 examples takes two steps on 256 and a third on just 5. `even_batches`
     splits each pass into the same number of batches, ceil(n / batch_size), of equal size instead (3 of
-    about 172): the same number of steps, none of them on a handful of examples."""
+    about 172): the same number of steps, none of them on a handful of examples.
+
+    Returns {"pool": examples, "batches": batches over all passes, "steps": steps taken}."""
     assert agency_step in ("off", "scale", "skip"), agency_step
     rng = rng or random
+    stats = {"pool": len(examples), "batches": 0, "steps": 0}
     examples = list(examples) if weights is None else list(zip(examples, weights))
     costly = agency_step != "off" and weights is not None
     player, agent = agent, agent._learner()  # with train_on, train the copy on the training device
@@ -1409,6 +1412,7 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
                 bounds = list(range(0, len(examples), batch_size)) + [len(examples)]
             for i, j in zip(bounds[:-1], bounds[1:]):
                 batch = examples[i:j]
+                stats["batches"] += 1
                 if costly:
                     mean = float(np.mean([w[0] if isinstance(w, tuple) else w for _, w in batch]))
                     if mean <= 0 or agency_step == "skip" and rng.random() >= mean:
@@ -1424,18 +1428,77 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
                 agent.optimizer.zero_grad()
                 loss.backward()
                 agent.optimizer.step()
+                stats["steps"] += 1
     finally:
         for g, lr in zip(agent.optimizer.param_groups, base):
             g["lr"] = lr
     if agent is not player:
         player.net.load_state_dict({k: v.to(player.device) for k, v in agent.net.state_dict().items()})
     player._scores = {}
+    return stats
+
+
+LOSS_SUMS = ("n", "w", "policy", "w_policy", "dest", "w_dest", "n_dest", "dest_weight", "value", "w_value", "n_value")
+
+
+def example_losses(agent, examples, weights, chunk=512):
+    """Each example's loss terms under the network as it is (eval mode, no gradient - so BatchNorm's running
+    statistics, the random generators and the next update are untouched), with its loss weight (see
+    _weighted_loss; None: all 1). Returns {name: array per example} for LOSS_SUMS but "n": n 1s, w (move weight),
+    policy (-log probability on the target moves) and w * policy, dest (sum of its dest-target BCE terms), w_dest
+    (the same weighted), n_dest (dest targets), dest_weight (their weights' sum), value (smooth-L1 term, 0 without
+    a distance) and w * value, n_value (1 with a distance)."""
+    weights = weights if weights is not None else [1.0] * len(examples)
+    net = agent.net
+    was_training = net.training
+    net.eval()
+    out = {k: [] for k in LOSS_SUMS}
+    try:
+        with torch.no_grad():
+            for s in range(0, len(examples), chunk):
+                ex, ws = examples[s:s + chunk], weights[s:s + chunk]
+                x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, ex)
+                policy, dest, value = net.heads(x)
+                logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
+                pol = (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1)).cpu().numpy()
+                terms = F.binary_cross_entropy_with_logits(dest, dest_target, reduction="none").cpu().numpy()
+                has = ~torch.isnan(distance)
+                val = torch.zeros(len(ex))
+                if has.any():
+                    val[has.cpu()] = F.smooth_l1_loss(value.reshape(-1)[has], distance[has] / 10,
+                                                      reduction="none").cpu()
+                val = val.numpy()
+                for r, (e, a) in enumerate(zip(ex, ws)):
+                    w = a[0] if isinstance(a, tuple) else a
+                    idx = e.dest_idx.astype(np.int64)
+                    wd = a[1] if isinstance(a, tuple) else np.full(len(idx), w, dtype=np.float32)
+                    d = terms[r, idx]
+                    out["n"].append(1.0), out["w"].append(w)
+                    out["policy"].append(pol[r]), out["w_policy"].append(w * pol[r])
+                    out["dest"].append(float(d.sum())), out["w_dest"].append(float((wd * d).sum()))
+                    out["n_dest"].append(float(len(idx))), out["dest_weight"].append(float(wd.sum()))
+                    hv = bool(has[r])
+                    out["value"].append(val[r]), out["w_value"].append(w * val[r]), out["n_value"].append(float(hv))
+    finally:
+        net.train(was_training)
+    return {k: np.asarray(v, dtype=np.float64) for k, v in out.items()}
+
+
+def _log_losses(record, losses, puzzle, kind):
+    """Adds to each puzzle's record entry {"loss": {kind: {sum name: value}}} from example_losses' arrays, given
+    each example's puzzle index and kind."""
+    for i in np.unique(puzzle):
+        sums = {}
+        for k in np.unique(kind[puzzle == i]):
+            m = (puzzle == i) & (kind == k)
+            sums[str(k)] = {name: float(f"{losses[name][m].sum():.6g}") for name in LOSS_SUMS}
+        record[int(i)]["loss"] = sums
 
 
 def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,
                      window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
                      surrender=None, shown_weight=1.0, judge=None, progress_weight=0.0, progress_tail=0.2,
-                     labels="own", agency_step="off", even_batches=False):
+                     labels="own", agency_step="off", even_batches=False, log_loss=False):
     """A session in which a pure-intuition student (`agent`) learns online, a
     few puzzles at a time, under human-like limits on learning:
 
@@ -1479,12 +1542,18 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
     moves (all attempts), taught, interventions, examples learned
     from (progress labels included), progress_labels (by direction, with a
     judge). `on_puzzle(n, agent)`, if given, is called after each update with
-    the number of puzzles played so far - e.g. to snapshot the student."""
+    the number of puzzles played so far - e.g. to snapshot the student.
+
+    `log_loss` also records, per puzzle, what its examples gave the update: "loss" = {kind: sums of
+    example_losses over its examples, measured just before the update that learns from them}, kind "own" or
+    "shown" (on a board where a move was shown; "progress" for progress labels), and "update" = online_update's
+    stats for its block (shared by the block's puzzles). It changes nothing else: same play, same updates."""
     rng = random.Random(seed)
     # the updates' own shuffling and skipping, apart from play; "off" keeps the random module, as before
     update_rng = random.Random(seed + 104729) if agency_step != "off" else None
     record = []
     pending, pending_w = [], []
+    pending_idx, pending_kind, block_start = [], [], 0  # with log_loss: each pending example's puzzle and kind
     progress = judge is not None and progress_weight > 0
     weighted = shown_weight != 1 or progress
     recent = deque(maxlen=1000)
@@ -1505,8 +1574,17 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
         examples = intuition_examples(results, agent.size, agent.max_slide, window, encode, rng, labels)
         if weighted:
             pending_w += agency_weights(examples, results, shown_weight, agent.size, agent.max_slide, window, labels)
+        if log_loss:  # which examples sit on a board where a move was shown (agency_weights gives them shown_weight)
+            if weighted and shown_weight != 1:
+                ws, mark = pending_w[len(pending_w) - len(examples):], shown_weight
+            else:
+                ws, mark = agency_weights(examples, results, 0.0, agent.size, agent.max_slide, window, labels), 0.0
+            pending_kind += ["shown" if not isinstance(a, tuple) and a == mark else "own" for a in ws]
         extra, counts = progress_examples(results, judge, recent, progress_tail, agent.size, agent.max_slide,
                                           window, labels) if progress else ([], None)
+        if log_loss:
+            pending_kind += ["progress"] * len(extra)
+            pending_idx += [i] * (len(examples) + len(extra))
         examples += extra
         pending_w += [progress_weight] * len(extra)
         pending += examples
@@ -1518,10 +1596,18 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
                        "teacher_counts": dict(teacher.counts) if teacher is not None else {}}
                       | ({"progress_labels": counts} if progress else {}))
         if (i + 1) % block == 0 or i + 1 == len(puzzles):
+            if log_loss and pending:
+                _log_losses(record, example_losses(agent, pending, pending_w if weighted else None),
+                            np.array(pending_idx), np.array(pending_kind))
+            stats = None
             if pending:
-                online_update(agent, pending, steps, weights=pending_w if weighted else None,
-                              agency_step=agency_step, rng=update_rng, even_batches=even_batches)
-            pending, pending_w = [], []
+                stats = online_update(agent, pending, steps, weights=pending_w if weighted else None,
+                                      agency_step=agency_step, rng=update_rng, even_batches=even_batches)
+            if log_loss:
+                for entry in record[block_start:]:
+                    entry["update"] = dict(stats or {"pool": 0, "batches": 0, "steps": 0})
+            pending, pending_w, pending_idx, pending_kind = [], [], [], []
+            block_start = len(record)
             if on_puzzle is not None:
                 on_puzzle(i + 1, agent)
     return record

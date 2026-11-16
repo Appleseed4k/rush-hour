@@ -63,6 +63,17 @@ import time
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+# Python seeds its string hashing at random in every process, and the order of a session's examples follows the
+# order of sets of boards, so runs were not repeatable. Fix the seed (0, unless PYTHONHASHSEED is already set). It is
+# read only when the interpreter starts, so a run started without it restarts itself under it; the workers inherit it.
+HASH_SEED = "0"
+if __name__ == "__main__" and "PYTHONHASHSEED" not in os.environ:
+    import subprocess
+    import sys
+
+    os.environ["PYTHONHASHSEED"] = HASH_SEED
+    sys.exit(subprocess.call([sys.executable, *sys.orig_argv[1:]]))
+
 import torch
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -79,7 +90,7 @@ TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_
 SAME_RUN_IGNORES = {"teachers", "processes", "out", "test_only", "overwrite", "surrender_table", "flag_penalty"}
 # Settings added after runs were saved, and what those runs did: a saved run without one counts as having its default.
 ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 0.2, "labels": "own",
-                  "agency_step": "off", "train_device": "cpu", "even_batches": False}
+                  "agency_step": "off", "train_device": "cpu", "even_batches": False, "log_loss": False}
 
 
 # --- configuration -----------------------------------------------------------------------------
@@ -122,6 +133,10 @@ def parse_args(argv=None):
                     help="each update's batches of equal size (rl.online_update) instead of 256 each and a remainder, "
                          "on which Adam steps as far as on a full batch (default: on for a new run; a saved run "
                          "keeps what it was played with, off if saved before this setting existed)")
+    ap.add_argument("--log-loss", action="store_true",
+                    help="also record, per puzzle, its examples' losses and weights just before each update, split "
+                         "own / shown, and each update's steps (rl.learning_session log_loss); play and training "
+                         "are unchanged")
     ap.add_argument("--train-device", default="cpu",
                     help="where the students' updates run (rl.PolicyAgent.train_on), e.g. mps: all the workers "
                          "share the GPU; play and tests stay on the CPU. The GPU's arithmetic differs slightly, "
@@ -345,7 +360,7 @@ def _student(job):
         on_puzzle=snapshot, shown_weight=config.get("shown_weight", 1.0), judge=judge,
         progress_weight=progress_weight, progress_tail=config.get("progress_tail", 0.2),
         labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"),
-        even_batches=config.get("even_batches", False))
+        even_batches=config.get("even_batches", False), log_loss=config.get("log_loss", False))
     m = multiplier(config)
     for entry, (i, d, _) in zip(record, puzzles):  # trial: the human trial this puzzle counts toward
         entry.update(step=entry["puzzle"] + 1, trial=entry["puzzle"] // m + 1, puzzle=i, distance=d)
