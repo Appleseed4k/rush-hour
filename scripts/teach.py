@@ -841,6 +841,48 @@ class Bayesian3(StuckBayes1):
         super().__init__(theta, **kwargs)
 
 
+class TimedBayes3(Bayesian3):
+    """bayes3 whose theta changes once during the session: `theta` for its first `switch` puzzles, `late` from
+    then on (1080: half of a 72-trial session at multiplier 30). A test of whether the best amount of help depends
+    on time, which a single theta can't express. counts: as bayes3's, plus "theta" (this puzzle's)."""
+
+    KIND = "bayes3-time"
+    SWITCH = 1080
+
+    def __init__(self, theta=0.9, late=0.25, switch=SWITCH, **kwargs):
+        super().__init__(theta, **kwargs)
+        self.early, self.late, self.switch, self.puzzles = float(theta), float(late), int(switch), 0
+        self.name = f"{self.KIND} {self.early:g} then {self.late:g}" + (
+            f" at {self.switch}" if self.switch != self.SWITCH else "")
+
+    def _begin_puzzle(self, state):
+        self.puzzles += 1
+        self.theta = self.early if self.puzzles <= self.switch else self.late
+        self.counts["theta"] = self.theta
+        super()._begin_puzzle(state)
+
+
+class LengthBayes3(Bayesian3):
+    """bayes3 with one theta for short puzzles and another for long: `theta` below an optimal length of `split`
+    moves, `long` from there (18: the 9-11 and 14-16 bins against 19-21 and 24-26). A test of whether the best
+    amount of help depends on the puzzle's length, which a single theta can't express. counts: as bayes3's, plus
+    "theta" (this puzzle's)."""
+
+    KIND = "bayes3-length"
+    SPLIT = 18
+
+    def __init__(self, theta=0.25, long=0.9, split=SPLIT, **kwargs):
+        super().__init__(theta, **kwargs)
+        self.short, self.long, self.split = float(theta), float(long), int(split)
+        self.name = f"{self.KIND} {self.short:g} short {self.long:g} long" + (
+            f" at {self.split}" if self.split != self.SPLIT else "")
+
+    def _begin_puzzle(self, state):
+        self.theta = self.short if self.distances()[state] < self.split else self.long
+        self.counts["theta"] = self.theta
+        super()._begin_puzzle(state)
+
+
 class HintBayes(StuckBayes):
     """StuckBayes as hint and hand back: the same gate (stuck for `patience` x the puzzle's optimal length moves of
     its own) and the same help (the optimal move while its model gives the student under `theta` chance of solving
