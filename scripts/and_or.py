@@ -1,6 +1,7 @@
 import functools
 import itertools
 import math
+import os
 import random
 
 from lib import DELTAS, read_puzzles, visualize
@@ -24,8 +25,21 @@ MAX_PLAN_SIZE = 12
 # the original model: such plans are found, solve rates are higher on mid-range
 # puzzles, and the cost is search size - roughly 60x slower plan analyses
 # (median 0.9 -> 52 ms per state, some states over 5 s) and, with lapses off,
-# a ~200x larger search per pass.
-PROTECT_MOVERS = True
+# a ~200x larger search per pass. (With lapses on, gamma > 0, False costs no
+# more than True: scripts/p3_session/and_or_gamma.py.)
+#
+# Off by default since 2026-11-17: it fits people better
+# (notebooks/p3_session.ipynb's gamma section) and is the session start's
+# expert (models/apprentice/gamma0.07_free). Earlier work used True - phase 1's
+# apprentice (models/checkpoints) and the scripts under old/ - so rerunning those
+# as they were needs it on. With lapses off (gamma = 0, the default of
+# rl.solve_and_or and its relatives) an unprotected search can grow without
+# bound on some boards: give gamma > 0, or turn protection on.
+#
+# The environment variable AND_OR_PROTECT_MOVERS=1 turns it on for a whole
+# run, worker processes included (they inherit the environment) - e.g.
+# scripts/p3_session/apprentice.py --protect-movers on.
+PROTECT_MOVERS = os.environ.get("AND_OR_PROTECT_MOVERS", "0") != "0"
 
 
 # A `protected` set carries its own on/off switch: protect() only adds cars to it

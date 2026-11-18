@@ -1499,7 +1499,7 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
                      window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
                      surrender=None, shown_weight=1.0, judge=None, progress_weight=0.0, progress_tail=0.2,
                      labels="own", agency_step="off", even_batches=False, log_loss=False):
-    """A session in which a pure-intuition student (`agent`) learns online, a
+    """A session in which a simulated, pure-intuition student (`agent`) learns online, a
     few puzzles at a time, under human-like limits on learning:
 
     - online: after each block of `block` puzzles it learns from those

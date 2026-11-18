@@ -1,6 +1,11 @@
 """Teachers that decide, move by move, when to show a student the optimal
 move during a solve attempt.
 
+Terms: "the student" is the simulated student, the policy network that plays
+and learns (rl.PolicyAgent, rl.learning_session). "Model of the student" (or
+student model) always means a teacher's own beliefs about that student, as in
+the Bayesian teachers below - never the network itself.
+
 A teacher knows each puzzle's breadth-first-search distances (lib.multi_bfs,
 computed the first time it has to teach on that puzzle), so the move it shows
 is always optimal: one that brings the board a move closer to the goal (one
@@ -16,9 +21,11 @@ Bayesian(budget) is adaptive: it keeps beliefs about the student, updated
 from every move the student makes, and shows the optimal move when that is
 worth more to the student's chance of solving the puzzle than it costs -
 spending about `budget` of all moves, like Random(budget). Bayesian3
-("bayes3"), the default teacher, keeps that model of the student but shows
-the move whenever the model gives the student under theta (0.45) chance of
-solving alone from here - no budget, no cost.
+("bayes3") keeps that model of the student but shows the move whenever the
+model gives the student under theta (0.45) chance of solving alone from
+here - no budget, no cost. Bayesian4 ("bayes4"), the default teacher, is
+bayes3 with the model of the student carried from puzzle to puzzle by a
+filter (SkillFilter) instead of refitted from the stored history.
 
 The interface, used by rl.solve_intuition during a student's attempt:
 - start(state, rng): an attempt at the puzzle starting from `state` begins;
@@ -817,7 +824,8 @@ class StuckBayes1(StuckGate, Bayesian):
 
 
 class Bayesian3(StuckBayes1):
-    """The default teacher: the original Bayesian model of the student with a plain threshold rule. On every turn
+    """The default teacher until bayes4 (Bayesian4, the same with a filter for the model of the student): the
+    original Bayesian model of the student with a plain threshold rule. On every turn
     it shows the optimal move if its model gives the student less than `theta` (0.45) chance of solving the
     puzzle untaught from here, within the moves left before the cap; otherwise the student plays. So it steps in
     only as far as it thinks the student needs, hands the puzzle back, and steps back in if the student slides.
@@ -839,6 +847,142 @@ class Bayesian3(StuckBayes1):
 
     def __init__(self, theta=DEFAULT, **kwargs):
         super().__init__(theta, **kwargs)
+
+
+class SkillFilter:
+    """A normal belief over the skill logits per distance bin, carried from puzzle to puzzle: bayes3's prior
+    (skill ~ N(level, spread^2), level ~ N(prior_mean, prior_sd^2), the level integrated out), each puzzle folded in
+    by a Laplace approximation with its difficulty z averaged over the grid, then `q` x I + `q_shared` x 11^T added to
+    the covariance (independent and shared drift: the student may have changed). With `trend_sd` > 0 the belief
+    also covers a learning rate v (logits per puzzle, every distance alike): skill moves by v between puzzles, and
+    v by noise of variance `trend_q` - a Kalman filter with a local linear trend. Used by Bayesian4, and tested
+    offline against bayes3's refit in scripts/skill_tracking.py."""
+
+    B, Z, LOG_PZ = Bayesian.BINS, Bayesian.Z, Bayesian.LOG_PZ
+
+    def __init__(self, tau=0.5, q=0.0, q_shared=0.0, prior_mean=0.0, prior_sd=1.5, spread=1.0, trend_sd=0.0,
+                 trend_q=0.0):
+        B = self.B
+        self.tau = tau
+        self.trend = trend_sd > 0
+        d = B + self.trend
+        self.x = np.zeros(d)  # mean: skill logits, then v
+        self.x[:B] = prior_mean
+        self.P = np.zeros((d, d))  # covariance
+        self.P[:B, :B] = spread ** 2 * np.eye(B) + prior_sd ** 2 * np.ones((B, B))
+        self.Q = np.zeros((d, d))  # added between puzzles
+        self.Q[:B, :B] = q * np.eye(B) + q_shared * np.ones((B, B))
+        if self.trend:
+            self.P[B, B], self.Q[B, B] = trend_sd ** 2, trend_q
+        self.F = np.eye(d)  # skill += v between puzzles
+        if self.trend:
+            self.F[:B, B] = 1.0
+
+    @property
+    def mu(self):
+        return self.x[:self.B]
+
+    @property
+    def cov(self):
+        return self.P[:self.B, :self.B]
+
+    def _objective(self, s, o, n, mu, prec):
+        """The log of prior x this puzzle's likelihood at skill `s` (z averaged out), and the pieces of its
+        derivatives."""
+        logit = s[None, :] + self.tau * self.Z[:, None]  # (z, bin)
+        llz = (o * _log_sigmoid(logit) + (n - o) * _log_sigmoid(-logit)).sum(1) + self.LOG_PZ
+        top = llz.max()
+        lse = top + math.log(np.exp(llz - top).sum())
+        return lse - 0.5 * (s - mu) @ prec @ (s - mu), logit, np.exp(llz - lse)
+
+    @staticmethod
+    def _curvature(logit, r, o, n, prec):
+        """Minus the Hessian of the objective, or its Fisher part (always positive definite) where that isn't."""
+        p = 1 / (1 + np.exp(-logit))
+        g_z = o - n * p
+        gbar = r @ g_z
+        fisher = np.diag(r @ (n * p * (1 - p))) + prec
+        hess = fisher - (g_z * r[:, None]).T @ g_z + np.outer(gbar, gbar)
+        try:
+            np.linalg.cholesky(hess)
+        except np.linalg.LinAlgError:
+            hess = fisher
+        return hess, gbar
+
+    def update(self, o, n):
+        """Folds in one puzzle's optimal moves `o` out of `n` per bin, then steps to the next puzzle; returns the
+        log marginal likelihood of the moves (Laplace), what a bank of filters weighs its members by."""
+        B = self.B
+        log_ml = 0.0
+        if n.sum() > 0:
+            mu, cov = self.mu.copy(), self.cov.copy()
+            prec = np.linalg.inv(cov)
+            s = mu.copy()
+            value, logit, r = self._objective(s, o, n, mu, prec)
+            for _ in range(100):
+                hess, gbar = self._curvature(logit, r, o, n, prec)
+                step = np.linalg.solve(hess, gbar - prec @ (s - mu))
+                for _ in range(30):  # backtrack until the objective doesn't fall
+                    new = self._objective(s + step, o, n, mu, prec)
+                    if new[0] >= value - 1e-12:
+                        break
+                    step = step / 2
+                s = s + step
+                value, logit, r = new
+                if np.abs(step).max() < 1e-7:
+                    break
+            hess, _ = self._curvature(logit, r, o, n, prec)
+            post_cov = np.linalg.inv(hess)
+            log_ml = value - 0.5 * np.linalg.slogdet(cov)[1] - 0.5 * np.linalg.slogdet(hess)[1]
+            # The moves bear on skill only; carry the change to the rest of the belief (v) by linear regression
+            # on skill - exact for a normal belief once skill's own posterior is normal.
+            gain = self.P[:, :B] @ prec
+            self.x = self.x + gain @ (s - mu)
+            self.P = self.P - gain @ (cov - post_cov) @ gain.T
+            self.P = 0.5 * (self.P + self.P.T)
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        return log_ml
+
+
+class Bayesian4(Bayesian3):
+    """The default teacher: bayes3 with its model of the student carried from puzzle to puzzle by a filter, rather
+    than refitted after every puzzle from the stored history. The deciding rule is bayes3's (theta 0.45).
+
+    Skill per distance is a normal belief (SkillFilter: bayes3's hierarchical prior, the overall level integrated
+    out), and each finished puzzle's own moves are folded into it by a Laplace approximation; nothing else about
+    skill is stored. tau (how much puzzles' difficulty varies for the student) is learned by a bank of filters, one
+    per tau in TAUS, each weighed by how well it has predicted the student's moves (log marginal likelihood, the
+    sums forgetting by `forget` per puzzle) and by bayes3's prior on tau. The plan and the within-puzzle belief use
+    the best-weighted filter: its tau and its mean skill, as bayes3 uses its MAP fit. `q` > 0 widens every filter
+    between puzzles (the student may have changed); 0 (no drift) predicted best offline. How mistakes go (forward,
+    sideways or backward) is counted as in bayes3, with `decay`.
+
+    Offline (scripts/skill_tracking.py, 8 unhelped students x 2160 puzzles at agency 0): log loss per move 0.6588,
+    as bayes3's refit (0.6587), better calibrated, about 10x faster per puzzle than the refit."""
+
+    KIND = "bayes4"
+    TAUS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0, 1.2)
+
+    def __init__(self, theta=Bayesian3.DEFAULT, forget=0.99, q=0.0, **kwargs):
+        super().__init__(theta, **kwargs)
+        self.forget, self.q = float(forget), float(q)
+        self.history = deque(maxlen=0)  # nothing stored: the filters carry the evidence
+        self.filters = [SkillFilter(tau=t, q=self.q, prior_mean=self.prior_mean, prior_sd=self.prior_sd,
+                                    spread=self.spread) for t in self.TAUS]
+        self.tau_prior = -(np.log(self.TAUS) - math.log(self.tau0)) ** 2 / (2 * self.tau_sd ** 2)
+        self.tau_loglik = np.zeros(len(self.TAUS))
+        self._pick()
+        self.name += (f" forget{self.forget:g}" if self.forget != 0.99 else "") + (f" q{self.q:g}" if self.q else "")
+
+    def _pick(self):
+        best = self.filters[int(np.argmax(self.tau_prior + self.tau_loglik))]
+        self.skill, self.log_tau = best.mu.copy(), math.log(best.tau)
+
+    def _fit(self):
+        ll = np.array([f.update(self._optimal, self._own) for f in self.filters])
+        self.tau_loglik = self.forget * self.tau_loglik + ll
+        self._pick()
 
 
 class TimedBayes3(Bayesian3):

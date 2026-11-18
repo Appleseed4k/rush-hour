@@ -1,5 +1,7 @@
-"""A student that learns Sokoban online, the counterpart of the pure-intuition
-student in scripts/rl.py (PolicyAgent, solve_intuition, learning_session).
+"""A simulated student that learns Sokoban online, the counterpart of the
+pure-intuition student in scripts/rl.py (PolicyAgent, solve_intuition,
+learning_session). Not to be confused with a teacher's model of the student
+(teach.Bayes's beliefs about it).
 
 The student is a policy network over pushes. Each turn it samples a push from
 the network's softmax (at a temperature), avoiding pushes that return to one

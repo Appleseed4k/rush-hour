@@ -14,7 +14,7 @@ solutions.
 | `evaluate.py` | Planner variants against optimal push counts, binned by distance |
 | `teach.py` | Teachers that show the student the optimal push (the counterpart of `scripts/teach.py`): the `Teacher` interface, `Random(p)`, `Guard(q)` (shows the optimal push when the next push would deadlock) `Undo(q)` (takes that push back; the student chooses again), `Restart(k)` (only forces restarts: on an oracle deadlock, and past k x optimal) and `Bayes(theta, act)` (a fitted model of the student; undoes, shows or restarts by its forecast of the chance of solving: a threshold, the planned value of a restart, or of an undo against a spending target) |
 | `teach_experiment.py` | Teachers against the AND-OR student: solve rate, pushes and restarts against pushes shown |
-| `student.py` | A student that learns online (policy network over pushes, shortcut or own labels): the counterpart of `scripts/rl.py`'s intuition student and `learning_session` |
+| `student.py` | A simulated student that learns online (policy network over pushes, shortcut or own labels): the counterpart of `scripts/rl.py`'s intuition student and `learning_session` |
 | `sessions.py` | Learning sessions with teachers, tested on held-out Boxoban levels: the counterpart of `scripts/session_experiment.py` (`pretrain`, `run`, `summary`) |
 | `visualize.py` | Frame-by-frame PNGs, a trajectory plot and a GIF of the solver playing a level, written to `visualization/<level>/` (gitignored) |
 | `test_level.py` | Checks `StateSpace` against a naive 0-1 BFS solver, plus solution replay, distance consistency, deadlock-test soundness and planner replay |

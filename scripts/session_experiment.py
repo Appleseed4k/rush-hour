@@ -98,9 +98,9 @@ ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
-    ap.add_argument("--teachers", nargs="+", default=["none", "bayes3"],
+    ap.add_argument("--teachers", nargs="+", default=["none", "bayes4"],
                     help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(te.TEACHERS)} "
-                         "(default: no teacher and bayes3, the default teacher)")
+                         "(default: no teacher and bayes4, the default teacher)")
     ap.add_argument("--students", type=int, default=10, help="simulated participants per teacher")
     ap.add_argument("--session-bins", nargs="+", default=["6-6", "10-10", "13-13", "15-15"],
                     help="optimal-length bins the session's puzzles are drawn from, evenly (default: the human "

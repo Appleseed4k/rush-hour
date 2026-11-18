@@ -17,7 +17,7 @@ TEACHERS = {"random": teach.Random,
             "bayes": teach.Bayesian, "bayes-learn": teach.LearningBayesian,
             "bayes2": teach.Bayesian2, "bayes-learn2": teach.LearningBayesian2, "trace": teach.Trace,
             "wall": teach.Wall, "stuck": teach.Stuck, "stuck-bayes": teach.StuckBayes, "stuck-bayes1": teach.StuckBayes1,
-            "hint": teach.Hint, "hint-bayes": teach.HintBayes, "bayes3": teach.Bayesian3,
+            "hint": teach.Hint, "hint-bayes": teach.HintBayes, "bayes3": teach.Bayesian3, "bayes4": teach.Bayesian4,
             "bayes3-time": teach.TimedBayes3, "bayes3-length": teach.LengthBayes3}
 # Kinds no longer available here, by the name saved runs keep their results under. Their code is in
 # scripts/old/p2_teach/ (correct-after, correct-before) or, for flag, in future_old/ (not in this repo).
