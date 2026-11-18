@@ -15,3 +15,4 @@ sokoban/data/*.log
 sokoban/data/boxoban_medium_valid.txt
 sokoban/data/eval_*.csv
 sokoban/visualization/
+visualization/
