@@ -8,5 +8,7 @@ HUMANS = os.path.join(ROOT, "23vrb-osfstorage-archive")  # Olieslagers et al. (2
 MODELS = os.path.join(ROOT, "models")
 SESSIONS = os.path.join(MODELS, "sessions")  # session runs (sessions.py), one folder per run
 APPRENTICE = os.path.join(MODELS, "apprentice")  # expert-iteration runs (experiments/apprentice.py)
-STUDENTS = os.path.join(MODELS, "teach", "fresh_p0.1", "random_0.1")  # candidate starting students (surrender.py)
-START = os.path.join(STUDENTS, "round6_epoch01.pt")  # the student every session starts from
+STUDENTS = os.path.join(MODELS, "students")  # candidate starting students, one per round of their pretraining run
+START = os.path.join(STUDENTS, "round6_epoch01.pt")  # the student every session starts from (surrender.py picked it)
+# The newer candidate (from 2026-11-17, runs aostart_* in the archive): the AND-OR apprentice itself,
+# os.path.join(APPRENTICE, "gamma0.07_free", "round1_epoch02.pt"), with giving-up scale 0.30.

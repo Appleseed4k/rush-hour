@@ -18,8 +18,9 @@ from rushhour import paths, surrender as fs  # noqa: E402
 
 OUT = os.path.join(paths.MODELS, "summary", "apprentice_curve")
 RUNS_PER_PUZZLE = 10
-APPRENTICES = {  # name: folder of round{r}_epoch{e}.pt checkpoints with a manifest.json
-    "protected": os.path.join(paths.MODELS, "checkpoints"),  # phase 1: gamma 0.07, protect_movers on
+# name: folder of round{r}_epoch{e}.pt checkpoints with a manifest.json. (Phase 1's "protected" apprentice,
+# gamma 0.07 with protect_movers on, is in the archive - see MODELS.md.)
+APPRENTICES = {
     "unprotected": os.path.join(paths.APPRENTICE, "gamma0.07_free"),  # gamma 0.07, protect_movers off
 }
 

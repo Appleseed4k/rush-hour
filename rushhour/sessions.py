@@ -44,7 +44,7 @@ reads a run back; session_curve() and test_curve() summarize it, with
 standard errors across students.
 
 Examples (from the repository root):
-    python -m rushhour.sessions base --init models/students/start.pt
+    python -m rushhour.sessions base --init models/students/round6_epoch01.pt
     python -m rushhour.sessions lapses --init ... --encode 0.3 --teachers none random:0.1
     python -m rushhour.sessions base --test-only --test-runs 5
     python -m rushhour.sessions base --teachers bayes:0.1 --init ...   # base's settings: adds a teacher
