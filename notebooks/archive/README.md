@@ -15,4 +15,3 @@ To rerun one, check out the tag it was frozen at and restore its data:
 | `p5_simplest_teacher.ipynb` | The stuck-Bayes teacher (threshold θ on the chance of solving alone), its ablations and calibration |
 | `p6_hindsight.ipynb` | Hindsight labels (window, multiplier) fitted to people's learning rate; bayes3 across agency |
 | `p7_pomdp.ipynb` | Toward a POMDP teacher: a small learning model fitted to the sessions (`p7_pomdp_definition_handoff.md`: its definition) |
-| `skill_filter.html` | Export of the offline test of how a teacher carries its skill estimate across puzzles (p4/p5) |

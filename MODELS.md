@@ -11,6 +11,7 @@ at the same relative paths, to the archive folder **`C:\dev\rush-hour-archive\`*
 |---|---|---|---|
 | `sessions/<run>/` (28 runs) | Session results: `config.json`, per teacher `sessions.json` (play) and `results.json` (tests). The students' snapshots (`*.pt`) are archived. | `python -m rushhour.sessions` | summary |
 | `sessions/and_or_gamma/` | Plain AND-OR on the 70 human layouts over γ | `experiments/and_or_gamma.py` | summary, p8 |
+| `sessions/teach_shortcut_agency0/trace/` | The unhelped students' paths, and `skill_tracking.json`, the sweep behind bayes4 and `notebooks/skill_filter.html` (bayes3's refit included) | `python -m rushhour.sessions`; `experiments/skill_tracking.py` (now writes `summary/skill_tracking.json`) | `experiments/skill_tracking.py` |
 | `sessions/calibrated_v2/` | Only its `config.json`: it defines `surrender.puzzle_set("test")` | - | summary |
 | `summary/and_or_humans/` | The paper model's move likelihoods and simulations | `experiments/and_or_humans.py` | summary |
 | `summary/apprentice_curve/` | Each apprentice checkpoint on the test puzzles | `experiments/apprentice_curve.py` | summary |

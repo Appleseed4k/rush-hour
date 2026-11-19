@@ -15,17 +15,14 @@ fixed schedules are Random(p): p = 0 never teaches (the student learns only
 from its own attempts), p = 1 shows every move (the student only watches).
 Each move shown is one unit of the teaching budget (an intervention).
 
-Bayesian(budget) is adaptive: it keeps beliefs about the student, updated
-from every move the student makes, and shows the optimal move when that is
-worth more to the student's chance of solving the puzzle than it costs -
-spending about `budget` of all moves, like Random(budget). StuckBayes1
-("stuck-bayes1") gates it on the student being stuck and replaces the budget
-with a threshold. Bayesian3 ("bayes3"), the default teacher, keeps that model
-of the student but shows the move whenever the model gives the student under
-theta (0.45) chance of solving alone from here - no budget, no cost.
+Bayesian4 ("bayes4"), the default teacher, is adaptive: it keeps a model of
+the student, updated from every move the student makes, and shows the
+optimal move whenever that model gives the student under theta (0.45) chance
+of solving alone from here.
 
-Other teachers tried along the way (mistake correction, flagging, walls,
-hints, recalibrated and filtered student models, ...) are at tag pre-cleanup.
+Other teachers tried along the way (the earlier Bayesian teachers bayes,
+stuck-bayes1 and bayes3, mistake correction, flagging, walls, hints, ...) are
+at tag pre-cleanup; runs that used them still load (RETIRED).
 
 The interface, used by student.solve_intuition during a student's attempt:
 - start(state, rng): an attempt at the puzzle starting from `state` begins;
@@ -48,10 +45,11 @@ over a round's attempts into expert_iteration's history.
 Specs: "kind", "kind:p" or "kind:p,key=value,..." name a teacher (make_teacher); TEACHERS lists the
 kinds.
 """
-import functools
+import json
 import math
+import os
 import random
-from collections import Counter, deque
+from collections import Counter
 
 import numpy as np
 
@@ -125,12 +123,6 @@ class Random(Teacher):
         return self.rng.random() < self.p
 
 
-@functools.lru_cache(maxsize=None)
-def _human_hazard():
-    """People's surrender rates by moves / optimal (human_data.surrender_hazard), read once per process."""
-    from . import human_data
-    edges, rates, _ = human_data.surrender_hazard()
-    return np.array(edges, dtype=float), np.array(rates)
 
 
 def _log_sigmoid(x):
@@ -142,87 +134,167 @@ def _softmax(x):
     return e / e.sum()
 
 
-class Bayesian(Teacher):
-    """An adaptive teacher in the spirit of hierarchical Bayesian models of
-    teaching (Chen et al., 2024) and of when parents take over (Shachnai et
-    al., 2025): it holds beliefs about the student, updates them from what
-    the student does, and steps in when its beliefs say the student needs it.
+class SkillFilter:
+    """A normal belief over the skill logits per distance bin, carried from puzzle to puzzle: a hierarchical prior
+    (skill ~ N(level, spread^2), level ~ N(prior_mean, prior_sd^2), the level integrated out), each puzzle folded in
+    by a Laplace approximation with its difficulty z averaged over the grid, then `q` x I + `q_shared` x 11^T added to
+    the covariance (independent and shared drift: the student may have changed). With `trend_sd` > 0 the belief
+    also covers a learning rate v (logits per puzzle, every distance alike): skill moves by v between puzzles, and
+    v by noise of variance `trend_q` - a Kalman filter with a local linear trend. Used by Bayesian4, and tested
+    offline in experiments/skill_tracking.py."""
 
-    Beliefs, a hierarchy (fitted, MAP, after every puzzle):
-    - the student's skill: the chance that a move of its own is optimal,
-      as a logit per distance to the goal (1, 2, ..., 10, 11 or more - near
-      the goal is easier, and that is where students improve first), each
-      drawn around the student's overall level (sd `spread`), which has a
-      population prior (mean `prior_mean`, sd `prior_sd`, logits);
-    - each puzzle's difficulty for this student: a shift of all those
-      logits, normal with sd tau (itself fitted, prior around `tau`) - some
-      puzzles are much harder for it than others of the same length. Within
-      a puzzle, the teacher's belief about the shift is updated after every
-      move the student makes itself;
-    - what a mistake looks like: the share of non-optimal moves that go a
-      move further from the goal (rather than sideways), per distance (prior
-      mean `worse`, worth `worse_strength` moves);
-    - the student's persistence: its chance of giving up after a move, as
-      people's (human_data.surrender_hazard) times a factor with a
-      log-normal prior around 1 (sd `persistence_sd`), from the moves after
-      which it carried on and the one after which it gave up, if it did.
-    The student keeps learning, so older evidence counts less: each puzzle's
-    by `decay` per puzzle since (the last `window` puzzles are kept).
-    Moves the teacher showed say nothing about skill.
-
-    Deciding (planned at the start of each puzzle): the student's progress is
-    modelled as a walk in distance to the goal - each move of its own one
-    closer with its skill there, else further or sideways - that ends when
-    red is out (worth 1), when it gives up, or at the move cap
-    (`step_factor` x the optimal length, at least `min_steps`, as the
-    sessions'). Showing the optimal move brings the board one closer for a
-    cost. Backward induction over (distance, moves made) gives, for every
-    possible difficulty of the puzzle, how much better showing is than
-    letting the student play; on each turn the teacher averages that over
-    its current belief about the puzzle's difficulty (Chen et al.'s
-    marginalising over what the learner knows) and shows the move if it
-    comes out ahead. So it steps in where the student is far from the goal,
-    struggling on this puzzle, and running out of moves or patience, and
-    stays out where it would get there alone.
-
-    The cost per move shown adjusts itself, after each puzzle, so that
-    about `budget` of the moves (over the last ten or so puzzles) are shown
-    - the same spending as Random(budget), placed where it should matter
-    most. It never looks at the student's intended move.
-
-    Meant for sessions, one teacher per student, kept across puzzles (in
-    student.expert_iteration's parallel attempts every puzzle gets a fresh copy,
-    so it never gets to know the student). counts, per puzzle:
-    "shown"; "predicted_solve" (at the start, the chance it gave the student
-    of solving untaught); "skill_at_start" (its belief of the chance the
-    student's next move is optimal there, on a typical puzzle);
-    "puzzle_shift" (its belief, at the end, of how much easier - in logits -
-    the puzzle was for the student than a typical one); "cost"."""
-
-    BINS = 11
+    B = 11  # distance bins: 1, 2, ..., 10, 11 or more
     Z = np.linspace(-3, 3, 13)  # quadrature points for a puzzle's difficulty, in units of tau
     LOG_PZ = -0.5 * Z ** 2 - np.log(np.exp(-0.5 * Z ** 2).sum())
-    S = np.logspace(-2, 1, 31)  # persistence factors on people's surrender rates
 
-    def __init__(self, budget=0.1, decay=0.99, window=300, step_factor=10.0, min_steps=50, prior_mean=0.0,
-                 prior_sd=1.5, spread=1.0, tau=0.5, tau_sd=0.5, worse=0.35, worse_strength=10.0,
-                 persistence_sd=1.0, cost=0.02, cost_rate=0.2):
+    def __init__(self, tau=0.5, q=0.0, q_shared=0.0, prior_mean=0.0, prior_sd=1.5, spread=1.0, trend_sd=0.0,
+                 trend_q=0.0):
+        B = self.B
+        self.tau = tau
+        self.trend = trend_sd > 0
+        d = B + self.trend
+        self.x = np.zeros(d)  # mean: skill logits, then v
+        self.x[:B] = prior_mean
+        self.P = np.zeros((d, d))  # covariance
+        self.P[:B, :B] = spread ** 2 * np.eye(B) + prior_sd ** 2 * np.ones((B, B))
+        self.Q = np.zeros((d, d))  # added between puzzles
+        self.Q[:B, :B] = q * np.eye(B) + q_shared * np.ones((B, B))
+        if self.trend:
+            self.P[B, B], self.Q[B, B] = trend_sd ** 2, trend_q
+        self.F = np.eye(d)  # skill += v between puzzles
+        if self.trend:
+            self.F[:B, B] = 1.0
+
+    @property
+    def mu(self):
+        return self.x[:self.B]
+
+    @property
+    def cov(self):
+        return self.P[:self.B, :self.B]
+
+    def _objective(self, s, o, n, mu, prec):
+        """The log of prior x this puzzle's likelihood at skill `s` (z averaged out), and the pieces of its
+        derivatives."""
+        logit = s[None, :] + self.tau * self.Z[:, None]  # (z, bin)
+        llz = (o * _log_sigmoid(logit) + (n - o) * _log_sigmoid(-logit)).sum(1) + self.LOG_PZ
+        top = llz.max()
+        lse = top + math.log(np.exp(llz - top).sum())
+        return lse - 0.5 * (s - mu) @ prec @ (s - mu), logit, np.exp(llz - lse)
+
+    @staticmethod
+    def _curvature(logit, r, o, n, prec):
+        """Minus the Hessian of the objective, or its Fisher part (always positive definite) where that isn't."""
+        p = 1 / (1 + np.exp(-logit))
+        g_z = o - n * p
+        gbar = r @ g_z
+        fisher = np.diag(r @ (n * p * (1 - p))) + prec
+        hess = fisher - (g_z * r[:, None]).T @ g_z + np.outer(gbar, gbar)
+        try:
+            np.linalg.cholesky(hess)
+        except np.linalg.LinAlgError:
+            hess = fisher
+        return hess, gbar
+
+    def update(self, o, n):
+        """Folds in one puzzle's optimal moves `o` out of `n` per bin, then steps to the next puzzle; returns the
+        log marginal likelihood of the moves (Laplace), what a bank of filters weighs its members by."""
+        B = self.B
+        log_ml = 0.0
+        if n.sum() > 0:
+            mu, cov = self.mu.copy(), self.cov.copy()
+            prec = np.linalg.inv(cov)
+            s = mu.copy()
+            value, logit, r = self._objective(s, o, n, mu, prec)
+            for _ in range(100):
+                hess, gbar = self._curvature(logit, r, o, n, prec)
+                step = np.linalg.solve(hess, gbar - prec @ (s - mu))
+                for _ in range(30):  # backtrack until the objective doesn't fall
+                    new = self._objective(s + step, o, n, mu, prec)
+                    if new[0] >= value - 1e-12:
+                        break
+                    step = step / 2
+                s = s + step
+                value, logit, r = new
+                if np.abs(step).max() < 1e-7:
+                    break
+            hess, _ = self._curvature(logit, r, o, n, prec)
+            post_cov = np.linalg.inv(hess)
+            log_ml = value - 0.5 * np.linalg.slogdet(cov)[1] - 0.5 * np.linalg.slogdet(hess)[1]
+            # The moves bear on skill only; carry the change to the rest of the belief (v) by linear regression
+            # on skill - exact for a normal belief once skill's own posterior is normal.
+            gain = self.P[:, :B] @ prec
+            self.x = self.x + gain @ (s - mu)
+            self.P = self.P - gain @ (cov - post_cov) @ gain.T
+            self.P = 0.5 * (self.P + self.P.T)
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        return log_ml
+
+
+class Bayesian4(Teacher):
+    """The Bayesian teacher ("bayes4"), in the spirit of hierarchical Bayesian models of teaching (Chen et al.,
+    2024) and of when parents take over (Shachnai et al., 2025): it holds beliefs about the student, updates them
+    from what the student does, and on every turn shows the optimal move if its model gives the student less than
+    `theta` (0.45) chance of solving the puzzle untaught from here, within the moves left before the cap; otherwise
+    the student plays. So it steps in only as far as it thinks the student needs, hands the puzzle back, and steps
+    back in if the student slides. It never looks at the student's intended move.
+
+    Its model of the student:
+    - skill: the chance that a move of its own is optimal, as a logit per distance to the goal (1, 2, ..., 10, 11
+      or more - near the goal is easier, and that is where students improve first). A normal belief carried from
+      puzzle to puzzle by a filter (SkillFilter: each skill drawn around the student's overall level, sd `spread`,
+      the level around `prior_mean`, sd `prior_sd`, integrated out); each finished puzzle's own moves are folded
+      in by a Laplace approximation. Nothing else about skill is stored. `q` > 0 widens the belief between puzzles
+      (the student may have changed); 0 (no drift) predicted best offline;
+    - each puzzle's difficulty for this student: a shift of all the logits, normal with sd tau. tau is learned by
+      a bank of filters, one per tau in TAUS, each weighed by how well it has predicted the student's moves (log
+      marginal likelihood, forgetting by `forget` per puzzle) and by a log-normal prior around `tau` (sd
+      `tau_sd`). Within a puzzle the belief about the shift is updated after every move the student makes itself;
+    - what a mistake looks like: the share of non-optimal moves that go a move further from the goal (rather than
+      sideways), per distance (prior mean `worse`, worth `worse_strength` moves; older puzzles count less, by
+      `decay` per puzzle).
+    The plan and the within-puzzle belief use the best-weighted filter: its tau and its mean skill. Moves the
+    teacher showed say nothing about skill.
+
+    The chance of solving alone (planned at the start of each puzzle): the student's progress as a walk in
+    distance to the goal - each move of its own one closer with its skill there, else further or sideways - that
+    ends when red is out or at the move cap (`step_factor` x the optimal length, at least `min_steps`, as the
+    sessions'), by backward induction over (moves made, difficulty, distance); on each turn averaged over the
+    current belief about the puzzle's difficulty.
+
+    History: the last of a line of Bayesian teachers (p4-p5; the older ones, "bayes", "stuck-bayes1" and "bayes3",
+    are at tag pre-cleanup). It is bayes3 - the simplest of the stuck-Bayes ablations, each part it keeps needed
+    (difficulty updated within the puzzle: without, -0.12 learning at matched spend; backward mistakes: without,
+    -0.15) - with the refit of skill from the stored history after every puzzle replaced by the filter. Offline
+    (experiments/skill_tracking.py, 8 unhelped students x 2160 puzzles at agency 0): log loss per move 0.6588, as
+    bayes3's refit (0.6587), better calibrated, about 10x faster per puzzle.
+
+    Meant for sessions, one teacher per student, kept across puzzles. counts, per puzzle: "shown";
+    "predicted_solve" (at the start, the chance it gave the student of solving untaught); "skill_at_start" (its
+    belief of the chance the student's next move is optimal there, on a typical puzzle); "puzzle_shift" (its
+    belief, at the end, of how much easier - in logits - the puzzle was for the student than a typical one)."""
+
+    KIND = "bayes4"
+    DEFAULT = 0.45  # theta when the spec gives none ("bayes4")
+    BINS, Z, LOG_PZ = SkillFilter.B, SkillFilter.Z, SkillFilter.LOG_PZ
+    TAUS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0, 1.2)
+
+    def __init__(self, theta=DEFAULT, forget=0.99, q=0.0, decay=0.99, step_factor=10.0, min_steps=50,
+                 prior_mean=0.0, prior_sd=1.5, spread=1.0, tau=0.5, tau_sd=0.5, worse=0.35, worse_strength=10.0):
         super().__init__()
-        self.budget = budget
-        self.name = f"bayes {budget}"
+        self.theta, self.forget, self.q = float(theta), float(forget), float(q)
         self.decay, self.step_factor, self.min_steps = decay, step_factor, min_steps
-        self.prior_mean, self.prior_sd, self.spread = prior_mean, prior_sd, spread
-        self.tau0, self.tau_sd = tau, tau_sd
         self.worse, self.worse_strength = worse, worse_strength
-        self.cost, self.cost_rate = cost, cost_rate
-        self.skill = np.full(self.BINS, float(prior_mean))
-        self.level, self.log_tau = float(prior_mean), math.log(tau)
-        self.history = deque(maxlen=window)  # per puzzle: (optimal moves, moves) of the student's own, per bin
         self.worse_moves, self.mistakes = np.zeros(self.BINS), np.zeros(self.BINS)
-        self.persistence_prior = -0.5 * (np.log(self.S) / persistence_sd) ** 2
-        self.persistence_loglik = np.zeros(len(self.S))
-        self.recent_shown = self.recent_moves = 0.0
+        self.filters = [SkillFilter(tau=t, q=self.q, prior_mean=prior_mean, prior_sd=prior_sd, spread=spread)
+                        for t in self.TAUS]
+        self.tau_prior = -(np.log(self.TAUS) - math.log(tau)) ** 2 / (2 * tau_sd ** 2)
+        self.tau_loglik = np.zeros(len(self.TAUS))
+        self._pick()
         self._pending, self._finished = False, False
+        self.name = f"{self.KIND} {self.theta:g}" + (f" forget{self.forget:g}" if self.forget != 0.99 else "") \
+            + (f" q{self.q:g}" if self.q else "")
 
     # --- the teaching interface ---
 
@@ -233,18 +305,22 @@ class Bayesian(Teacher):
             self._end_puzzle()
             self._begin_puzzle(state)
 
+    def solve_alone(self, state, step):
+        """The model's chance of solving untaught from `state`, `step` moves into this attempt."""
+        k, m = self.distances()[state], self._offset + step
+        if k == 0:
+            return 1.0
+        if m >= self._cap:
+            return 0.0
+        return float(_softmax(self._shift) @ self._alone[m, :, min(k, self._K)])
+
     def wants_to_teach(self, state, step, proposal=None):
-        k = self.distances()[state]
-        m = self._offset + step
-        if self.budget <= 0 or k == 0 or m >= self._cap:
-            return False
-        return float(_softmax(self._shift) @ self._advantage[m, :, min(k, self._K)]) > 0
+        return self.distances()[state] != 0 and self.solve_alone(state, step) < self.theta
 
     def advise(self, state, step, proposal=None):
         if not self.wants_to_teach(state, step):
             return None
         self.counts["shown"] += 1
-        self._shown += 1
         return self.optimal_move(state)
 
     def observe(self, state, move, next_state, taught):
@@ -264,7 +340,6 @@ class Bayesian(Teacher):
         self._shift += _log_sigmoid(logit) if good else _log_sigmoid(-logit)
 
     def end_attempt(self, result):
-        self._observe_persistence(result)
         self._offset += len(result["moves"])
         self.counts["puzzle_shift"] = float(_softmax(self._shift) @ (math.exp(self.log_tau) * self.Z))
         if result["solved"] or result.get("surrendered"):
@@ -278,253 +353,57 @@ class Bayesian(Teacher):
         self._d = distances[state]
         self._cap = max(self.min_steps, int(round(self.step_factor * self._d)))
         self._K = max(distances.values())
-        self._offset = self._shown = self._moves = 0
+        self._offset = self._moves = 0
         self._optimal, self._own = np.zeros(self.BINS), np.zeros(self.BINS)
         self._worse, self._mistakes = np.zeros(self.BINS), np.zeros(self.BINS)
         self._shift = self.LOG_PZ.copy()
         self._pending, self._finished = True, False
         self._plan()
-        self.counts["cost"] = self.cost
         self.counts["skill_at_start"] = float(1 / (1 + math.exp(-self.skill[min(self._d, self.BINS) - 1])))
 
     def _end_puzzle(self):
-        """Folds the finished puzzle's evidence into the beliefs about the student, and adjusts the cost."""
+        """Folds the finished puzzle's evidence into the beliefs about the student."""
         if not self._pending:
             return
         self._pending = False
-        self.history.append((self._optimal, self._own))
         self.worse_moves = self.decay * self.worse_moves + self._worse
         self.mistakes = self.decay * self.mistakes + self._mistakes
-        self.persistence_loglik *= self.decay
-        self.recent_shown = 0.9 * self.recent_shown + self._shown
-        self.recent_moves = 0.9 * self.recent_moves + self._moves
-        if self.budget > 0 and self.recent_moves > 0:
-            rate = self.recent_shown / self.recent_moves
-            self.cost = min(1.0, max(1e-6, self.cost * math.exp(self.cost_rate * (rate - self.budget) / self.budget)))
-        self._fit()
+        ll = np.array([f.update(self._optimal, self._own) for f in self.filters])
+        self.tau_loglik = self.forget * self.tau_loglik + ll
+        self._pick()
 
-    def _fit(self):
-        """MAP skill per distance, overall level and tau, each puzzle's difficulty integrated out."""
-        from scipy.optimize import minimize
-        optimal = np.array([o for o, _ in self.history])
-        own = np.array([n for _, n in self.history])
-        weight = self.decay ** np.arange(len(own) - 1, -1, -1)
-        B, Z = self.BINS, self.Z
-
-        def objective(x):
-            skill, level, log_tau = x[:B], x[B], x[B + 1]
-            tau = math.exp(log_tau)
-            logit = skill[None, :] + tau * Z[:, None]  # (difficulty, bin)
-            ll = optimal @ _log_sigmoid(logit).T + (own - optimal) @ _log_sigmoid(-logit).T + self.LOG_PZ
-            top = ll.max(1, keepdims=True)
-            lse = top[:, 0] + np.log(np.exp(ll - top).sum(1))
-            r = weight[:, None] * np.exp(ll - lse[:, None])  # weighted posterior over each puzzle's difficulty
-            resid = r.T @ optimal - (r.T @ own) / (1 + np.exp(-logit))  # (difficulty, bin)
-            value = -weight @ lse + ((skill - level) ** 2).sum() / (2 * self.spread ** 2) \
-                + (level - self.prior_mean) ** 2 / (2 * self.prior_sd ** 2) \
-                + (log_tau - math.log(self.tau0)) ** 2 / (2 * self.tau_sd ** 2)
-            grad = np.empty(B + 2)
-            grad[:B] = -resid.sum(0) + (skill - level) / self.spread ** 2
-            grad[B] = -(skill - level).sum() / self.spread ** 2 + (level - self.prior_mean) / self.prior_sd ** 2
-            grad[B + 1] = -tau * (resid.sum(1) @ Z) + (log_tau - math.log(self.tau0)) / self.tau_sd ** 2
-            return value, grad
-
-        x = minimize(objective, np.r_[self.skill, self.level, self.log_tau], jac=True, method="L-BFGS-B").x
-        self.skill, self.level, self.log_tau = x[:B], float(x[B]), float(x[B + 1])
-
-    def _observe_persistence(self, result):
-        """The attempt's moves after which the student carried on, and the one it gave up after, if any (there
-        is no choice after the solving move)."""
-        n = len(result["moves"])
-        if n == 0:
-            return
-        hazard = np.minimum(1.0, np.outer(self.S, self._human_rate(self._offset + np.arange(1, n + 1))))
-        carried_on = hazard[:, :-1] if result["solved"] or result.get("surrendered") else hazard
-        self.persistence_loglik += np.log1p(-np.minimum(carried_on, 1 - 1e-9)).sum(1)
-        if result.get("surrendered"):
-            self.persistence_loglik += np.log(np.maximum(hazard[:, -1], 1e-12))
-
-    def _human_rate(self, moves):
-        edges, rates = _human_hazard()
-        i = np.searchsorted(edges, np.asarray(moves) / self._d, side="right") - 1
-        return rates[np.clip(i, 0, len(rates) - 1)]
+    def _pick(self):
+        best = self.filters[int(np.argmax(self.tau_prior + self.tau_loglik))]
+        self.skill, self.log_tau = best.mu.copy(), math.log(best.tau)
 
     # --- deciding ---
 
     def _plan(self):
-        """Backward induction: self._advantage[m, difficulty, k] = how much better showing the optimal move
-        is than letting the student play, on a board k from the goal after m moves on the puzzle."""
+        """Backward induction: self._alone[m, difficulty, k] = the chance of solving untaught from a board k from
+        the goal after m moves on the puzzle."""
         K, cap = self._K, self._cap
         k = np.arange(K + 1)
         b = np.clip(k, 1, self.BINS) - 1
-        p = 1 / (1 + np.exp(-(self.skill[b][None, :] + self._logit_extra(k)[None, :] + math.exp(self.log_tau) * self.Z[:, None])))
+        p = 1 / (1 + np.exp(-(self.skill[b][None, :] + math.exp(self.log_tau) * self.Z[:, None])))
         worse = ((self.worse_strength * self.worse + self.worse_moves) / (self.worse_strength + self.mistakes))[b]
-        persistence = _softmax(self.persistence_prior + self.persistence_loglik)
-        hazard = persistence @ np.minimum(1.0, np.outer(self.S, self._human_rate(np.arange(cap + 1))))
         down, up, out = np.maximum(k - 1, 0), np.minimum(k + 1, K), k == 0
-        value = np.broadcast_to(out.astype(float), p.shape)  # at the cap: solved only if red is out
-        alone = value  # the same, never teaching
-        solve = value if self.TRACKS_SOLVE else None  # the chance of solving, following the plan
-        self._advantage = np.empty((cap, len(self.Z), K + 1))
-        if self.KEEPS_ALONE:
-            self._alone = np.empty((cap, len(self.Z), K + 1))
+        alone = np.broadcast_to(out.astype(float), p.shape)  # at the cap: solved only if red is out
+        self._alone = np.empty((cap, len(self.Z), K + 1))
         for m in range(cap - 1, -1, -1):
-            after = np.where(out, 1.0, (1 - hazard[m + 1]) * value)  # value once the next move lands on k
-            play = p * after[:, down] + (1 - p) * (worse * after[:, up] + (1 - worse) * after)
-            if solve is not None:
-                after_solve = np.where(out, 1.0, (1 - hazard[m + 1]) * solve)
-            show = self._show_value(after[:, down], after_solve[:, down] if solve is not None else None)
-            self._advantage[m] = show - play
-            if solve is not None:
-                play_solve = p * after_solve[:, down] + (1 - p) * (worse * after_solve[:, up]
-                                                                   + (1 - worse) * after_solve)
-                solve = np.where(out, 1.0, np.where(show > play, after_solve[:, down], play_solve))
-            value = np.where(out, 1.0, np.maximum(show, play))
-            after = np.where(out, 1.0, (1 - hazard[m + 1]) * alone)
+            after = np.where(out, 1.0, alone)
             alone = np.where(out, 1.0, p * after[:, down] + (1 - p) * (worse * after[:, up] + (1 - worse) * after))
-            if self.KEEPS_ALONE:
-                self._alone[m] = alone
+            self._alone[m] = alone
         self.counts["predicted_solve"] = float(np.exp(self.LOG_PZ) @ alone[:, self._d])
-
-    TRACKS_SOLVE = False  # whether _plan also follows the chance of solving, for _show_value
-    KEEPS_ALONE = False  # whether _plan keeps the chance of solving untaught from every (moves made, difficulty, k)
-
-    def _logit_extra(self, k):
-        """Added to the skill logit on boards `k` (an array of distances) from the goal: none here."""
-        return np.zeros(len(k))
-
-    def _show_value(self, after_down, solve_down=None):
-        """The value of showing the move, given the value of the board it leads to (and, with TRACKS_SOLVE,
-        the chance of solving from there): that value, less the cost."""
-        return after_down - self.cost
-
-
-class StuckGate:
-    """Wall's "when" with Bayesian's "how much", on whichever Bayesian model of the student it is mixed into
-    (StuckBayes: the calibrated one, StuckBayes1: the original): it stays out until the student is stuck -
-    `patience` x the puzzle's optimal length moves of its own without a new closest approach of its own - and from
-    then on, wherever the student is, shows the optimal move whenever its model of the student (this puzzle's
-    difficulty updated by every move the student has made on it, being stuck included) gives it less than `theta`
-    chance of solving untaught from here, with the moves and patience it has left. So it leads the student only as
-    far as it thinks the student needs, and steps back in at once if the student slides back, without waiting out
-    another patience - until the student gets closer than ever by a move of its own, which closes the gate again.
-    No budget: the spending follows from theta and patience.
-
-    Ablation switches, each removing one part of the model (all on by default; the name says which are off):
-    - `patience` 0: no gate - the solve-chance rule alone, from the first move ("p0");
-    - `update` 0: the belief about this puzzle's difficulty is never updated by the student's moves on it - the
-      plan still averages over the prior ("no-update");
-    - `refit` n: the model of the student (skill per distance, level, tau, how mistakes go, persistence) learns
-      from the first n puzzles only, then stays fixed for the rest of the session ("frozen<n>");
-    - `giveup` 0: the plan has no chance of the student giving up - only the move cap ends a puzzle
-      ("no-giveup");
-    - `backward` 0: every mistake is sideways - the plan never has the student move away from the goal
-      ("no-backward").
-
-    counts: as Bayesian's, plus "stuck" (1 if the gate ever opened) and "best"."""
-
-    KEEPS_ALONE = True
-    KIND = "stuck-bayes"
-    PATIENCE, GIVEUP = 1.0, 1  # the defaults; the name tags only settings that differ from them
-
-    def __init__(self, theta=0.5, patience=None, update=1, refit=math.inf, giveup=None, backward=1, **kwargs):
-        patience = self.PATIENCE if patience is None else patience
-        giveup = self.GIVEUP if giveup is None else giveup
-        if not backward:
-            kwargs.update(worse=0.0, worse_strength=1e12)  # the prior share of backward mistakes, 0, never moves
-        super().__init__(budget=0.0, **kwargs)  # no budget: nothing adjusts the cost (unused here)
-        self.theta, self.patience = float(theta), float(patience)
-        self.update, self.refit, self.giveup, self.backward = bool(update), refit, bool(giveup), bool(backward)
-        self.fitted = 0  # puzzles the model of the student has learned from
-        self.name = f"{self.KIND} {self.theta:g}" + (f" p{self.patience:g}" if self.patience != self.PATIENCE else "") \
-            + ("" if self.update else " no-update") + (f" frozen{self.refit:g}" if self.refit != math.inf else "") \
-            + ("" if self.giveup == bool(self.GIVEUP) else (" giveup" if self.giveup else " no-giveup")) \
-            + ("" if self.backward else " no-backward")
-
-    def _begin_puzzle(self, state):
-        super()._begin_puzzle(state)
-        self.best, self.since = self._d, 0
-
-    def _end_puzzle(self):
-        if self._pending and self.fitted >= self.refit:
-            self._pending = False  # frozen: the finished puzzle teaches the model nothing
-            return
-        self.fitted += self._pending
-        super()._end_puzzle()
-
-    def _observe_persistence(self, result):
-        if self.fitted < self.refit:
-            super()._observe_persistence(result)
-
-    def _human_rate(self, moves):
-        return super()._human_rate(moves) if self.giveup else np.zeros(np.shape(moves))
-
-    def solve_alone(self, state, step):
-        """The model's chance of solving untaught from `state`, `step` moves into this attempt."""
-        k, m = self.distances()[state], self._offset + step
-        if k == 0:
-            return 1.0
-        if m >= self._cap:
-            return 0.0
-        return float(_softmax(self._shift) @ self._alone[m, :, min(k, self._K)])
-
-    def wants_to_teach(self, state, step, proposal=None):
-        if self.distances()[state] == 0 or self.since < self.patience * self._d:
-            return False
-        self.counts["stuck"] = 1
-        return self.solve_alone(state, step) < self.theta
-
-    def observe(self, state, move, next_state, taught):
-        super().observe(state, move, next_state, taught)
-        if not self.update:
-            self._shift = self.LOG_PZ.copy()
-        k = self.distances()[next_state]
-        if not taught:
-            self.since = 0 if k < self.best else self.since + 1
-        self.best = min(self.best, k)
-        self.counts["best"] = self.best
-
-
-class StuckBayes1(StuckGate, Bayesian):
-    """StuckGate on the original model of the student (Bayesian: distance to the goal only, evidence kept for
-    fewer puzzles). It overrates long puzzles (TwoEnds), so it needs a higher theta for the same spend - yet the
-    original Bayesian taught better than the calibrated one at matched spend: does the same hold here?"""
-
-    KIND = "stuck-bayes1"
-
-
-class Bayesian3(StuckBayes1):
-    """The default teacher until bayes4 (Bayesian4, the same with a filter for the model of the student): the
-    original Bayesian model of the student with a plain threshold rule. On every turn
-    it shows the optimal move if its model gives the student less than `theta` (0.45) chance of solving the
-    puzzle untaught from here, within the moves left before the cap; otherwise the student plays. So it steps in
-    only as far as it thinks the student needs, hands the puzzle back, and steps back in if the student slides.
-
-    It is StuckBayes1 with no gate (patience 0) and no give-up model (only the move cap ends a puzzle in its plan):
-    the most parsimonious teacher of the ablations (notebooks/p5_simplest_teacher.ipynb, agency 0). Its saved
-    runs there are under "stuck-bayes1 0.45 p0 no-giveup", the same teacher. What it keeps, each needed:
-    - skill per distance to the goal, refitted after every puzzle (older puzzles count less);
-    - this puzzle's difficulty for the student, updated by every move of its own on it (without: -0.12 learning
-      at matched spend, 7/8 students worse);
-    - mistakes going backward as well as sideways (without: -0.15).
-    The gate, the give-up model, the calibration (Bayesian2) and Bayesian's cost-benefit rule with a spending
-    target were each dropped at no loss; against that rule, on the same model, it learned 0.13 ± 0.04 more.
-    StuckGate's ablation switches still work, tagged against these defaults (e.g. patience=1 adds "p1")."""
-
-    KIND = "bayes3"
-    PATIENCE, GIVEUP = 0.0, 0
-    DEFAULT = 0.45  # theta when the spec gives none ("bayes3")
-
-    def __init__(self, theta=DEFAULT, **kwargs):
-        super().__init__(theta, **kwargs)
 
 
 # --- the registry -------------------------------------------------------------------------------
 
-TEACHERS = {"random": Random, "bayes": Bayesian, "stuck-bayes1": StuckBayes1, "bayes3": Bayesian3}
-# Retired kinds whose results the summary still reads, by the name their results are saved under (their names
-# don't need the class). Every other retired kind is at tag pre-cleanup; runs that used one still load, without it.
-RETIRED = {"flag": "flag mistakes", "correct-after": "correct after mistake", "correct-before": "correct mistakes"}
+TEACHERS = {"random": Random, "bayes4": Bayesian4}
+DEFAULT = "bayes4"  # the default teacher's kind
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "retired_teachers.json")) as _f:
+    # Every retired spec in a saved run's config (models/sessions and the archive), with the name its results
+    # are saved under, computed by its own code at tag pre-cleanup: runs that used it still load.
+    RETIRED = json.load(_f)
 
 
 class RetiredTeacher(ValueError):
@@ -544,9 +423,8 @@ def make_teacher(spec):
 
 
 def teacher_name(spec):
-    """The name a teacher's results are saved under - for the RETIRED kinds too (others raise RetiredTeacher)."""
-    kind, _, p = spec.partition(":")
-    if kind in RETIRED:
-        q = float(p) if p else 1.0
-        return RETIRED[kind] if q >= 1 else f"{RETIRED[kind]} {q}"
+    """The name a teacher's results are saved under - for retired specs of saved runs too (RETIRED); any other
+    retired spec raises RetiredTeacher."""
+    if spec in RETIRED:
+        return RETIRED[spec]
     return make_teacher(spec).name

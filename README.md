@@ -20,7 +20,8 @@ rushhour/              the library
     solve.py           solving by intuition, by deliberation, or arbitrating; evaluation over many puzzles
     labels.py          what an attempt teaches: own solved play, hindsight shortcuts, shown moves
     train.py           expert iteration (pretraining as AND-OR's apprentice) and online learning in a session
-  teachers.py          random, bayes, stuck-bayes1, bayes3 (the default) and the teacher-spec registry
+  teachers.py          random and bayes4 (the default: bayes3's rule on a filtered model of the student), the
+                       teacher-spec registry, and the names of retired teachers so their runs still load
   sessions.py          simulated sessions: run (CLI), save, load
   run_queue.py         queues of session runs in the background
   human_data.py        the paper's participants: moves, trials, giving-up hazard
@@ -32,6 +33,8 @@ experiments/           scripts that write the caches the notebooks read (models/
 notebooks/
   summary.ipynb        the narrative and its figures
   p8_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
+  skill_filter.html    the offline test behind bayes4: carrying skill across puzzles by a filter
+                       (experiments/skill_tracking.py)
   archive/             p3-p7 lab notebooks, frozen with their outputs (see archive/README.md)
 web/                   the playable Rush Hour page with teachers, for collecting human play
 data/rush_nw.txt       every puzzle with its optimal length (the analysis pool)
@@ -49,10 +52,10 @@ models/                results and networks (not in git; see MODELS.md)
 | p4 | The assistance dilemma: agency ΔA (how much a shown move teaches) and random-help sweeps | summary, `archive/p4` |
 | p5 | The simplest good teacher: stuck-Bayes ablations down to `bayes3` (help when the chance of solving alone < θ = 0.45) | summary, `archive/p5` |
 | p6 | Hindsight labels (window × multiplier fit to people); agency sweep with equal batches | summary, `archive/p6` |
-| p7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model | `archive/p7` |
+| p7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model; a skill filter as good as bayes3's refit gives bayes4, the default teacher | `archive/p7`, `skill_filter.html` |
 | p8 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p8_deliberation` |
 
-Earlier code (p1-p2 scripts, retired teachers, the sokoban port before it moved to its own repo) is at tag
+Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.
 
 ## Running things
@@ -63,7 +66,7 @@ Set up once (see `requirements.txt` for the CUDA build of torch on Windows):
 
 Everything runs from the repository root:
 
-    python -m rushhour.sessions my_run --init models/students/round6_epoch01.pt --teachers none bayes3
+    python -m rushhour.sessions my_run --init models/students/round6_epoch01.pt --teachers none bayes4
     python -m rushhour.run_queue watch my_queue
     python experiments/and_or_network.py
 

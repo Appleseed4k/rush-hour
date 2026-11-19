@@ -47,7 +47,7 @@ Examples (from the repository root):
     python -m rushhour.sessions base --init models/students/round6_epoch01.pt
     python -m rushhour.sessions lapses --init ... --encode 0.3 --teachers none random:0.1
     python -m rushhour.sessions base --test-only --test-runs 5
-    python -m rushhour.sessions base --teachers bayes:0.1 --init ...   # base's settings: adds a teacher
+    python -m rushhour.sessions base --teachers bayes4:0.3 --init ...   # base's settings: adds a teacher
 """
 import argparse
 import json
@@ -58,7 +58,7 @@ import statistics
 import time
 
 # One BLAS thread per process: the students run in parallel workers (one per core), and numpy's OpenBLAS otherwise
-# starts a thread per core in every one of them - a Bayesian teacher's refit after each puzzle then ran ~30x slower.
+# starts a thread per core in every one of them - the Bayesian teachers then ran ~30x slower.
 # Set before numpy is first imported (spawned workers inherit the environment).
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_var, "1")
@@ -97,9 +97,9 @@ ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
-    ap.add_argument("--teachers", nargs="+", default=["none", "bayes3"],
+    ap.add_argument("--teachers", nargs="+", default=["none", tr.DEFAULT],
                     help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(tr.TEACHERS)} "
-                         "(default: no teacher and bayes3, the default teacher)")
+                         f"(default: no teacher and {tr.DEFAULT}, the default teacher)")
     ap.add_argument("--students", type=int, default=10, help="simulated participants per teacher")
     ap.add_argument("--session-bins", nargs="+", default=["6-6", "10-10", "13-13", "15-15"],
                     help="optimal-length bins the session's puzzles are drawn from, evenly (default: the human "
@@ -486,7 +486,7 @@ def load_session(run, out=OUT):
     for spec in config["teachers"]:
         try:
             teacher_dir = os.path.join(run_dir, folder(spec))
-        except tr.RetiredTeacher:  # its results stay on disk, but nothing here can name them
+        except tr.RetiredTeacher:  # not in tr.RETIRED: its results stay on disk, but nothing here can name them
             continue
         entry = {"sessions": {}, "results": {}}
         path = os.path.join(teacher_dir, "sessions.json")

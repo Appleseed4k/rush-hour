@@ -31,7 +31,7 @@ started (null for other teachers). Games saved before there was a teacher
 (version 1) have no teacher key: "none".
 
 From version 3 the Bayesian teacher is "bayes3:<seconds>[:<name>=<value>,...]"
-(rushhour/teachers.py's Bayesian3, ported): after that long without a move it makes
+(bayes3, the default teacher before bayes4, ported; its Python is at tag pre-cleanup): after that long without a move it makes
 the move if its model gives the player under theta chance of solving alone.
 Its checks are {"t", "afterMove", "distance", "delay", "solveAlone", "shift",
 "shown"} - the chance it gave, and its mean belief of how much harder (below
