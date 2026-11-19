@@ -17,95 +17,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from and_or import AndNode, OrNode, _red_steps, solve as and_or_solve
-from lib import MOVES, DELTAS, car_orientations, multi_bfs, neighbors, parse_puzzle_line
+from lib import DELTAS, car_orientations, neighbors, parse_puzzle_line
 
-OPPOSITE = {"l": "r", "r": "l", "u": "d", "d": "u"}
 DIRECTIONS = "lrud"
 # Target for a destination first reached k moves into an optimal solution:
 # DEST_DECAY ** (k - 1), so the destinations of optimal next moves score 1.
 DEST_DECAY = 0.8
-
-
-class Car():
-    def __init__(self, positions, name):
-        self.name = name
-        self.positions = positions
-        self.orientation = "h" if positions[0][0] == positions[1][0] else "v"
-
-
-class Environment():
-    """Puzzle grid containing car objects that can be moved until the red car
-    reaches its goal cell.
-    """
-    def __init__(self, size, cars):
-        """`cars` is a sequence of (name, positions) pairs, red first - the same
-        shape get_state() returns, so a captured state can be fed straight back
-        in to rebuild an equivalent grid."""
-        self.puzzle = [[0 for j in range(size[1])] for i in range(size[0])]
-        self.goal = (2, 5)
-        self.cars = {}
-        for name, positions in cars:
-            self.cars[name] = self.add_car(positions, name)
-
-    def add_car(self, positions, name):
-        car = Car(positions, name)
-        for i, j in positions:
-            self.puzzle[i][j] = car
-        return car
-
-    def move(self, car_name, direction, steps=1):
-        """Slides car_name `steps` cells in `direction`. Every swept cell must be
-        in bounds and clear of other cars, not just the final resting cells."""
-        car = self.cars[car_name]
-        if direction not in MOVES[car.orientation]:
-            return False
-        old_pos = car.positions
-        di, dj = DELTAS[direction]
-        n_rows, n_cols = len(self.puzzle), len(self.puzzle[0])
-        for s in range(1, steps + 1):
-            for i, j in old_pos:
-                new_i, new_j = i + di * s, j + dj * s
-                if not (0 <= new_i < n_rows and 0 <= new_j < n_cols):
-                    return False
-                if self.puzzle[new_i][new_j] not in [0, car]:
-                    return False
-        new_pos = [(i + di * steps, j + dj * steps) for i, j in old_pos]
-        for i, j in old_pos:
-            self.puzzle[i][j] = 0
-        for new_i, new_j in new_pos:
-            self.puzzle[new_i][new_j] = car
-        car.positions = new_pos
-        return self.get_state()
-
-    def get_state(self):
-        return tuple((name, tuple(car.positions)) for name, car in self.cars.items())
-
-    def car_at(self, cell):
-        """Name of the car occupying `cell`, or None if it's empty."""
-        i, j = cell
-        occupant = self.puzzle[i][j]
-        return occupant.name if occupant != 0 else None
-
-    def check_win(self):
-        target = self.puzzle[self.goal[0]][self.goal[1]]
-        if target != 0:
-            if target.name == "red":
-                return True
-        return False
-
-
-def legal_actions(environment, action_space):
-    """Subset of action_space currently executable in `environment`, without
-    leaving it mutated."""
-    legal = []
-    for cell, direction, steps in action_space:
-        car_name = environment.car_at(cell)
-        if car_name is None:
-            continue
-        if environment.move(car_name, direction, steps):
-            environment.move(car_name, OPPOSITE[direction], steps)
-            legal.append((cell, direction, steps))
-    return legal
 
 
 def car_anchor(state, car_name):
@@ -152,12 +69,6 @@ class StateEncoder():
 
     def encode(self, state):
         return torch.from_numpy(self.encode_numpy(state)).float()
-
-
-def valid_action_mask(environment, action_space):
-    """Boolean mask over action_space of the moves currently legal in `environment`."""
-    legal = set(legal_actions(environment, action_space))
-    return torch.tensor([action in legal for action in action_space], dtype=torch.bool)
 
 
 class LaneBlock(nn.Module):
@@ -324,37 +235,6 @@ class PolicyAgent():
             self._scores[state] = (policy[0].cpu(), dest[0].cpu())
         return self._scores[state]
 
-    def policy_avoiding_cycles(self, environment, mask, visited=frozenset()):
-        """Ranks every currently legal action by the policy head's logit (highest
-        first) and returns the first one whose resulting state isn't already in
-        `visited`, falling back to the plain top-ranked action only when every
-        candidate leads somewhere already visited. Returns a (car_name,
-        direction, steps) move, resolving each candidate cell to whichever car
-        currently occupies it.
-
-        Catches the failure mode where a single wrong greedy decision lands the
-        rollout on an undertrained state and, with no escape hatch, walks
-        straight into a 2-cycle (undoing its own last move) until max_steps
-        runs out - turning one bad decision into a total non-solve.
-        """
-        state = environment.get_state()
-        logits = self._evaluate(state)[0]
-
-        scored = []
-        for i in mask.nonzero(as_tuple=True)[0].tolist():
-            cell, direction, steps = self.action_space[i]
-            car_name = environment.car_at(cell)
-            environment.move(car_name, direction, steps)
-            next_state = environment.get_state()
-            environment.move(car_name, OPPOSITE[direction], steps)
-            scored.append(((car_name, direction, steps), logits[i].item(), next_state))
-
-        scored.sort(key=lambda entry: entry[1], reverse=True)
-        for action, _score, next_state in scored:
-            if next_state not in visited:
-                return action
-        return scored[0][0]
-
     def heuristic(self, state, actions):
         """Dest-head scores for `actions` (full (car_name, direction, steps)
         tuples, legal now or not) from `state`: how soon an optimal solution
@@ -440,87 +320,6 @@ def _destinations(board, size, max_slide):
                 yield car, direction, steps, moved
 
 
-def optimal_destinations(state, distances, orientations, max_states=20_000):
-    """{(car_name, positions): k} - the fewest moves after which some optimal
-    solution from `state` has that car at those positions (k >= 1; the
-    car's current positions are left out). Walks the shortest-path DAG layer
-    by layer, stopping after `max_states` boards."""
-    first = {}
-    layer, depth, seen = {state}, 0, 0
-    while layer and seen < max_states:
-        nxt = set()
-        for s in layer:
-            if depth > 0:
-                for car in s:
-                    first.setdefault(car, depth)
-            for _, t in neighbors(s, orientations):
-                if distances.get(t) == distances[s] - 1:
-                    nxt.add(t)
-        seen += len(layer)
-        layer, depth = nxt, depth + 1
-    for car in state:
-        first.pop(car, None)
-    return first
-
-
-def _label_state(agent_shape, state, distances, orientations):
-    size, max_slide = agent_shape
-    n_cols = size[1]
-    d = distances[state]
-    sd = dict(state)
-    legal, optimal = [], []
-    for (car, direction, steps), nxt in neighbors(state, orientations):
-        idx = _move_index(sd, car, direction, steps, n_cols, max_slide)
-        legal.append(idx)
-        if distances.get(nxt) == d - 1:
-            optimal.append(idx)
-    dest_idx, dest_target = _dest_labels(state, optimal_destinations(state, distances, orientations), size,
-                                         max_slide)
-    return Example(state, StateEncoder(size).encode_numpy(state), d, legal, optimal, dest_idx, dest_target)
-
-
-def label_puzzle(job):
-    """Labelled examples for one puzzle: its starting state plus up to
-    `n_states` other unsolved states of its state space (all of them if
-    None), sampled with `seed`."""
-    state, n_states, seed, agent_shape = job
-    distances = multi_bfs(state)
-    orientations = car_orientations(state)
-    others = [s for s, d in distances.items() if d > 0 and s != state]
-    if n_states is not None:
-        others = random.Random(seed).sample(others, min(n_states, len(others)))
-    return [_label_state(agent_shape, s, distances, orientations) for s in [state] + others]
-
-
-def label_puzzles(puzzles, n_states=50, seed=0, size=(6, 6), max_slide=5, processes=None):
-    """Breadth-first-search labels for every puzzle (in parallel): a list,
-    one entry per puzzle, of its Examples - see label_puzzle. Labels are
-    exact: every optimal move from each state, its distance to the goal, and
-    how soon an optimal solution brings each car to each destination."""
-    jobs = [(state, n_states, hash((seed, i)) & 0xFFFFFFFF, (size, max_slide)) for i, state in enumerate(puzzles)]
-    with Pool(processes) as pool:
-        return list(tqdm(pool.imap(label_puzzle, jobs, chunksize=4), total=len(jobs), desc="labelling puzzles"))
-
-
-def oracle_heuristic(distances, orientations):
-    """An and_or.solve heuristic that knows every board's distance to the
-    goal: a candidate move scores -k when an optimal solution first has
-    that car at that destination k moves from now (much lower if never),
-    plus a random tie-break below 1."""
-    cache = {}
-
-    def heuristic(state, actions):
-        if state not in cache:
-            cache[state] = optimal_destinations(state, distances, orientations) if state in distances else {}
-        first = cache[state]
-        scores = {}
-        for action in actions:
-            moved = dict(AndNode(state, *action).apply(state))[action[0]]
-            scores[action] = -first.get((action[0], moved), 10 ** 6) + random.random()
-        return scores
-    return heuristic
-
-
 class SearchRecorder():
     """While active (a `with` block), records the search tree of every
     and_or.solve pass: one frame per OrNode.solve call (its attempted
@@ -597,50 +396,6 @@ def _subgoal_example(node, targets, size, max_slide):
     candidates = [_move_index(sd, node.car_name, d, s, size[1], max_slide) for d, s in options]
     return SubgoalExample(node.state, StateEncoder(size).encode_numpy(node.state),
                           np.array(candidates, dtype=np.int16), np.array([o in targets for o in options]))
-
-
-def label_subgoals_puzzle(job):
-    """Oracle subgoal labels for one puzzle: lapse-free AND-OR passes from its
-    start, ordered by oracle_heuristic, until red exits; every subgoal they
-    visit, with the options an optimal solution prefers as targets. At most
-    `limit` subgoals, sampled with `seed`."""
-    state, limit, seed, (size, max_slide) = job
-    random.seed(seed)
-    distances = multi_bfs(state)
-    orientations = car_orientations(state)
-    heuristic = oracle_heuristic(distances, orientations)
-    out, moves = [], 0
-    with SearchRecorder() as recorder:
-        while _red_steps(state) > 0 and moves < 100:
-            recorder.reset()
-            att = and_or_solve(state, heuristic=heuristic)
-            step = att if type(att) is list else att[1]
-            for frame in recorder.subgoals:
-                node = frame["node"]
-                if frame["free"]:
-                    continue
-                options = node.directions()
-                scores = heuristic(node.state, [(node.car_name, d, s) for d, s in options])
-                best = max(int(np.floor(v)) for v in scores.values()) if scores else None
-                targets = {(d, s) for d, s in options if int(np.floor(scores[(node.car_name, d, s)])) == best}
-                example = _subgoal_example(node, targets, size, max_slide)
-                if example is not None:
-                    out.append(example)
-            if not step:
-                break
-            for move in step:
-                state = AndNode(state, *move).apply(state)
-            moves += len(step)
-    return random.Random(seed).sample(out, min(limit, len(out))) if limit is not None else out
-
-
-def label_subgoals(puzzles, limit=200, seed=0, size=(6, 6), max_slide=5, processes=None):
-    """Oracle subgoal labels for every puzzle (in parallel): a list, one
-    entry per puzzle, of SubgoalExamples - see label_subgoals_puzzle."""
-    jobs = [(state, limit, hash((seed, i)) & 0xFFFFFFFF, (size, max_slide)) for i, state in enumerate(puzzles)]
-    with Pool(processes) as pool:
-        return list(tqdm(pool.imap(label_subgoals_puzzle, jobs, chunksize=2), total=len(jobs),
-                         desc="labelling subgoals"))
 
 
 def erase_loops(boards, moves, window=None):
@@ -1817,42 +1572,3 @@ def evaluate_arbitrated(agent, puzzles, n_runs=3, gamma=0.0, threshold=0.5, memo
     with Pool(processes, initializer=_init_attempt_worker, initargs=_agent_payload(agent)) as pool:
         return pool.map(_arbitrated_job, jobs, chunksize=2)
 
-
-def evaluate_and_or(initial_cars, size, n_trials, max_steps=200, heuristic=None, gamma=0.0):
-    """Solve rate and average move count over `n_trials` independent AND-OR
-    attempts from initial_cars. Pass a trained agent's `.heuristic` for the
-    human-like solver, None for plain (randomly ordered) AND-OR. Returns
-    (solve_rate, avg_moves) - avg_moves is nan when nothing solved.
-    """
-    state0 = tuple((name, tuple(positions)) for name, positions in initial_cars)
-    lengths = [
-        len(moves)
-        for moves in (solve_and_or(state0, max_steps, heuristic=heuristic, gamma=gamma) for _ in range(n_trials))
-        if moves
-    ]
-    solve_rate = len(lengths) / n_trials
-    avg_moves = float(np.mean(lengths)) if lengths else float("nan")
-    return solve_rate, avg_moves
-
-
-def evaluate_policy(agent, initial_cars, size, max_steps=200):
-    """Rolls the agent forward from initial_cars via policy_avoiding_cycles,
-    purely over the legal-move action space (no AND-OR involved). Tracks every
-    state seen this rollout as `visited` so a shallow 2-cycle gets routed
-    around via the next-best logit instead of looping until max_steps.
-    Returns (solved, steps, moves).
-    """
-    environment = Environment(size, initial_cars)
-    moves = []
-    visited = set()
-    for step in range(max_steps):
-        visited.add(environment.get_state())
-        mask = valid_action_mask(environment, agent.action_space)
-        if not mask.any():
-            break
-        move = agent.policy_avoiding_cycles(environment, mask, visited=visited)
-        environment.move(*move)
-        moves.append(move)
-        if environment.check_win():
-            return True, step + 1, moves
-    return False, None, moves

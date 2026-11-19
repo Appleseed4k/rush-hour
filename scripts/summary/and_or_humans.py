@@ -1,6 +1,6 @@
 """The Olieslagers et al. (2023) AND-OR model against the 42 participants, cached for notebooks/summary.ipynb.
 
-The model is the port of the archive's gamma_only_model (scripts/old/p1_solver/original_model.py): a per-board
+The model is the port of the archive's gamma_only_model (scripts/original_model.py): a per-board
 distribution over the next move, from the board's AND-OR tree with lapse rate gamma. Two passes:
 
     python and_or_humans.py likelihood   # log-probability of every human move at each gamma in GAMMAS
@@ -21,7 +21,7 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path += [os.path.join(HERE, ".."), os.path.join(HERE, "..", "old", "p1_solver")]
+sys.path += [os.path.join(HERE, "..")]
 import human_data as hd  # noqa: E402
 import original_model as om  # noqa: E402
 from and_or import legal_moves  # noqa: E402

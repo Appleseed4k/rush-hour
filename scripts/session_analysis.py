@@ -7,7 +7,6 @@ attempt counted at its move cap (lower is better); learning is the drop in that 
 import os
 
 import numpy as np
-import pandas as pd
 
 import run_queue as rq
 import session_experiment as se
@@ -68,28 +67,9 @@ def measures(attempts, config):
     return np.mean(score), np.mean([a["solved"] for a in attempts]), np.mean(solved) if solved else np.nan
 
 
-def curve(e):
-    """[(puzzles played, (mean test score, standard error across students))] along the session."""
-    points = sorted({n for by_n in e["results"].values() for n in by_n})
-    return [(n, te.mean_se([measures(by_n[n], e["config"])[0] for by_n in e["results"].values() if n in by_n]))
-            for n in points]
-
-
 def final(e):
     """{student: (score, solve rate, moves / optimal over solved)} at the end of the session."""
     return {s: measures(by_n[max(by_n)], e["config"]) for s, by_n in e["results"].items()}
-
-
-def learning(e):
-    """Each student's test score gain over the session (all students start from the same network)."""
-    start = measures(e["results"][0][0], e["config"])[0]
-    return [start - v[0] for v in final(e).values()]
-
-
-def gains(e):
-    """{student: test score gain over the session}."""
-    start = measures(e["results"][0][0], e["config"])[0]
-    return {s: start - v[0] for s, v in final(e).items()}
 
 
 def spend(e):
@@ -97,37 +77,3 @@ def spend(e):
     records = [x for record in e["sessions"].values() for x in record]
     return sum(x["taught"] for x in records) / sum(x["moves"] for x in records)
 
-
-def paired(e, base):
-    """End score minus `base`'s, student by student: "mean ± se (k/n better)"; below 0: e's students learned more."""
-    end, b = final(e), final(base)
-    d = [end[s][0] - b[s][0] for s in end if s in b]
-    m, s = te.mean_se(d)
-    return f"{m:+.3f} ± {s:.3f} ({sum(x < 0 for x in d)}/{len(d)})"
-
-
-def teacher_table(specs, against, run):
-    """Spend, solves, how help was given, learning, and the end score against each of `against` (specs), paired
-    by student."""
-    rows = []
-    for spec in specs:
-        e = entry(run, spec)
-        if e is None:
-            print(f"{se.teacher_name(spec)}: not saved yet")
-            continue
-        records = [x for record in e["sessions"].values() for x in record]
-        helped = [x for x in records if x["taught"] > 0]
-        m, s = te.mean_se(learning(e))
-        row = {"teacher": se.teacher_name(spec),
-               "shown": spend(e),
-               "solved as played": np.mean([x["solved"] for x in records]),
-               "helped puzzles": len(helped) / len(records),
-               "shown per helped": np.mean([x["taught"] for x in helped]) if helped else np.nan,
-               "helped solved": np.mean([x["solved"] for x in helped]) if helped else np.nan,
-               "own moves on helped": np.mean([x["moves"] - x["taught"] for x in helped]) if helped else np.nan,
-               "learning": f"{m:+.3f} ± {s:.3f}"}
-        for other in against:
-            base = entry(run, other)
-            row[f"vs {se.teacher_name(other)}"] = paired(e, base) if base is not None and other != spec else ""
-        rows.append(row)
-    return pd.DataFrame(rows).round(3)

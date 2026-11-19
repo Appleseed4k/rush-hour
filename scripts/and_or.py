@@ -1,38 +1,27 @@
-import functools
 import itertools
-import math
 import os
 import random
 
-from lib import DELTAS, read_puzzles, visualize
+from lib import DELTAS
 
 BOARD_SIZE = 6
-# Largest single-pass plan (in OrNodes) the plan analyses below search for.
-# Uncapped, their search wanders into exponentially deep dead ends on some
-# boards; raising this from 12 to 15 changed no first path on a 1024-state
-# sample of the training puzzles.
-MAX_PLAN_SIZE = 12
 
 # Whether a subgoal may move a car whose own action is still being resolved
-# (every car above it in the chain, red included). The default for solve() and
-# for every plan analysis below (is_single_pass, first_path, horizon_car, ...),
-# so they always describe the same solver: change it here and they all change.
-# It is read when this module is imported, not on each call.
+# (every car above it in the chain, red included). The default for solve(); it
+# is read when this module is imported, not on each call.
 #
 # True protects them (nothing above a subgoal can be moved): searches stay
-# small and the analyses fast, but a state that needs a car to step aside and
+# small, but a state that needs a car to step aside and
 # come back (red most often) has no direct plan. False protects nobody, as in
 # the original model: such plans are found, solve rates are higher on mid-range
-# puzzles, and the cost is search size - roughly 60x slower plan analyses
-# (median 0.9 -> 52 ms per state, some states over 5 s) and, with lapses off,
-# a ~200x larger search per pass. (With lapses on, gamma > 0, False costs no
+# puzzles, and the cost is search size - with lapses off, a ~200x larger search
+# per pass. (With lapses on, gamma > 0, False costs no
 # more than True: scripts/p3_session/and_or_gamma.py.)
 #
 # Off by default since 2026-11-17: it fits people better
-# (notebooks/p3_session.ipynb's gamma section) and is the session start's
-# expert (models/apprentice/gamma0.07_free). Earlier work used True - phase 1's
-# apprentice (models/checkpoints) and the scripts under old/ - so rerunning those
-# as they were needs it on. With lapses off (gamma = 0, the default of
+# (notebooks/archive/p3_session.ipynb's gamma section) and is the expert of the
+# apprentice in models/apprentice/gamma0.07_free. Earlier work (phase 1, tag
+# pre-cleanup) used True, so rerunning it as it was needs it on. With lapses off (gamma = 0, the default of
 # rl.solve_and_or and its relatives) an unprotected search can grow without
 # bound on some boards: give gamma > 0, or turn protection on.
 #
@@ -128,14 +117,13 @@ def order_candidates(state, car_name, candidates, heuristic):
     return [(direction, steps) for _, direction, steps in actions]
 
 
-def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset(), heuristic=None, gamma=0.0,
-                library=None):
+def first_solve(state, car_name, candidates, visited=frozenset(), protected=frozenset(), heuristic=None, gamma=0.0):
     """Tries each (direction, steps) candidate for car_name, best-first per
     `heuristic` if given, returning the first (new_state, moves) that resolves,
     or None if every candidate dead-ends."""
     candidates = order_candidates(state, car_name, candidates, heuristic)
     for direction, steps in candidates:
-        result = AndNode(state, car_name, direction, steps, visited, protected, heuristic, gamma, library).solve()
+        result = AndNode(state, car_name, direction, steps, visited, protected, heuristic, gamma).solve()
         if result is not None:
             return result
     return None
@@ -149,16 +137,10 @@ class OrNode:
 
     `heuristic`, if given, also orders this subgoal's own candidate
     resolutions best-first (see order_candidates) instead of randomly.
-
-    `library`, if given, is consulted after this node's lapse check and before
-    its own search: `library.resolve(node, visited)` returns (new_state, moves)
-    for a recognized sub-plan, or None to search as usual (see
-    chunk_library.ChunkLibrary). `parent_direction` is the direction of the
-    move this subgoal unblocks, which chunks are described relative to.
     """
 
     def __init__(self, state, car_name, collisions, visited=frozenset(), protected=frozenset(), heuristic=None,
-                 gamma=0.0, library=None, parent_direction=None):
+                 gamma=0.0):
         self.state = state
         self.car_name = car_name
         self.car = dict(state)[car_name]
@@ -167,8 +149,6 @@ class OrNode:
         self.protected = protected
         self.heuristic = heuristic
         self.gamma = gamma
-        self.library = library
-        self.parent_direction = parent_direction
 
     def directions(self):
         """(direction, steps) candidates that clear the car off every collision cell."""
@@ -209,12 +189,8 @@ class OrNode:
                 return None
             raise GammaLapse(AndNode(self.state, *move).apply(self.state), [move])
 
-        if self.library is not None:
-            result = self.library.resolve(self, next_visited)
-            if result is not None:
-                return result
         return first_solve(self.state, self.car_name, self.directions(), next_visited, self.protected,
-                            self.heuristic, self.gamma, self.library)
+                           self.heuristic, self.gamma)
 
 
 class AndNode:
@@ -235,7 +211,7 @@ class AndNode:
     """
 
     def __init__(self, state, car_name, direction, steps, visited=frozenset(), protected=frozenset(), heuristic=None,
-                 gamma=0.0, library=None):
+                 gamma=0.0):
         self.state = state
         self.car_name = car_name
         self.direction = direction
@@ -244,7 +220,6 @@ class AndNode:
         self.protected = protected
         self.heuristic = heuristic
         self.gamma = gamma
-        self.library = library
 
     def move_from(self, state):
         """(direction, steps) that takes the car from its place in `state` to the
@@ -351,7 +326,7 @@ class AndNode:
             for blocker_name, collisions in order:
                 try:
                     result = OrNode(working_state, blocker_name, collisions, self.visited, next_protected,
-                                     self.heuristic, self.gamma, self.library, self.direction).solve()
+                                     self.heuristic, self.gamma).solve()
                 except GammaLapse as lapse:
                     raise GammaLapse(lapse.new_state, moves + lapse.moves) from None
                 if result is None:
@@ -374,15 +349,6 @@ def _red_steps(state):
     return (BOARD_SIZE - 1) - max(j for _, j in dict(state)['red'])
 
 
-def blockers_in_path(state):
-    """Cars currently occupying red's direct slide to the exit."""
-    red = dict(state)['red']
-    steps = (BOARD_SIZE - 1) - max(j for _, j in red)
-    if steps <= 0:
-        return 0
-    return len(AndNode(state, 'red', 'r', steps).blockers())
-
-
 def red_candidates(state, exclude_steps):
     """(direction, steps) options for repositioning red itself, tried once the
     direct slide to the exit (`exclude_steps`) has failed."""
@@ -395,247 +361,27 @@ def red_candidates(state, exclude_steps):
     return candidates
 
 
-def _match_and(state, car_name, direction, steps, visited, protected, target, pos):
-    """Yields (new_state, new_pos) for every way AndNode(...).solve() could,
-    with some choice of shuffles and no lapse, return exactly
-    target[pos:new_pos]. Mirrors AndNode.solve's structure step for step."""
-    # The action's own move comes last in its plan - unless resolving its blockers
-    # already left the car on its destination, in which case an earlier move of
-    # the plan moved that car. Either way the car is still ahead in the target.
-    if all(m[0] != car_name for m in target[pos:]):
-        return
-    node = AndNode(state, car_name, direction, steps)
-    blockers = node.blockers()
-    if protected & blockers.keys():
-        return
-    next_protected = protect(protected, car_name)
-    for order in itertools.permutations(blockers.items()):
-        yield from _match_order(state, order, node, visited, next_protected, target, pos)
+def solve(state, heuristic=None, gamma=0.0, protect_movers=PROTECT_MOVERS):
+    """One stochastic pass of AND-OR subgoal decomposition (see GammaLapse)
+    driving red to the exit. Returns a plain move list once red reaches the
+    exit; otherwise a (new_state, moves) pair reflecting a partial attempt,
+    for the caller to feed back in.
 
+    `heuristic`, if given, is a `heuristic(state, actions) -> {action: score}`
+    callable (see PolicyAgent.heuristic in rl.py) that orders every
+    candidate-selection point best-first instead of randomly. It never changes
+    whether a state solves, only which solution is found and how quickly.
 
-def _match_order(state, order, node, visited, protected, target, pos):
-    """Resolves `order`'s blockers in sequence against target, then plays the
-    action `node` from wherever its car now is (see AndNode.move_from)."""
-    if not order:
-        final = node.move_from(state)
-        if final is None:
-            yield state, pos
-        else:
-            move = (node.car_name, *final)
-            if pos < len(target) and target[pos] == move and not AndNode(state, *move).blockers():
-                yield AndNode(state, *move).apply(state), pos + 1
-        return
-    (blocker_name, collisions), rest = order[0], order[1:]
-    for new_state, new_pos in _match_or(state, blocker_name, collisions, visited, protected, target, pos):
-        yield from _match_order(new_state, rest, node, visited, protected, target, new_pos)
+    `gamma`, the probability an OrNode abandons its subgoal for a random
+    legal move instead (see GammaLapse) - 0 (the default) never lapses.
 
-
-def _match_or(state, car_name, collisions, visited, protected, target, pos):
-    """OrNode.solve's counterpart to _match_and."""
-    key = (car_name, frozenset(collisions))
-    if key in visited:
-        return
-    next_visited = visited | {key}
-    node = OrNode(state, car_name, collisions)
-    for direction, steps in node.directions():
-        yield from _match_and(state, car_name, direction, steps, next_visited, protected, target, pos)
-
-
-def is_single_pass(state, moves, protect_movers=PROTECT_MOVERS):
-    """True if `moves` is a complete plan that one lapse-free solve() pass from
-    `state` could return (for some ordering of its random choices) - i.e. the
-    direct red-to-exit search resolving with exactly these moves.
-
-    Any successful branch can be made the one the depth-first search returns
-    by ordering it first at every choice point, so this only asks whether
-    such a branch exists, never how likely it is: no gamma needed. `protect_movers`
-    must match the solve() call being modelled."""
-    red = dict(state)['red']
-    steps = (BOARD_SIZE - 1) - max(j for _, j in red)
-    if steps <= 0:
-        return not moves
-    moves = list(moves)
-    return any(new_pos == len(moves)
-               for _, new_pos in _match_and(state, 'red', 'r', steps, frozenset(), seed_protected(protect_movers),
-                                            moves, 0))
-
-
-def final_pass_start(state, moves, protect_movers=PROTECT_MOVERS):
-    """Estimated index into `moves` where the final (successful) solve() pass
-    began, from the moves alone: the earliest t whose remaining moves[t:]
-    could have been one lapse-free pass from the state reached after
-    moves[:t]. Every move from there on is consistent with a single committed
-    plan.
-
-    The true start always qualifies, so this never lands after it. It can land
-    before it when the last pre-boundary moves happen to fit the final plan
-    too (a lapse's random move matching the plan's first move, say) - those
-    cases are indistinguishable from the moves alone. None if no suffix
-    qualifies (e.g. `moves` never reaches the goal)."""
-    states = [state]
-    for car_name, direction, steps in moves:
-        states.append(AndNode(states[-1], car_name, direction, steps).apply(states[-1]))
-    for t in range(len(moves) + 1):
-        if is_single_pass(states[t], moves[t:], protect_movers):
-            return t
-    return None
-
-
-def _plans_and(state, car_name, direction, steps, visited, protected, depth_left, size_left, first_left=None):
-    """Yields (new_state, moves, depth, ors, first_path) for every plan
-    AndNode(...).solve() could return without lapsing whose OR-node tree
-    fits the limits: depth is the most OrNodes on any root-to-leaf chain,
-    ors the car of every OrNode in the order the depth-first search visits
-    them (one lapse check each, so len(ors) is the plan's size), and
-    first_path the cars on the chain down to the first move the plan
-    reaches - the OrNodes a pass must get through before it has any
-    completed branch to play out on a lapse (see AndNode.solve's GammaLapse
-    handling). `first_left`, if given, caps len(first_path). Mirrors
-    AndNode.solve's structure step for step."""
-    node = AndNode(state, car_name, direction, steps)
-    blockers = node.blockers()
-    if protected & blockers.keys():
-        return
-    next_protected = protect(protected, car_name)
-    for order in itertools.permutations(blockers.items()):
-        yield from _plans_order(state, order, node, visited, next_protected,
-                                depth_left, size_left, first_left, [], 0, [], [])
-
-
-def _plans_order(state, order, node, visited, protected, depth_left, size_left, first_left,
-                 moves, depth, ors, first_path):
-    """Resolves `order`'s blockers in sequence, then plays the action `node` from
-    wherever its car now is (see AndNode.move_from). Only the first blocker
-    lies on the first path down, so only it gets `first_left`."""
-    if not order:
-        final = node.move_from(state)
-        if final is None:
-            yield state, moves, depth, ors, first_path
-        else:
-            move = (node.car_name, *final)
-            if not AndNode(state, *move).blockers():
-                yield AndNode(state, *move).apply(state), moves + [move], depth, ors, first_path
-        return
-    (blocker_name, collisions), rest = order[0], order[1:]
-    is_first = not ors
-    for new_state, blocker_moves, sub_depth, sub_ors, sub_first in _plans_or(
-            state, blocker_name, collisions, visited, protected, depth_left, size_left - len(ors),
-            first_left if is_first else None):
-        yield from _plans_order(new_state, rest, node, visited, protected, depth_left, size_left, first_left,
-                                moves + blocker_moves, max(depth, sub_depth), ors + sub_ors,
-                                sub_first if is_first else first_path)
-
-
-def _plans_or(state, car_name, collisions, visited, protected, depth_left, size_left, first_left=None):
-    """OrNode.solve's counterpart to _plans_and; this node itself counts once
-    toward depth and size, visited before everything beneath it."""
-    if depth_left < 1 or size_left < 1 or (first_left is not None and first_left < 1):
-        return
-    key = (car_name, frozenset(collisions))
-    if key in visited:
-        return
-    next_visited = visited | {key}
-    for direction, steps in OrNode(state, car_name, collisions).directions():
-        for new_state, moves, depth, ors, first_path in _plans_and(
-                state, car_name, direction, steps, next_visited, protected, depth_left - 1, size_left - 1,
-                None if first_left is None else first_left - 1):
-            yield new_state, moves, depth + 1, [car_name] + ors, [car_name] + first_path
-
-
-def _first_plan(state, depth_left, size_left, first_left=None, protect_movers=PROTECT_MOVERS):
-    """First lapse-free single-pass plan from `state` within the limits, as
-    _plans_and yields it, or None."""
-    red = dict(state)['red']
-    steps = (BOARD_SIZE - 1) - max(j for _, j in red)
-    return next(_plans_and(state, 'red', 'r', steps, frozenset(), seed_protected(protect_movers),
-                           depth_left, size_left, first_left), None)
-
-
-def plan_metrics(state, max_size=MAX_PLAN_SIZE, protect_movers=PROTECT_MOVERS):
-    """(depth, size, depth_plan, size_plan) for the lapse-free plans one
-    solve() pass from `state` could return: depth is the fewest OrNodes on
-    the longest backward chain any plan needs (how far back from red the
-    reasoning must reach before a first move), size the fewest OrNodes any
-    plan visits in total (lapse checks it must survive, ignoring dead ends),
-    each with a plan achieving it. The two minima can come from different
-    plans. Depth-first search order and wasted exploration don't count.
-
-    None if no single pass reaches the exit within max_size OrNodes - e.g.
-    when red itself must first move out of the way (solve()'s red_candidates
-    fallback), which takes more than one pass."""
-    red = dict(state)['red']
-    if max(j for _, j in red) >= BOARD_SIZE - 1:
-        return 0, 0, [], []
-    if _first_plan(state, max_size, max_size, protect_movers=protect_movers) is None:
-        return None
-    depth_plan = next(p for d in range(max_size + 1)
-                      if (p := _first_plan(state, d, max_size, protect_movers=protect_movers)) is not None)
-    size_plan = next(p for n in range(max_size + 1)
-                     if (p := _first_plan(state, max_size, n, protect_movers=protect_movers)) is not None)
-    return depth_plan[2], len(size_plan[3]), depth_plan[1], size_plan[1]
-
-
-def or_budget(gamma, q=0.5):
-    """How many OrNodes a pass can visit before its chance of no lapse drops
-    below `q`: the largest n with (1 - gamma)**n >= q. The reasoning horizon
-    that horizon_car measures against; infinite when gamma is 0."""
-    if gamma <= 0:
-        return math.inf
-    return math.floor(math.log(q) / math.log(1 - gamma))
-
-
-@functools.lru_cache(maxsize=100_000)
-def first_path(state, max_size=MAX_PLAN_SIZE, protect_movers=PROTECT_MOVERS):
-    """The shortest chain of OrNode cars, red's blocker first, that a pass
-    from `state` must reason down before reaching a move some successful
-    plan starts with. A pass that gets that far has progress it keeps even
-    if it lapses later - a completed branch gets played out
-    (AndNode.solve's GammaLapse handling) - so this, not the whole plan, is
-    what must fit within the reasoning budget. () if red can already exit,
-    None if no single pass within max_size OrNodes can reach the exit (see
-    plan_metrics). Cached per state, since wandering revisits states often."""
-    red = dict(state)['red']
-    if max(j for _, j in red) >= BOARD_SIZE - 1:
-        return ()
-    if _first_plan(state, max_size, max_size, protect_movers=protect_movers) is None:
-        return None
-    return tuple(next(p[4] for n in range(max_size + 1)
-                      if (p := _first_plan(state, max_size, max_size, n, protect_movers)) is not None))
-
-
-def chain_first_moves(state, max_size=MAX_PLAN_SIZE, max_plans=20, protect_movers=PROTECT_MOVERS):
-    """The moves that start first_path(state)'s chain: the distinct first
-    moves of lapse-free plans whose first path is that short (the deepest
-    subgoal's resolving move, played before anything above it), from up to
-    `max_plans` such plans. Empty if red can already exit or no single pass
-    can reach the exit."""
-    path = first_path(state, max_size, protect_movers)
-    if not path:
-        return set()
-    red = dict(state)['red']
-    steps = (BOARD_SIZE - 1) - max(j for _, j in red)
-    plans = _plans_and(state, 'red', 'r', steps, frozenset(), seed_protected(protect_movers), max_size, max_size,
-                       len(path))
-    return {plan[1][0] for plan in itertools.islice(plans, max_plans)}
-
-
-def horizon_car(state, budget, max_size=MAX_PLAN_SIZE, protect_movers=PROTECT_MOVERS):
-    """The car just outside the reasoning horizon from `state`: on
-    first_path(state), the car one past the `budget` OrNodes a pass can
-    afford (see or_budget) - the first subgoal it can't reason back to
-    before lapsing. In a linear chain red <- K <- B <- I <- D with a budget
-    of 3, that's D. None if the path fits within the budget, or if no single
-    pass can reach the exit - the solver can't plan its way out of such
-    states at all, whatever the budget. Wasted search (dead ends, abandoned
-    orders) isn't counted, so this horizon is optimistic."""
-    path = first_path(state, max_size, protect_movers)
-    if path is None or len(path) <= budget:
-        return None
-    return path[budget]
-
-
-def _solve_pass(state, heuristic, gamma, library=None, protect_movers=PROTECT_MOVERS):
-    """solve() without the root check or horizon."""
+    `protect_movers` forbids a subgoal from moving any car whose own action is
+    still being resolved - every car above it in the chain, red included. It
+    defaults to the module's PROTECT_MOVERS (see there for the trade-off). Off,
+    a plan can have a car step aside and come back (red most often), see
+    AndNode; on, a state that needs that has no direct plan and falls back to
+    repositioning red at random (red_candidates).
+    """
     red = dict(state)['red']
     steps = (BOARD_SIZE - 1) - max(j for _, j in red)
     if steps <= 0:
@@ -643,7 +389,7 @@ def _solve_pass(state, heuristic, gamma, library=None, protect_movers=PROTECT_MO
 
     try:
         result = AndNode(state, 'red', 'r', steps, protected=seed_protected(protect_movers), heuristic=heuristic,
-                         gamma=gamma, library=library).solve()
+                         gamma=gamma).solve()
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
 
@@ -653,7 +399,7 @@ def _solve_pass(state, heuristic, gamma, library=None, protect_movers=PROTECT_MO
 
     try:
         result = first_solve(state, 'red', red_candidates(state, steps), protected=seed_protected(protect_movers),
-                             heuristic=heuristic, gamma=gamma, library=library)
+                             heuristic=heuristic, gamma=gamma)
     except GammaLapse as lapse:
         return lapse.new_state, lapse.moves
     if result is not None:
@@ -666,60 +412,3 @@ def _solve_pass(state, heuristic, gamma, library=None, protect_movers=PROTECT_MO
     car_name, direction, steps = move
     return AndNode(state, car_name, direction, steps).apply(state), [move]
 
-
-def _truncate(state, result, horizon):
-    """`result` (as _solve_pass returns it) cut to its first `horizon` moves, as
-    a (new_state, moves) pair - or unchanged if it already fits."""
-    moves = result if type(result) is list else result[1]
-    if horizon is None or moves is None or len(moves) <= horizon:
-        return result
-    moves = moves[:horizon]
-    for move in moves:
-        state = AndNode(state, *move).apply(state)
-    return state, moves
-
-
-def solve(state, heuristic=None, gamma=0.0, horizon=None, root_check=False, library=None,
-          protect_movers=PROTECT_MOVERS):
-    """One stochastic pass of AND-OR subgoal decomposition (see GammaLapse)
-    driving red to the exit. Returns a plain move list once red reaches the
-    exit; otherwise a (new_state, moves) pair reflecting a partial attempt,
-    for the caller to feed back in.
-
-    `heuristic`, if given, is a `heuristic(state, actions) -> {action: score}`
-    callable (see PolicyAgent.heuristic in rl.py) that orders every
-    candidate-selection point best-first instead of randomly. It never changes
-    whether a state solves, only which solution is found and how quickly.
-
-    `gamma`, the probability an OrNode abandons its subgoal for a random
-    legal move instead (see GammaLapse) - 0 (the default) never lapses. Left
-    as an explicit parameter rather than a module constant so callers (e.g.
-    notebooks/old/p1_apprentice.ipynb) can tune it directly instead of editing this file.
-
-    `horizon`, if given, plays only the first `horizon` moves of the pass's
-    plan and discards the rest, so the caller replans from the new board: 1
-    rebuilds the tree after every move (Olieslagers et al. 2023), None (the
-    default) plays the whole plan out. The pass itself, lapse checks
-    included, is unchanged - a plan is still searched whole - so a lapse's
-    random move is dropped when completed moves already fill the horizon.
-
-    `root_check` adds the paper's stopping check on the root "red exits"
-    node: before any search, probability `gamma` of a lapse move instead.
-
-    `library`, if given, is a chunk library every OrNode consults after its
-    lapse check (see OrNode and chunk_library.ChunkLibrary).
-
-    `protect_movers` forbids a subgoal from moving any car whose own action is
-    still being resolved - every car above it in the chain, red included. It
-    defaults to the module's PROTECT_MOVERS (see there for the trade-off). Off,
-    a plan can have a car step aside and come back (red most often), see
-    AndNode; on, a state that needs that has no direct plan and falls back to
-    repositioning red at random (red_candidates). The plan analyses
-    (is_single_pass, first_path, ...) take the same flag and share the same
-    default, so they agree with solve() unless one is overridden.
-        """
-    if root_check and _red_steps(state) > 0 and random.random() < gamma:
-        move = lapse_move(state, heuristic)
-        if move is not None:
-            return _truncate(state, (AndNode(state, *move).apply(state), [move]), horizon)
-    return _truncate(state, _solve_pass(state, heuristic, gamma, library, protect_movers), horizon)

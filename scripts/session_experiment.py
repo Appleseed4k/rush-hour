@@ -98,9 +98,9 @@ ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
-    ap.add_argument("--teachers", nargs="+", default=["none", "bayes4"],
+    ap.add_argument("--teachers", nargs="+", default=["none", "bayes3"],
                     help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(te.TEACHERS)} "
-                         "(default: no teacher and bayes4, the default teacher)")
+                         "(default: no teacher and bayes3, the default teacher)")
     ap.add_argument("--students", type=int, default=10, help="simulated participants per teacher")
     ap.add_argument("--session-bins", nargs="+", default=["6-6", "10-10", "13-13", "15-15"],
                     help="optimal-length bins the session's puzzles are drawn from, evenly (default: the human "
@@ -485,7 +485,10 @@ def load_session(run, out=OUT):
         config = json.load(f)
     teachers = {}
     for spec in config["teachers"]:
-        teacher_dir = os.path.join(run_dir, folder(spec))
+        try:
+            teacher_dir = os.path.join(run_dir, folder(spec))
+        except te.RetiredTeacher:  # its results stay on disk, but nothing here can name them
+            continue
         entry = {"sessions": {}, "results": {}}
         path = os.path.join(teacher_dir, "sessions.json")
         if os.path.exists(path):
@@ -516,20 +519,6 @@ def session_curve(sessions, block=10):
                  for c in chunks if any(e["solved"] for e in c)]
         help_ = [statistics.mean(e["interventions"] for e in c) for c in chunks]
         out.append((start, te.mean_se(solve), te.mean_se(ratio), te.mean_se(help_)))
-    return out
-
-
-def test_curve(results, n_runs, distance_bins=()):
-    """Tests along the session: per number of puzzles played, the solve rate
-    and moves / optimal (and solve rate per distance bin), each a (mean,
-    standard error) across students of the student's own average over the
-    test puzzles."""
-    points = sorted({n for by_n in results.values() for n in by_n})
-    out = []
-    for n in points:
-        summaries = [te.summarize(by_n[n], n_runs, distance_bins) for by_n in results.values() if n in by_n]
-        row = {key: te.mean_se([s[key][0] for s in summaries]) for key in summaries[0]}
-        out.append((n, row))
     return out
 
 
