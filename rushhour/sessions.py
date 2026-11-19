@@ -44,6 +44,7 @@ reads a run back; session_curve() and test_curve() summarize it, with
 standard errors across students.
 
 Examples (from the repository root):
+    python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4   # the fitted student
     python -m rushhour.sessions base --init models/students/round6_epoch01.pt
     python -m rushhour.sessions lapses --init ... --encode 0.3 --teachers none random:0.1
     python -m rushhour.sessions base --test-only --test-runs 5
@@ -79,6 +80,7 @@ from multiprocessing import Pool
 from tqdm import tqdm
 
 from . import board, paths, student as st, teachers as tr
+from .student import spec as student_spec
 
 OUT = paths.SESSIONS
 TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_steps", "max_steps", "seed",
@@ -169,7 +171,15 @@ def parse_args(argv=None):
     ap.add_argument("--out", default=OUT, help="where runs are saved")
     ap.add_argument("--test-only", action="store_true", help="only (re)test a saved run")
     ap.add_argument("--overwrite", action="store_true", help="delete the saved run, if any, and start over")
+    ap.add_argument("--fitted", action="store_true",
+                    help="default to the fitted student and the teaching runs' protocol (rushhour/student/spec.py: "
+                         "STUDENT and PROTOCOL; see MODEL.md); flags given still win. Agency (--shown-weight) "
+                         "stays 1 unless given")
+    if ap.parse_known_args(argv)[0].fitted:
+        ap.set_defaults(**{k: os.path.join(paths.ROOT, v) if k == "init" else v
+                           for k, v in (student_spec.STUDENT | student_spec.PROTOCOL).items()})
     args = ap.parse_args(argv)
+    del args.fitted  # a preset, not a setting: the run's config records every value it set
     args.test_bins = args.test_bins or args.session_bins
     args.block = args.block or args.multiplier
     if args.init is not None and not args.test_only:
@@ -521,10 +531,6 @@ def session_curve(sessions, block=10):
     return out
 
 
-if __name__ == "__main__":
-    main()
-
-
 # --- shared helpers ---------------------------------------------------------------------------
 
 def bins(specs):
@@ -544,3 +550,7 @@ def mean_se(values):
         return float("nan"), float("nan")
     se = statistics.stdev(values) / len(values) ** 0.5 if len(values) > 1 else float("nan")
     return statistics.mean(values), se
+
+
+if __name__ == "__main__":
+    main()

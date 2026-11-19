@@ -6,6 +6,8 @@ do, fits it to people's play (Olieslagers et al. 2023, 42 participants), and com
 by move whether to show the optimal move.
 
 **Start with [`notebooks/summary.ipynb`](notebooks/summary.ipynb)**: the project's progress in one place.
+**[`MODEL.md`](MODEL.md)** is the simulated student's model card: every assumption, its value, where the value
+came from, and the code behind it.
 
 ## Layout
 
@@ -19,7 +21,8 @@ rushhour/              the library
                        of AND-OR's options is the heuristic deliberation uses
     solve.py           solving by intuition, by deliberation, or arbitrating; evaluation over many puzzles
     labels.py          what an attempt teaches: own solved play, hindsight shortcuts, shown moves
-    train.py           expert iteration (pretraining as AND-OR's apprentice) and online learning in a session
+    train.py           expert iteration (pretraining) and online learning in a session
+    spec.py            the fitted student's settings (MODEL.md), and a check of a saved run against them
   teachers.py          random and bayes4 (the default: bayes3's rule on a filtered model of the student), the
                        teacher-spec registry, and the names of retired teachers so their runs still load
   sessions.py          simulated sessions: run (CLI), save, load
@@ -66,7 +69,7 @@ Set up once (see `requirements.txt` for the CUDA build of torch on Windows):
 
 Everything runs from the repository root:
 
-    python -m rushhour.sessions my_run --init models/students/round6_epoch01.pt --teachers none bayes4
+    python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4   # the fitted student
     python -m rushhour.run_queue watch my_queue
     python experiments/and_or_network.py
 

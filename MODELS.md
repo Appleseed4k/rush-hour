@@ -9,7 +9,7 @@ at the same relative paths, to the archive folder **`C:\dev\rush-hour-archive\`*
 
 | Path | What | Written by | Read by |
 |---|---|---|---|
-| `sessions/<run>/` (28 runs) | Session results: `config.json`, per teacher `sessions.json` (play) and `results.json` (tests). The students' snapshots (`*.pt`) are archived. | `python -m rushhour.sessions` | summary |
+| `sessions/<run>/` (33 runs) | Session results: `config.json`, per teacher `sessions.json` (play) and `results.json` (tests). The students' snapshots (`*.pt`) are archived. | `python -m rushhour.sessions` | summary |
 | `sessions/and_or_gamma/` | Plain AND-OR on the 70 human layouts over γ | `experiments/and_or_gamma.py` | summary, p8 |
 | `sessions/teach_shortcut_agency0/trace/` | The unhelped students' paths, and `skill_tracking.json`, the sweep behind bayes4 and `notebooks/skill_filter.html` (bayes3's refit included) | `python -m rushhour.sessions`; `experiments/skill_tracking.py` (now writes `summary/skill_tracking.json`) | `experiments/skill_tracking.py` |
 | `sessions/calibrated_v2/` | Only its `config.json`: it defines `surrender.puzzle_set("test")` | - | summary |
@@ -19,7 +19,7 @@ at the same relative paths, to the archive folder **`C:\dev\rush-hour-archive\`*
 | `apprentice/gamma0.07_free/` | The AND-OR apprentice (γ 0.07, protect_movers off): every epoch's checkpoint | `experiments/apprentice.py` | summary (manifest), the curve and p8 scripts |
 | `students/` | Candidate starting students, one per round of their pretraining run (was `teach/fresh_p0.1/random_0.1/`). `round6_epoch01.pt` is `paths.START`, the start of every session the summary shows | the p2 teaching run | `rushhour.surrender`, new sessions |
 
-The 28 session runs: `fitted_teachers`, `pilot_all_agency0.1_skip`, `teach_shortcut_agency{0,0.1,0.3}`,
+The 33 session runs: `fitted_teachers`, `pilot_all_agency0.1_skip`, `teach_shortcut_agency{0,0.1,0.3}`,
 `teach_shortcut_agency{0.0,0.1,0.3,0.5,0.7,0.9,1}_even`, `teach_shortcut_agency0_confirm`, and
 `people_{all,own,w3,w10}{,_m10,_m20,_m60,_m120}`.
 
