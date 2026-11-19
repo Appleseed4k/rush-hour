@@ -1,4 +1,4 @@
-"""A queue of session_experiment.py runs played one after another in a background process that outlives the
+"""A queue of sessions.py runs played one after another in a background process that outlives the
 notebook (or shell) that started it, and a progress bar with the time left.
 
 From a notebook:
@@ -6,15 +6,15 @@ From a notebook:
     rq.launch("teacher_sweep", [("run_a", ["--teachers", "none", "--lr", "1e-4"]), ("run_b", [...])])
     rq.watch("teacher_sweep")      # live bar; stopping the cell stops only the watching
     rq.stop("teacher_sweep")       # stops it, workers included
-From a shell (scripts/):
-    python run_queue.py watch teacher_sweep     (or: python run_queue.py teacher_sweep - one line; ... stop ...)
+From a shell (the repository root):
+    python -m rushhour.run_queue watch teacher_sweep     (or: python -m rushhour.run_queue teacher_sweep - one line; ... stop ...)
 
 Launching a queue that is already running, or whose runs are all saved, does nothing; launching a stopped one
-again plays what is missing (session_experiment.py skips the teachers a run has saved). Files:
+again plays what is missing (sessions.py skips the teachers a run has saved). Files:
 <out>/queues/<name>.json (the runs, when it was launched, the process) and <name>.log (the runs' output).
 
 Progress is counted in teacher runs (a run's sessions with one teacher, then their tests), from the files
-session_experiment.py writes as it goes (session_experiment.progress). The time left assumes the rest goes at the
+sessions.py writes as it goes (sessions.progress). The time left assumes the rest goes at the
 pace since launch.
 """
 import json
@@ -24,9 +24,8 @@ import subprocess
 import sys
 import time
 
-import session_experiment as se
+from . import paths, sessions as se
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_SHARE = 0.75  # share of a teacher run's time spent playing the sessions (the rest testing)
 WINDOWS = os.name == "nt"  # no process groups, setsid or /bin/sh there: see launch, _play, stop and _alive
 
@@ -91,7 +90,7 @@ def _done(record, out):
 
 
 def launch(name, runs, out=se.OUT):
-    """Plays `runs` - (run name, session_experiment.py arguments after the run name) pairs - one after another in a
+    """Plays `runs` - (run name, sessions.py arguments after the run name) pairs - one after another in a
     background process, unless queue `name` is already running."""
     if os.path.exists(_path(name, out)) and status(name, out)["running"]:
         print(f"{name} is already running (pid {_load(name, out)['pid']})")
@@ -111,11 +110,11 @@ def launch(name, runs, out=se.OUT):
         # No zombies on Windows, so a plain detached child will do: no console window, its own process group, and
         # (where the job allows it) out of this process's job, so closing the notebook or terminal doesn't end it.
         # UTF-8 output, since a log file would otherwise get the ANSI code page. The queue records its own pid.
-        argv = [sys.executable, "-u", os.path.abspath(__file__), "run", name, out]
+        argv = [sys.executable, "-u", "-m", "rushhour.run_queue", "run", name, out]
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         with open(log, "a") as f:
-            options = dict(cwd=HERE, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+            options = dict(cwd=paths.ROOT, env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
             try:
                 subprocess.Popen(argv, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options)
             except OSError:  # the job doesn't allow breaking away
@@ -123,8 +122,8 @@ def launch(name, runs, out=se.OUT):
     else:
         # Started through a shell that exits at once, so the queue doesn't stay this process's child (a finished
         # child would linger as a zombie, still "alive", until this process ends); the queue records its own pid.
-        subprocess.run(["/bin/sh", "-c", 'nohup "$0" -u "$1" run "$2" "$3" >> "$4" 2>&1 < /dev/null &',
-                        sys.executable, os.path.abspath(__file__), name, out, log], cwd=HERE, check=True)
+        subprocess.run(["/bin/sh", "-c", 'nohup "$0" -u -m rushhour.run_queue run "$1" "$2" >> "$3" 2>&1 < /dev/null &',
+                        sys.executable, name, out, log], cwd=paths.ROOT, check=True)
     for _ in range(100):
         if _load(name, out)["pid"] is not None:
             break
@@ -142,8 +141,8 @@ def _play(name, out):
     failed = []
     for entry in record["runs"]:
         print(f"### {entry['run']}", flush=True)
-        code = subprocess.run([sys.executable, "-u", os.path.join(HERE, "session_experiment.py"), entry["run"],
-                               *entry["argv"], "--out", out], cwd=HERE).returncode
+        code = subprocess.run([sys.executable, "-u", "-m", "rushhour.sessions", entry["run"],
+                               *entry["argv"], "--out", out], cwd=paths.ROOT).returncode
         if code != 0:
             failed.append(entry["run"])
             print(f"### {entry['run']} failed (exit {code})", flush=True)

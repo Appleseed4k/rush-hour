@@ -1,11 +1,11 @@
 """This repo's plain AND-OR solver (and_or.solve, no network) on the humans' 70 layouts, over a grid of lapse rates
-gamma, with protect_movers on and off - for notebooks/p3_session.ipynb's section on gamma.
+gamma, with protect_movers on and off - for notebooks/archive/p3_session.ipynb's section on gamma.
 
-Plain AND-OR is what expert iteration's first round learns from (rl.expert_iteration with student "and_or", gamma
-0.07 by default; notebooks/old/p1_apprentice.ipynb). Each layout is played RUNS times per (protect_movers, gamma):
+Plain AND-OR is what expert iteration's first round learns from (student.expert_iteration with student "and_or", gamma
+0.07 by default; phase 1). Each layout is played RUNS times per (protect_movers, gamma):
 whole plans, searched depth-first, gamma the chance a subgoal is abandoned for a random move, replanning after each
 pass, up to a cap of STEP_FACTOR x the layout's length (at least MIN_STEPS) with no giving up - people's giving up is
-applied afterwards from the move count, as fit_surrender.py does. A plan that would cross the cap counts as unsolved.
+applied afterwards from the move count, as surrender.py does. A plan that would cross the cap counts as unsolved.
 
 protect_movers off with gamma 0 is left out: with no lapses to end it, its search grows without bound on some
 layouts (prb58853_16 among them; runs still searching after 5 minutes). With gamma > 0 it costs no more than on.
@@ -18,12 +18,10 @@ import random
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-import and_or  # noqa: E402
-import human_data as hd  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from rushhour import and_or, human_data as hd, paths  # noqa: E402
 
-OUT = os.path.join(HERE, "..", "..", "models", "sessions", "and_or_gamma")
+OUT = os.path.join(paths.SESSIONS, "and_or_gamma")
 GAMMAS = [0.0, 0.01, 0.02, 0.035, 0.05, 0.07, 0.1, 0.15, 0.3]
 RUNS, STEP_FACTOR, MIN_STEPS = 20, 10, 50
 

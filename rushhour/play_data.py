@@ -31,7 +31,7 @@ started (null for other teachers). Games saved before there was a teacher
 (version 1) have no teacher key: "none".
 
 From version 3 the Bayesian teacher is "bayes3:<seconds>[:<name>=<value>,...]"
-(scripts/teach.py's Bayesian3, ported): after that long without a move it makes
+(rushhour/teachers.py's Bayesian3, ported): after that long without a move it makes
 the move if its model gives the player under theta chance of solving alone.
 Its checks are {"t", "afterMove", "distance", "delay", "solveAlone", "shift",
 "shown"} - the chance it gave, and its mean belief of how much harder (below
@@ -44,7 +44,7 @@ teacher), and `delayChanges`, when the owner's testing slider changed it.
 import json
 import os
 
-from lib import car_orientations, neighbors, parse_puzzle_line
+from .board import car_orientations, neighbors, parse_puzzle_line
 
 
 def load(path):
@@ -60,7 +60,7 @@ def load(path):
 
 def puzzle(board):
     """The game's starting board in this repo's state format (as
-    lib.parse_puzzle_line gives: ("red", cells), then the other cars by
+    board.parse_puzzle_line gives: ("red", cells), then the other cars by
     letter)."""
     return parse_puzzle_line(f"0 {board} 0")[1]
 

@@ -1,10 +1,10 @@
 """Pretraining curves of AND-OR's apprentices, cached for notebooks/summary.ipynb.
 
 Every saved checkpoint of each run (the network before training and after every epoch of every expert-iteration
-round) plays fit_surrender's test puzzles - 20 pool puzzles at each of people's lengths 6, 10, 13 and 15 - RUNS
+round) plays surrender.py's test puzzles - 20 pool puzzles at each of people's lengths 6, 10, 13 and 15 - RUNS
 times each with no giving up, up to 10x the puzzle's length (at least 50 moves). The attempts are written in
-fit_surrender's cache format (puzzle: [moves if solved, else None]), so people's giving up can be applied afterwards
-at any scale (fit_surrender.predict).
+surrender.py's cache format (puzzle: [moves if solved, else None]), so people's giving up can be applied afterwards
+at any scale (surrender.predict).
 
     python apprentice_curve.py            # about a minute per checkpoint; finished ones are skipped
 """
@@ -13,16 +13,14 @@ import os
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.join(HERE, "..", "..")
-sys.path += [os.path.join(HERE, ".."), os.path.join(HERE, "..", "p3_session")]
-import fit_surrender as fs  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from rushhour import paths, surrender as fs  # noqa: E402
 
-OUT = os.path.join(ROOT, "models", "summary", "apprentice_curve")
+OUT = os.path.join(paths.MODELS, "summary", "apprentice_curve")
 RUNS_PER_PUZZLE = 10
 APPRENTICES = {  # name: folder of round{r}_epoch{e}.pt checkpoints with a manifest.json
-    "protected": os.path.join(ROOT, "models", "checkpoints"),  # phase 1: gamma 0.07, protect_movers on
-    "unprotected": os.path.join(ROOT, "models", "apprentice", "gamma0.07_free"),  # gamma 0.07, protect_movers off
+    "protected": os.path.join(paths.MODELS, "checkpoints"),  # phase 1: gamma 0.07, protect_movers on
+    "unprotected": os.path.join(paths.APPRENTICE, "gamma0.07_free"),  # gamma 0.07, protect_movers off
 }
 
 

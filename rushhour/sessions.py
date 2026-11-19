@@ -1,5 +1,5 @@
 """Simulated participants: students that learn online during one session,
-under human-like limits on learning (rl.learning_session), with and without
+under human-like limits on learning (student.learning_session), with and without
 a teacher.
 
 Like the human experiment (human_data.py), every student gets the same set
@@ -18,7 +18,7 @@ move, with a probability fitted to the human data by how many moves they
 have made relative to the optimal length (human_data.surrender_hazard; the
 fitted rates are saved in config.json). Giving up ends the puzzle, unsolved.
 --test-surrender does the same in the held-out tests. --surrender-scale
-multiplies the rates (fit_surrender.py picks a checkpoint and scale that
+multiplies the rates (surrender.py picks a checkpoint and scale that
 match people's starting level).
 
 --multiplier m relaxes how much data the network gets: each human trial
@@ -43,11 +43,11 @@ stopped before saving their sessions), leaving the others as they are. load_sess
 reads a run back; session_curve() and test_curve() summarize it, with
 standard errors across students.
 
-Examples (from scripts/):
-    python session_experiment.py base --init ../models/teach/fresh_p0.1/random_0.1/round1_epoch06.pt
-    python session_experiment.py lapses --init ... --encode 0.3 --teachers none correct-after:0.1
-    python session_experiment.py base --test-only --test-runs 5
-    python session_experiment.py base --teachers bayes:0.1 --init ...   # base's settings: adds a teacher
+Examples (from the repository root):
+    python -m rushhour.sessions base --init models/students/start.pt
+    python -m rushhour.sessions lapses --init ... --encode 0.3 --teachers none random:0.1
+    python -m rushhour.sessions base --test-only --test-runs 5
+    python -m rushhour.sessions base --teachers bayes:0.1 --init ...   # base's settings: adds a teacher
 """
 import argparse
 import json
@@ -78,10 +78,9 @@ import torch
 from multiprocessing import Pool
 from tqdm import tqdm
 
-import rl
-import teach_experiment as te
+from . import board, paths, student as st, teachers as tr
 
-OUT = os.path.join(te.ROOT, "models", "sessions")
+OUT = paths.SESSIONS
 TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_steps", "max_steps", "seed",
                  "test_surrender", "surrender_scale")
 # Settings a saved run may be re-run with: it then adds the teachers it doesn't have yet (and finishes any
@@ -99,7 +98,7 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", help="run name: results go to <out>/<run>/")
     ap.add_argument("--teachers", nargs="+", default=["none", "bayes3"],
-                    help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(te.TEACHERS)} "
+                    help=f"none, or kind[:parameter][,key=value...]; kinds: {', '.join(tr.TEACHERS)} "
                          "(default: no teacher and bayes3, the default teacher)")
     ap.add_argument("--students", type=int, default=10, help="simulated participants per teacher")
     ap.add_argument("--session-bins", nargs="+", default=["6-6", "10-10", "13-13", "15-15"],
@@ -124,31 +123,31 @@ def parse_args(argv=None):
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--shown-weight", type=float, default=1.0,
                     help="agency: how much what a shown move teaches counts, the student's own play 1 "
-                         "(rl.agency_weights; 0: nothing learned from being shown)")
+                         "(student.agency_weights; 0: nothing learned from being shown)")
     ap.add_argument("--agency-step", choices=["off", "scale", "skip"], default="off",
-                    help="how agency shrinks the update (rl.online_update): off = it doesn't (Adam cancels a weight "
+                    help="how agency shrinks the update (student.online_update): off = it doesn't (Adam cancels a weight "
                          "shared by the whole batch); scale = each step scaled by the batch's mean weight; skip = "
                          "each step taken with that probability")
     ap.add_argument("--even-batches", action=argparse.BooleanOptionalAction, default=None,
-                    help="each update's batches of equal size (rl.online_update) instead of 256 each and a remainder, "
+                    help="each update's batches of equal size (student.online_update) instead of 256 each and a remainder, "
                          "on which Adam steps as far as on a full batch (default: on for a new run; a saved run "
                          "keeps what it was played with, off if saved before this setting existed)")
     ap.add_argument("--log-loss", action="store_true",
                     help="also record, per puzzle, its examples' losses and weights just before each update, split "
-                         "own / shown, and each update's steps (rl.learning_session log_loss); play and training "
+                         "own / shown, and each update's steps (student.learning_session log_loss); play and training "
                          "are unchanged")
     ap.add_argument("--train-device", default="cpu",
-                    help="where the students' updates run (rl.PolicyAgent.train_on), e.g. mps: all the workers "
+                    help="where the students' updates run (student.PolicyAgent.train_on), e.g. mps: all the workers "
                          "share the GPU; play and tests stay on the CPU. The GPU's arithmetic differs slightly, "
                          "so compare runs made on the same device")
     ap.add_argument("--progress-weight", type=float, default=0.0,
                     help="progress labels: the student also learns from its own moves by its starting network's "
-                         "sense of progress, each label weighing this (rl.progress_examples; 0: off)")
+                         "sense of progress, each label weighing this (student.progress_examples; 0: off)")
     ap.add_argument("--progress-tail", type=float, default=0.2,
                     help="share of its recent moves labelled each way (steps forward, steps back)")
-    ap.add_argument("--labels", choices=rl.LABELS, default="own",
+    ap.add_argument("--labels", choices=st.LABELS, default="own",
                     help="what a solved attempt teaches: own = the path played, loops cut out (--window); path / all = "
-                         "shortcut labels, shortest routes through the boards it visited (rl.shortcut_routes; --window)")
+                         "shortcut labels, shortest routes through the boards it visited (student.shortcut_routes; --window)")
     ap.add_argument("--surrender", action="store_true",
                     help="students may give up on a puzzle as people do (a rule fitted to the human data, "
                          "human_data.surrender_hazard); the move cap still applies")
@@ -181,11 +180,11 @@ def parse_args(argv=None):
 
 
 def make_teacher(spec):
-    return None if spec == "none" else te.make_teacher(spec)
+    return None if spec == "none" else tr.make_teacher(spec)
 
 
 def teacher_name(spec):
-    return "no teacher" if spec == "none" else te.teacher_name(spec)
+    return "no teacher" if spec == "none" else tr.teacher_name(spec)
 
 
 def folder(spec):
@@ -195,9 +194,9 @@ def folder(spec):
 def sample_puzzles(config):
     """(session puzzles, test puzzles) as (distance, state) lists - test first,
     the session's excluding them."""
-    pool = rl.load_puzzle_pool(te.POOL)
-    test = rl.sample_by_distance(pool, te.bins(config["test_bins"]), config["test_per_bin"], seed=config["seed"])
-    session = rl.sample_by_distance(pool, te.bins(config["session_bins"]), config["per_bin"] * multiplier(config),
+    pool = board.load_puzzle_pool(paths.POOL)
+    test = board.sample_by_distance(pool, bins(config["test_bins"]), config["test_per_bin"], seed=config["seed"])
+    session = board.sample_by_distance(pool, bins(config["session_bins"]), config["per_bin"] * multiplier(config),
                                     seed=config["seed"] + 1, exclude=[s for _, s in test])
     return session, test
 
@@ -205,7 +204,7 @@ def sample_puzzles(config):
 def surrender_rule(config, puzzles):
     """The run's SurrenderRule (its fitted rates are saved in config.json) for (distance, state) `puzzles`."""
     edges, rates = config["surrender_table"]
-    return rl.SurrenderRule(edges, rates, {s: d for d, s in puzzles}, config.get("surrender_scale", 1.0))
+    return st.SurrenderRule(edges, rates, {s: d for d, s in puzzles}, config.get("surrender_scale", 1.0))
 
 
 def multiplier(config):
@@ -232,7 +231,7 @@ def _same_key(setting, value):
     machine (an absolute path there) can be added to on another."""
     if setting != "init" or value is None:
         return value
-    path, repo = value.replace("\\", "/"), "/" + os.path.basename(os.path.abspath(te.ROOT)) + "/"
+    path, repo = value.replace("\\", "/"), "/" + os.path.basename(os.path.abspath(paths.ROOT)) + "/"
     return path.split(repo, 1)[1] if repo in path else path
 
 
@@ -333,11 +332,11 @@ def _student(job):
     its per-puzzle record, saving snapshots at the test points."""
     student, spec, config, puzzles, caps, run_dir = job
     torch.set_num_threads(1)
-    agent = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt"), lr=config["lr"])
+    agent = st.PolicyAgent.load(os.path.join(run_dir, "initial.pt"), lr=config["lr"])
     if config.get("train_device", "cpu") != "cpu":
         agent.train_on(config["train_device"])
     progress_weight = config.get("progress_weight", 0.0)
-    judge = rl.PolicyAgent.load(os.path.join(run_dir, "initial.pt")) if progress_weight > 0 else None
+    judge = st.PolicyAgent.load(os.path.join(run_dir, "initial.pt")) if progress_weight > 0 else None
     teacher_dir = os.path.join(run_dir, folder(spec))
     points = test_points(config, len(puzzles))
     saved = [0]
@@ -350,7 +349,7 @@ def _student(job):
         saved[0] = n
         write_progress(run_dir, f"{folder(spec)}_student{student}", done=n, total=len(puzzles))
 
-    record = rl.learning_session(
+    record = st.learning_session(
         agent, [s for _, _, s in puzzles], make_teacher(spec), max_attempts=config["max_attempts"],
         surrender=surrender_rule(config, [(d, s) for _, d, s in puzzles]) if config.get("surrender") else None,
         max_steps=caps.__getitem__, memory=config["memory"], explore=config["explore"],
@@ -402,7 +401,7 @@ def test(spec, config, test_puzzles, caps, run_dir, n_puzzles):
             if str(n) not in results["students"].get(str(s), {})]
     files = sorted({_snapshot(run_dir, spec, s, n) for s, n in todo})
     n_runs = config["test_runs"]
-    # The same attempts as rl.evaluate_intuition, for every snapshot in one pool.
+    # The same attempts as st.evaluate_intuition, for every snapshot in one pool.
     rule = surrender_rule(config, test_puzzles) if config.get("test_surrender") else None
     jobs = [(file, state, d, config["memory"], caps[state], config["test_temperature"],
              hash((config["seed"], i, r)) & 0xFFFFFFFF, rule)
@@ -437,14 +436,14 @@ _AGENT = {}
 
 def _test_job(job):
     """One untaught test attempt by a snapshot (loaded once per worker while
-    consecutive jobs share it) - as rl.evaluate_intuition's attempts."""
+    consecutive jobs share it) - as student.evaluate_intuition's attempts."""
     file, state, distance, memory, cap, temperature, seed, *rest = job
     rule = rest[0] if rest else None
     if file not in _AGENT:
         torch.set_num_threads(1)
         _AGENT.clear()
-        _AGENT[file] = rl.PolicyAgent.load(file)
-    result = rl.solve_intuition(_AGENT[file], state, cap, memory, temperature, rng=random.Random(seed),
+        _AGENT[file] = st.PolicyAgent.load(file)
+    result = st.solve_intuition(_AGENT[file], state, cap, memory, temperature, rng=random.Random(seed),
                                 surrender=rule.for_puzzle(state) if rule is not None else None)
     return {"solved": result["solved"], "moves": len(result["moves"]) if result["solved"] else None,
             "distance": distance}
@@ -455,9 +454,9 @@ def main(argv=None):
     run_dir = os.path.join(config["out"], config["run"])
     config = check_config(run_dir, config)
     session, test_puzzles = sample_puzzles(config)
-    caps = {s: te.step_cap(d, config) for d, s in session + test_puzzles}
+    caps = {s: step_cap(d, config) for d, s in session + test_puzzles}
     if (config.get("surrender") or config.get("test_surrender")) and "surrender_table" not in config:
-        import human_data
+        from . import human_data
         edges, rates, _ = human_data.surrender_hazard()
         config["surrender_table"] = [edges, rates]
         with open(os.path.join(run_dir, "config.json"), "w") as f:
@@ -465,7 +464,7 @@ def main(argv=None):
     if not config["test_only"] and not os.path.exists(os.path.join(run_dir, "initial.pt")):
         random.seed(config["seed"])
         torch.manual_seed(config["seed"])
-        agent = rl.PolicyAgent.load(config["init"]) if config["init"] else rl.PolicyAgent()
+        agent = st.PolicyAgent.load(config["init"]) if config["init"] else st.PolicyAgent()
         agent.save(os.path.join(run_dir, "initial.pt"))
     for spec in config["teachers"]:
         print(f"=== {config['run']}: {teacher_name(spec)} ===", flush=True)
@@ -487,7 +486,7 @@ def load_session(run, out=OUT):
     for spec in config["teachers"]:
         try:
             teacher_dir = os.path.join(run_dir, folder(spec))
-        except te.RetiredTeacher:  # its results stay on disk, but nothing here can name them
+        except tr.RetiredTeacher:  # its results stay on disk, but nothing here can name them
             continue
         entry = {"sessions": {}, "results": {}}
         path = os.path.join(teacher_dir, "sessions.json")
@@ -518,9 +517,30 @@ def session_curve(sessions, block=10):
         ratio = [statistics.mean(e["moves"] / e["distance"] for e in c if e["solved"])
                  for c in chunks if any(e["solved"] for e in c)]
         help_ = [statistics.mean(e["interventions"] for e in c) for c in chunks]
-        out.append((start, te.mean_se(solve), te.mean_se(ratio), te.mean_se(help_)))
+        out.append((start, mean_se(solve), mean_se(ratio), mean_se(help_)))
     return out
 
 
 if __name__ == "__main__":
     main()
+
+
+# --- shared helpers ---------------------------------------------------------------------------
+
+def bins(specs):
+    return [tuple(int(x) for x in spec.split("-")) for spec in specs]
+
+
+def step_cap(distance, config):
+    if config["max_steps"] is not None:
+        return config["max_steps"]
+    return max(config["min_steps"], int(round(config["step_factor"] * distance)))
+
+
+def mean_se(values):
+    """(mean, standard error) of the non-nan values."""
+    values = [v for v in values if v == v]
+    if not values:
+        return float("nan"), float("nan")
+    se = statistics.stdev(values) / len(values) ** 0.5 if len(values) > 1 else float("nan")
+    return statistics.mean(values), se

@@ -2,7 +2,7 @@ import itertools
 import os
 import random
 
-from lib import DELTAS
+from .board import DELTAS
 
 BOARD_SIZE = 6
 
@@ -16,18 +16,18 @@ BOARD_SIZE = 6
 # the original model: such plans are found, solve rates are higher on mid-range
 # puzzles, and the cost is search size - with lapses off, a ~200x larger search
 # per pass. (With lapses on, gamma > 0, False costs no
-# more than True: scripts/p3_session/and_or_gamma.py.)
+# more than True: experiments/and_or_gamma.py.)
 #
 # Off by default since 2026-11-17: it fits people better
 # (notebooks/archive/p3_session.ipynb's gamma section) and is the expert of the
 # apprentice in models/apprentice/gamma0.07_free. Earlier work (phase 1, tag
 # pre-cleanup) used True, so rerunning it as it was needs it on. With lapses off (gamma = 0, the default of
-# rl.solve_and_or and its relatives) an unprotected search can grow without
+# student.solve_and_or and its relatives) an unprotected search can grow without
 # bound on some boards: give gamma > 0, or turn protection on.
 #
 # The environment variable AND_OR_PROTECT_MOVERS=1 turns it on for a whole
 # run, worker processes included (they inherit the environment) - e.g.
-# scripts/p3_session/apprentice.py --protect-movers on.
+# experiments/apprentice.py --protect-movers on.
 PROTECT_MOVERS = os.environ.get("AND_OR_PROTECT_MOVERS", "0") != "0"
 
 
@@ -368,7 +368,7 @@ def solve(state, heuristic=None, gamma=0.0, protect_movers=PROTECT_MOVERS):
     for the caller to feed back in.
 
     `heuristic`, if given, is a `heuristic(state, actions) -> {action: score}`
-    callable (see PolicyAgent.heuristic in rl.py) that orders every
+    callable (see student.PolicyAgent.heuristic) that orders every
     candidate-selection point best-first instead of randomly. It never changes
     whether a state solves, only which solution is found and how quickly.
 

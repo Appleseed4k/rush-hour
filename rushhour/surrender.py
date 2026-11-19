@@ -1,8 +1,8 @@
 """Picks a starting checkpoint and surrender scale so the student begins a
 session where people do.
 
-    python fit_surrender.py                      # rounds 3-10 of the default folder
-    python fit_surrender.py --rounds 5 6 7 --runs 20
+    python -m rushhour.surrender                    # rounds 3-10 of the default folder
+    python -m rushhour.surrender --rounds 5 6 7 --runs 20
 
 The target is people's first --block trials (default 10): solve rate and
 moves / optimal over solved puzzles (this repo's lengths), each a mean of
@@ -27,17 +27,12 @@ means in units of their standard errors) and the fit at scales 0 and 1.
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the shared scripts
-import human_data as hd
-import rl
-import session_experiment as se
-import teach_experiment as te
+from . import human_data as hd, paths, sessions as se, student as st
 
-FOLDER = os.path.join(te.OUT, "fresh_p0.1", "random_0.1")
+FOLDER = paths.STUDENTS
 
 
 def human_target(block=10):
@@ -47,7 +42,7 @@ def human_target(block=10):
     solve = first.groupby("subject").solved.mean()
     won = first[first.solved]
     ratio = (won.moves / won.distance).groupby(won.subject).mean()
-    return te.mean_se(list(solve)), te.mean_se(list(ratio)), first
+    return se.mean_se(list(solve)), se.mean_se(list(ratio)), first
 
 
 def puzzle_set(which, config_run="calibrated_v2"):
@@ -62,18 +57,18 @@ def puzzle_set(which, config_run="calibrated_v2"):
 
 def attempts(path, puzzles, runs, step_factor=10.0, min_steps=50, seed=0, processes=None):
     """{name: [moves of each solved attempt, None if unsolved]} with no surrender."""
-    agent = rl.PolicyAgent.load(path)
+    agent = st.PolicyAgent.load(path)
     names = list(puzzles)
     states = [puzzles[n] for n in names]
     caps = {s: max(min_steps, int(round(step_factor * d))) for d, s in states}
-    out = rl.evaluate_intuition(agent, states, n_runs=runs, temperature=1.0, memory=10, max_steps=caps.__getitem__,
+    out = st.evaluate_intuition(agent, states, n_runs=runs, temperature=1.0, memory=10, max_steps=caps.__getitem__,
                                 seed=seed, processes=processes)
     return {n: [r["moves"] for r in out[i * runs:(i + 1) * runs]] for i, n in enumerate(names)}
 
 
 def survival(moves, distance, edges, rates, scale):
     """Chance an attempt solved in `moves` moves isn't given up first (no check after the solving move)."""
-    rule = rl.SurrenderRule(edges, rates, {0: distance}, scale)
+    rule = st.SurrenderRule(edges, rates, {0: distance}, scale)
     return float(np.prod([1 - rule(0, k) for k in range(1, moves)]))
 
 
@@ -110,7 +105,7 @@ def main(argv=None):
     ap.add_argument("--block", type=int, default=10, help="human trials 1..block are the target")
     ap.add_argument("--scales", type=float, nargs=3, default=(0.0, 6.0, 0.05), metavar=("LO", "HI", "STEP"))
     ap.add_argument("--processes", type=int, default=None)
-    ap.add_argument("--cache", default=os.path.join(te.ROOT, "models", "sessions", "surrender_fit"))
+    ap.add_argument("--cache", default=os.path.join(paths.SESSIONS, "surrender_fit"))
     args = ap.parse_args(argv)
 
     (hs, hs_se), (hr, hr_se), first = human_target(args.block)

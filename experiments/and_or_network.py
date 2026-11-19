@@ -3,10 +3,10 @@
 The apprentice's dest head orders AND-OR's candidate moves and picks what a lapse plays (PolicyAgent.heuristic, with
 Gumbel noise at temperature HEURISTIC_TEMPERATURE as during expert iteration); no intuitive moves are played - the
 threshold > 1 end of solve_arbitrated. Each checkpoint plays each layout RUNS times per gamma, exactly as
-p3_session/and_or_gamma.py plays plain AND-OR (whole plans, protect_movers off, replanning after each pass, a cap
+and_or_gamma.py plays plain AND-OR (whole plans, protect_movers off, replanning after each pass, a cap
 of STEP_FACTOR x the layout's length, at least MIN_STEPS, with no giving up: a plan that would cross the cap counts
 as unsolved), so people's giving up can be applied afterwards from the move count and the rows compare directly
-with that sweep. The same checkpoints also play the layouts by intuition alone (fit_surrender.attempts: the policy
+with that sweep. The same checkpoints also play the layouts by intuition alone (surrender.attempts: the policy
 head at temperature 1, memory 10, same cap) for the other end.
 
     python and_or_network.py     # every core; writes models/summary/and_or_network/{sweep,intuition}.csv
@@ -18,16 +18,12 @@ import sys
 import time
 
 os.environ["AND_OR_PROTECT_MOVERS"] = "0"  # as the apprentice's expert (gamma0.07_free) was trained
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.join(HERE, "..", "..")
-sys.path += [os.path.join(HERE, ".."), os.path.join(HERE, "..", "p3_session")]
-import and_or  # noqa: E402
-import fit_surrender as fs  # noqa: E402
-import human_data as hd  # noqa: E402
-import rl  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from rushhour import and_or, human_data as hd, paths, student, surrender as fs  # noqa: E402
+from rushhour.student import solve  # noqa: E402
 
-OUT = os.path.join(ROOT, "models", "summary", "and_or_network")
-FOLDER = os.path.join(ROOT, "models", "apprentice", "gamma0.07_free")
+OUT = os.path.join(paths.MODELS, "summary", "and_or_network")
+FOLDER = os.path.join(paths.APPRENTICE, "gamma0.07_free")
 CHECKPOINTS = ["round0_epoch00.pt", "round1_epoch05.pt", "round2_epoch02.pt", "round3_epoch01.pt"]  # kept epochs
 GAMMAS = [0.01, 0.035, 0.07, 0.15, 0.3]
 HEURISTIC_TEMPERATURE = 1.0
@@ -35,15 +31,15 @@ RUNS, STEP_FACTOR, MIN_STEPS = 20, 10, 50
 
 
 def init(path):
-    agent = rl.PolicyAgent.load(path)
+    agent = student.PolicyAgent.load(path)
     agent.temperature = HEURISTIC_TEMPERATURE
-    rl._init_attempt_worker(*rl._agent_payload(agent))
+    solve._init_attempt_worker(*solve._agent_payload(agent))
 
 
 def rollout(args):
     gamma, instance, run = args
     random.seed(f"{gamma}-{instance}-{run}")  # and_or and the Gumbel noise draw from the random module
-    heuristic = rl._WORKER["agent"].heuristic
+    heuristic = solve._WORKER["agent"].heuristic
     state, distance = hd.puzzle(instance), hd.distance(instance)
     cap = max(MIN_STEPS, STEP_FACTOR * distance)
     played, start, solved = 0, time.process_time(), False

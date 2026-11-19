@@ -1,6 +1,6 @@
 """The Olieslagers et al. (2023) AND-OR model against the 42 participants, cached for notebooks/summary.ipynb.
 
-The model is the port of the archive's gamma_only_model (scripts/original_model.py): a per-board
+The model is the port of the archive's gamma_only_model (rushhour/paper_model.py): a per-board
 distribution over the next move, from the board's AND-OR tree with lapse rate gamma. Two passes:
 
     python and_or_humans.py likelihood   # log-probability of every human move at each gamma in GAMMAS
@@ -20,13 +20,11 @@ import sys
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path += [os.path.join(HERE, "..")]
-import human_data as hd  # noqa: E402
-import original_model as om  # noqa: E402
-from and_or import legal_moves  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from rushhour import human_data as hd, paper_model as om, paths  # noqa: E402
+from rushhour.and_or import legal_moves  # noqa: E402
 
-OUT = os.path.join(HERE, "..", "..", "models", "summary", "and_or_humans")
+OUT = os.path.join(paths.MODELS, "summary", "and_or_humans")
 GAMMAS = np.exp(np.linspace(np.log(0.002), np.log(0.6), 41))
 SIM_GAMMAS = [0.0, 0.01, 0.02, 0.035, 0.05, 0.07, 0.1, 0.15, 0.25]
 RUNS, STEP_FACTOR, MIN_STEPS = 10, 10, 50
@@ -63,7 +61,7 @@ def solved(state):
 
 
 def log_probs(state, move, prev_car, gammas=GAMMAS):
-    """log P(move) at each gamma, as original_model.action_distribution computes it (the tree is built once)."""
+    """log P(move) at each gamma, as paper_model.action_distribution computes it (the tree is built once)."""
     root_and, AND, OR, _ = om.build_tree(state, True)
     leaves = [(depth, leaf, v) for (depth, leaf), v in om.propagate(root_and, AND, OR, True).items() if v > 0]
     legal = [m for m in legal_moves(state) if m[2] <= om.MAX_AMOUNT]

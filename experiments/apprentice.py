@@ -1,14 +1,14 @@
-"""Pretrains a network as AND-OR's apprentice by expert iteration (rl.expert_iteration, student "and_or"): round 1
+"""Pretrains a network as AND-OR's apprentice by expert iteration (student.expert_iteration, student "and_or"): round 1
 learns from plain AND-OR's solved attempts, each later round from AND-OR ordered by the network it has become. The
-settings are phase 1's (notebooks/old/p1_apprentice.ipynb, whose checkpoints are in models/checkpoints): the same
+settings are phase 1's (phase 1, at tag pre-cleanup): the same
 1,000 pool puzzles every round (200 per distance bin 1-8 ... 21-30), the same validation puzzles, 4 attempts per
 puzzle, up to 40 epochs a round with patience 6 - but the expert's lapse rate (--gamma) and protect_movers
-(--protect-movers) can be set. notebooks/p3_session.ipynb's gamma section compares plain AND-OR with people at
+(--protect-movers) can be set. notebooks/archive/p3_session.ipynb's gamma section compares plain AND-OR with people at
 each setting.
 
 Saved under models/apprentice/<run>/: config.json, and the network before training and after every epoch of every
 round (round{r}_epoch{e}.pt), with manifest.json marking the kept ones and history.json (see expert_iteration).
-Candidate starting points for a session are then fitted to people's start with fit_surrender.py --folder.
+Candidate starting points for a session are then fitted to people's start with `python -m rushhour.surrender --folder`.
 
     python apprentice.py gamma0.07_free                                 # the session start's run
     python apprentice.py gamma0.01_free --gamma 0.01
@@ -22,7 +22,7 @@ import random
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.join(HERE, "..", "..")
+ROOT = os.path.join(HERE, "..")
 BINS = [(1, 8), (9, 12), (13, 16), (17, 20), (21, 30)]
 
 
@@ -50,10 +50,9 @@ def main(argv=None):
     args = parse_args(argv)
     # Before and_or is first imported, so its default is set here and in every worker (they inherit the environment).
     os.environ["AND_OR_PROTECT_MOVERS"] = "1" if args.protect_movers == "on" else "0"
-    sys.path.insert(0, os.path.join(HERE, ".."))
+    sys.path.insert(0, ROOT)
     import torch
-    import and_or
-    import rl
+    from rushhour import and_or, board, student
     assert and_or.PROTECT_MOVERS == (args.protect_movers == "on")
     device = args.device or ("cuda" if torch.cuda.is_available() else
                              "mps" if torch.backends.mps.is_available() else "cpu")
@@ -65,18 +64,18 @@ def main(argv=None):
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(vars(args) | {"device": device, "bins": BINS}, f, indent=1)
 
-    pool = rl.load_puzzle_pool(os.path.join(ROOT, "data", "rush_nw.txt"))
-    test = rl.sample_by_distance(pool, BINS, 20, seed=args.seed)  # phase 1's test set: kept out, as it was
-    val = rl.sample_by_distance(pool, BINS, args.val_per_bin, seed=args.seed + 1, exclude=[s for _, s in test])
-    train = rl.sample_by_distance(pool, BINS, args.per_bin, seed=args.seed + 2,
+    pool = board.load_puzzle_pool()
+    test = board.sample_by_distance(pool, BINS, 20, seed=args.seed)  # phase 1's test set: kept out, as it was
+    val = board.sample_by_distance(pool, BINS, args.val_per_bin, seed=args.seed + 1, exclude=[s for _, s in test])
+    train = board.sample_by_distance(pool, BINS, args.per_bin, seed=args.seed + 2,
                                   exclude=[s for _, s in test + val])
     print(f"{len(train)} training and {len(val)} validation puzzles; gamma {args.gamma}, "
           f"protect_movers {args.protect_movers}, device {device}", flush=True)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    agent = rl.PolicyAgent(device=device, temperature=args.temperature)
-    history = rl.expert_iteration(agent, [s for _, s in train], [s for _, s in val], rounds=args.rounds,
+    agent = student.PolicyAgent(device=device, temperature=args.temperature)
+    history = student.expert_iteration(agent, [s for _, s in train], [s for _, s in val], rounds=args.rounds,
                                   n_attempts=args.attempts, gamma=args.gamma, max_steps=args.max_steps,
                                   seed=args.seed, checkpoint_dir=run_dir, epochs=args.epochs,
                                   patience=args.patience)

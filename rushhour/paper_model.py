@@ -22,7 +22,7 @@ Quirks reproduced when `faithful`:
 """
 import collections
 
-from and_or import legal_moves
+from .and_or import legal_moves
 
 class TreeTooLarge(Exception):
     """Raised when building or walking the tree exceeds `max_visits` node visits.

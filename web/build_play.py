@@ -7,8 +7,8 @@ writes them into play_template.html.
 The teacher is "none", "delay:<seconds>" (the default, delay:10: after that
 long without a move, the page makes an optimal move for the player) or
 "bayes3:<seconds>[:<name>=<value>,...]" (after that long, the Bayesian teacher
-- scripts/teach.py's Bayesian3, ported - makes the move if its model gives the
-player under theta chance of solving alone; parameters by teach.py's names),
+- rushhour/teachers.py's Bayesian3, ported - makes the move if its model gives the
+player under theta chance of solving alone; parameters by teachers.py's names),
 e.g. bayes3:10 or bayes3:10:theta=0.3. The page gives its owner a slider for
 the wait, for testing.
 

@@ -2,11 +2,11 @@
 move during a solve attempt.
 
 Terms: "the student" is the simulated student, the policy network that plays
-and learns (rl.PolicyAgent, rl.learning_session). "Model of the student" (or
+and learns (student.PolicyAgent, student.learning_session). "Model of the student" (or
 student model) always means a teacher's own beliefs about that student, as in
 the Bayesian teachers below - never the network itself.
 
-A teacher knows each puzzle's breadth-first-search distances (lib.multi_bfs,
+A teacher knows each puzzle's breadth-first-search distances (board.multi_bfs,
 computed the first time it has to teach on that puzzle), so the move it shows
 is always optimal: one that brings the board a move closer to the goal (one
 of them at random when several do). What varies between teachers is *when*
@@ -27,7 +27,7 @@ theta (0.45) chance of solving alone from here - no budget, no cost.
 Other teachers tried along the way (mistake correction, flagging, walls,
 hints, recalibrated and filtered student models, ...) are at tag pre-cleanup.
 
-The interface, used by rl.solve_intuition during a student's attempt:
+The interface, used by student.solve_intuition during a student's attempt:
 - start(state, rng): an attempt at the puzzle starting from `state` begins;
   `rng` (a random.Random) is the attempt's own randomness.
 - advise(state, step, proposal): the move to show on board `state`, `step`
@@ -39,12 +39,14 @@ The interface, used by rl.solve_intuition during a student's attempt:
   leading to `next_state`; `taught` says whether the teacher showed it.
   The student isn't told anything here: it's where a teacher notices a
   mistake to correct next turn, or updates its beliefs about the student.
-- end_attempt(result): the attempt is over (rl.solve_intuition's result:
+- end_attempt(result): the attempt is over (student.solve_intuition's result:
   boards, moves, which moves were taught, whether it solved). Where an
   adaptive teacher would learn from how the student did; a no-op here.
 
 `counts` (a Counter) tallies whatever a teacher wants reported; rl sums it
 over a round's attempts into expert_iteration's history.
+Specs: "kind", "kind:p" or "kind:p,key=value,..." name a teacher (make_teacher); TEACHERS lists the
+kinds.
 """
 import functools
 import math
@@ -53,7 +55,7 @@ from collections import Counter, deque
 
 import numpy as np
 
-from lib import car_orientations, multi_bfs, neighbors
+from .board import car_orientations, multi_bfs, neighbors
 
 
 class Teacher():
@@ -126,7 +128,7 @@ class Random(Teacher):
 @functools.lru_cache(maxsize=None)
 def _human_hazard():
     """People's surrender rates by moves / optimal (human_data.surrender_hazard), read once per process."""
-    import human_data
+    from . import human_data
     edges, rates, _ = human_data.surrender_hazard()
     return np.array(edges, dtype=float), np.array(rates)
 
@@ -189,7 +191,7 @@ class Bayesian(Teacher):
     most. It never looks at the student's intended move.
 
     Meant for sessions, one teacher per student, kept across puzzles (in
-    rl.expert_iteration's parallel attempts every puzzle gets a fresh copy,
+    student.expert_iteration's parallel attempts every puzzle gets a fresh copy,
     so it never gets to know the student). counts, per puzzle:
     "shown"; "predicted_solve" (at the start, the chance it gave the student
     of solving untaught); "skill_at_start" (its belief of the chance the
@@ -516,3 +518,35 @@ class Bayesian3(StuckBayes1):
     def __init__(self, theta=DEFAULT, **kwargs):
         super().__init__(theta, **kwargs)
 
+
+# --- the registry -------------------------------------------------------------------------------
+
+TEACHERS = {"random": Random, "bayes": Bayesian, "stuck-bayes1": StuckBayes1, "bayes3": Bayesian3}
+# Retired kinds whose results the summary still reads, by the name their results are saved under (their names
+# don't need the class). Every other retired kind is at tag pre-cleanup; runs that used one still load, without it.
+RETIRED = {"flag": "flag mistakes", "correct-after": "correct after mistake", "correct-before": "correct mistakes"}
+
+
+class RetiredTeacher(ValueError):
+    """A spec whose kind is no longer in TEACHERS."""
+
+
+def make_teacher(spec):
+    """`kind`, `kind:p` or `kind:p,key=value,...` (extra keyword arguments, as numbers, to the teacher class)."""
+    head, *extra = spec.split(",")
+    kind, _, p = head.partition(":")
+    if kind not in TEACHERS:
+        raise RetiredTeacher(f"teacher kind {kind!r} is retired or unknown (kinds: {', '.join(TEACHERS)}; the "
+                             f"others are at tag pre-cleanup): drop {spec} from the teachers")
+    kwargs = {k: float(v) for k, v in (e.split("=") for e in extra)}
+    cls = TEACHERS[kind]
+    return cls(float(p) if p else getattr(cls, "DEFAULT", 1.0), **kwargs)  # a kind may set its own default
+
+
+def teacher_name(spec):
+    """The name a teacher's results are saved under - for the RETIRED kinds too (others raise RetiredTeacher)."""
+    kind, _, p = spec.partition(":")
+    if kind in RETIRED:
+        q = float(p) if p else 1.0
+        return RETIRED[kind] if q >= 1 else f"{RETIRED[kind]} {q}"
+    return make_teacher(spec).name

@@ -1,4 +1,9 @@
+"""Boards and moves: states, legal moves, breadth-first search over a puzzle's states, and the puzzle pool
+(rush_nw.txt lines -> (distance, state); sampling by distance)."""
+import random
 from collections import defaultdict, deque
+
+from . import paths
 
 MOVES = {"h": "lr", "v": "ud"}
 DELTAS = {"l": (0, -1), "r": (0, 1), "u": (-1, 0), "d": (1, 0)}
@@ -145,3 +150,20 @@ def parse_puzzle_line(line):
     state = (("red", tuple(cars["A"])),) + tuple((name, tuple(cars[name])) for name in other_names)
     return int(dist_str), state
 
+
+def load_puzzle_pool(path=None):
+    """Every (distance, state) in a rush_nw.txt-format file (default: the analysis pool, paths.POOL)."""
+    with open(path or paths.POOL) as f:
+        return [parse_puzzle_line(line) for line in f]
+
+
+def sample_by_distance(pool, bins, per_bin, seed=0, exclude=()):
+    """`per_bin` random (distance, state) puzzles from each (lo, hi) distance
+    bin of `pool`, skipping states in `exclude`."""
+    rng = random.Random(seed)
+    exclude = set(exclude)
+    out = []
+    for lo, hi in bins:
+        candidates = [p for p in pool if lo <= p[0] <= hi and p[1] not in exclude]
+        out += rng.sample(candidates, min(per_bin, len(candidates)))
+    return out

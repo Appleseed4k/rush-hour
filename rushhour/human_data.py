@@ -8,7 +8,7 @@ data/rush_nw.txt. Checked: every board is valid, and 117,130 of the 117,145
 recorded slides replay as legal moves (the rest are drags off the board).
 
 Lengths: the paper counts a puzzle solved once the red car's path to the
-exit is clear; this repo (lib.find_goal_states) once the red car reaches the
+exit is clear; this repo once the red car reaches the
 edge - one move more. optimal_length() is the paper's (instance name's
 suffix - 2), distance() this repo's (+1, which breadth-first search confirms
 for all 70 puzzles). Compare move counts with distance(): trials() counts
@@ -18,7 +18,9 @@ import collections
 import csv
 import os
 
-ARCHIVE = os.path.join(os.path.dirname(__file__), "..", "23vrb-osfstorage-archive")
+from . import paths
+
+ARCHIVE = paths.HUMANS
 RAW = os.path.join(ARCHIVE, "data", "raw_data", "rush_hour", "all_subjects.csv")
 PROBLEMS = os.path.join(ARCHIVE, "data", "raw_data", "rush_hour", "problems")
 RED = 8  # the red car's piece id in the raw data
@@ -128,7 +130,7 @@ def distance(instance):
 
 def puzzle(instance, folder=PROBLEMS):
     """The puzzle's starting board in this repo's state format (as
-    lib.parse_puzzle_line gives): ("red", cells) first, then every other car
+    board.parse_puzzle_line gives): ("red", cells) first, then every other car
     as (name, cells) sorted by name - names are the layout's car ids."""
     import json
     with open(os.path.join(folder, instance + ".json")) as f:
