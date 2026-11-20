@@ -119,7 +119,7 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | Only solved attempts produce labels from the student's own play | design | - | chosen | [`intuition_examples`](rushhour/student/labels.py:310), [line 332](rushhour/student/labels.py:332) |
 | Hindsight over a graph of visited boards: two boards are joined when one legal move connects them (moves are reversible). The shortest route to the goal in that graph is computed by breadth-first search from the goal | implementation | - | chosen | [`shortcut_routes`](rushhour/student/labels.py:186) |
-| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | chosen | [`solved_routes`](rushhour/student/labels.py:249) |
+| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | fitted, with the multiplier: the best of own, W=3, W=10 and full at each multiplier (below), though not by a wide margin | [`solved_routes`](rushhour/student/labels.py:249) |
 | Each labelled board gets, from its shortest route(s): the policy target, every first move tied for shortest; the value target, moves left on the route ÷ 10; and dest targets, 0.8^(k-1) for a car reaching a cell k moves later. A board seen in several routes takes the one with the fewest moves left | implementation | dest decay 0.8 | chosen | [`attempt_examples`](rushhour/student/labels.py:264), [`DEST_DECAY`](rushhour/student/network.py:21) |
 | A shown move teaches that move on that board, solved or not, with no value or dest target. It is skipped if a solved route already labels the board | design | - | chosen | [`_shown_example`](rushhour/student/labels.py:300) |
 | Everything is remembered (no encoding lapses), and nothing is learned from failed moves (no progress labels) | parameter | `encode 1`, `progress_weight 0` | chosen | `intuition_examples`, `progress_examples` |
@@ -182,32 +182,40 @@ Notes:
 1. **Giving up, by moves / optimal**: people's hazard, used as measured (§5).
 2. **Starting level**: the checkpoint (round 1, epoch 2) and the giving-up scale (0.3), fitted to people's first
    10 trials. The misfit is 0.2, in squared standard errors over 2 statistics (§3).
-3. **Learning rate over trials 1-30**: the multiplier, with full hindsight. The fit uses three statistics, each
-   compared with people's:
+3. **Learning rate over trials 1-30**: the multiplier and the hindsight, together. The fit uses three statistics,
+   each compared with people's:
    - **short:** within-learner change in log moves / optimal per 10 trials, on 6- and 10-move puzzles;
    - **long:** the same on 13- and 15-move puzzles;
    - **start:** moves / optimal in trials 1-10.
 
    Misfit is the sum of the three z², so about 3 is a good fit. Each cell is 8 students with no teacher at
-   people's lengths (runs `ao_people_all_m*`; `models/summary/aoconsistent_calibration.csv`):
+   people's lengths (runs `ao_people_{own,w3,w10,all}_m*`; `models/summary/hindsight_fit.csv`, written by
+   `experiments/phase2_analysis.py`):
 
-   | start | ×10 | ×20 | ×30 | ×60 | ×120 |
-   |---|---|---|---|---|---|
-   | **AND-OR apprentice** (full hindsight) | **2.8** | 6.6 | 13.4 | 28.6 | 45.6 |
-   | previous start (full hindsight) | 8.8 | 12.2 | 13.2 | 31.2 | 42.4 |
+   | start, hindsight | ×5 | ×10 | ×20 | ×30 | ×60 | ×120 |
+   |---|---|---|---|---|---|---|
+   | AND-OR apprentice, own labels | 14.1 | 28.7 | 9.0 | | | |
+   | AND-OR apprentice, W=3 | 9.7 | 10.0 | 4.6 | | | |
+   | AND-OR apprentice, W=10 | 4.3 | 10.9 | 5.5 | | | |
+   | **AND-OR apprentice, full** | 15.3 | **2.8** | 6.6 | 13.4 | 28.6 | 45.6 |
+   | previous start, full | | 8.8 | 12.2 | 13.2 | 31.2 | 42.4 |
 
-   At ×10 the apprentice's z are −1.4 (short), +1.0 (long) and +0.3 (start). That is the best fit of any start,
-   window or multiplier tried.
+   At ×10 with full hindsight the z are −1.4 (short), +1.0 (long) and +0.3 (start): the best cell of any start,
+   hindsight or multiplier tried.
 
-   **Only full hindsight has been tried from this start.** On the previous start every window fitted about equally
-   well at some multiplier (p6), so full hindsight is still a choice, not a fit (phase 2 of the switch adds own,
-   W=3 and W=10).
+   **What the grid supports:**
+   - **Own labels are ruled out.** At no multiplier do long puzzles improve as people's do (z long +2.6 to +5.1).
+   - **Short windows learn long puzzles too slowly.** Long puzzles are the main misfit of W=3 and W=10 at every
+     multiplier except W=10 × 20, where short puzzles improve too fast instead.
+   - **Full hindsight is the best fit, not the only one.** W=10 × 5 (4.3) and W=3 × 20 (4.6) are within what 8
+     students can tell apart. The grid's noise is visible in its rows: misfit is not monotone in the multiplier
+     (W=10: 4.3, 10.9, 5.5).
 
 **Everything else is chosen, not fitted:**
 - the architecture;
 - the expert's variant (plans played out, `protect_movers` off) and pretraining's settings;
 - temperature, memory, the move cap, single attempts;
-- learning only from success, the labels, the loss, the optimizer and its settings;
+- learning only from success, the loss, the optimizer and its settings;
 - agency.
 
 γ is the paper's value, not refitted here: p3's sweep fits people best near 0.01 with `protect_movers` off. But
@@ -219,9 +227,10 @@ apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 
 | Runs | Matches? | How they differ |
 |---|---|---|
-| `aostart_free_m10_agency{0,0.1,0.3,0.5,0.7,0.9,1}` (none, bayes4, random 30%, random 100%; no teacher is in `agency1`) | **exactly** | only ΔA, the swept parameter |
-| `aostart_free_m10_s1_agency{0,0.1,0.3,1}` | student yes | seed 1 (a second set of 8 students): bayes4, plus none in `agency1` |
-| `ao_people_all_m{10,20,30,60,120}` | the calibration | multiplier as named; sessions and tests at people's lengths, tests with giving up |
+| `aostart_free_m10_agency{0,0.1,0.3,0.5,0.7,0.9,1}` (none, bayes4, random 30%, random 100%; no teacher is in `agency1`; bayes4 at θ 0.25, 0.75 and 0.9 too in `agency{0,0.3,1}`) | **exactly** | only ΔA, the swept parameter |
+| `aostart_free_m10_s{1,2}_agency*` | student yes | seeds 1 and 2 (two more sets of 8 students), the same teachers |
+| `ao_people_all_m{5,10,20,30,60,120}` | the calibration | multiplier as named; sessions and tests at people's lengths, tests with giving up |
+| `ao_people_{own,w3,w10}_m{5,10,20}` | the calibration's alternatives | the hindsight and multiplier as named |
 | `aostart_free_agency*`, `aolambda_free_s1_agency*` | this start at ×30 | multiplier 30 (before the multiplier was refitted); seed 1 for `aolambda` |
 | `aostart_protected_agency{0.1,1}` | another start | phase 1's apprentice (`protect_movers` on), scale 0.25 |
 | `teach_shortcut_agency*`, `people_*`, `pilot_*`, `fitted_teachers` | the previous start | see below |
@@ -230,9 +239,32 @@ apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 The teaching sweep runs on **pool puzzles of 9-26 moves**, longer than any puzzle people played. The calibration
 runs use people's lengths.
 
-**At 8 students per condition, the teaching effects at ×10 depend on the seed.** bayes4's gain over no teacher is
-−0.39 to −0.66 with seed 0, but −0.04 to −0.23 with seed 1 (`models/summary/ao10_agency.csv`). Phase 2 of the
-switch adds seeds before any claim rests on them.
+**Teaching effects at ×10 are pooled over seeds 0-2, 24 students per condition** (`models/summary/ao10_agency_seeds.csv`).
+Seed 0 alone overstated every gain over no teacher, because its no-teacher students ended unusually badly. Their
+end score was 5.23, against 4.89 and 4.68 for seeds 1 and 2, while its teachers ended like the other seeds'.
+Comparisons between two teachers are stable across seeds.
+
+| ΔA | bayes4 vs none | random 30% vs none | random 100% vs none | bayes4 vs random 100% |
+|---|---|---|---|---|
+| 0 | −0.20 ± 0.06 | | | |
+| 0.1 | −0.27 ± 0.06 | +0.25 ± 0.05 | +0.75 ± 0.05 | −1.02 ± 0.04 |
+| 0.3 | −0.25 ± 0.06 | −0.02 ± 0.05 | +0.16 ± 0.06 | −0.41 ± 0.06 |
+| 0.5 | −0.26 ± 0.06 | −0.16 ± 0.06 | −0.14 ± 0.04 | −0.13 ± 0.05 |
+| 0.7 | −0.29 ± 0.08 | −0.23 ± 0.05 | −0.36 ± 0.04 | +0.08 ± 0.06 |
+| 0.9 | −0.30 ± 0.08 | −0.36 ± 0.06 | −0.55 ± 0.05 | +0.25 ± 0.04 |
+| 1 | −0.27 ± 0.07 | −0.36 ± 0.06 | −0.61 ± 0.05 | +0.34 ± 0.04 |
+
+The values are end-score differences, paired by student (lower is better), as mean ± se.
+- **bayes4** helps by about a quarter of a move per optimal move at every ΔA. It shows 5% of moves.
+- **Random help** turns from harmful to helpful as ΔA rises. Showing every move overtakes bayes4 between ΔA 0.5
+  and 0.7.
+
+**bayes4's θ** (seed 0 only; `models/summary/bayes4_theta.csv`), paired against θ 0.45:
+- **0.25** shows 4% of moves and does as well.
+- **0.75** shows 10%. It is a little worse at ΔA 0 (+0.12 ± 0.10) and a little better at ΔA 1 (−0.08 ± 0.06).
+- **0.9** shows 31-38%. It is clearly worse at ΔA 0 (+0.79 ± 0.11) and 0.3 (+0.32 ± 0.05).
+
+So 0.45 stays the default. At high agency, more help does slightly better, as random 100% does.
 
 ## The previous start
 
@@ -280,7 +312,8 @@ These are the places where the student is a choice rather than a fit.
 
 5. **Learning only from success.** Unsolved and abandoned attempts teach nothing of the student's own.
 6. **Labels from perfect hindsight:** exact shortest routes through every board seen. This is also what makes
-   wandering pay (§6, §8). It was not compared with shorter windows from this start.
+   wandering pay (§6, §8). It fits people best, but W=10 and W=3 come close at other multipliers. Only own labels
+   are ruled out.
 
 **How it learns**
 

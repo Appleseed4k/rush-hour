@@ -30,11 +30,12 @@ STUDENT = {
     "surrender": True,  # people: gives up as people do (the hazard by moves / optimal, saved as surrender_table)...
     "surrender_scale": 0.3,  # fitted: ...at 0.3 x people's rates, together with init
     # what it learns from
-    "labels": "all", "window": -1,  # chosen: full hindsight (shortcut labels through every board seen)
+    "labels": "all", "window": -1,  # fitted, with multiplier: full hindsight (shortcut labels through every board
+    # seen) - the best of own, W=3, W=10 and full at x5-x20, though W=10 x5 and W=3 x20 come close
     "encode": 1.0,  # chosen: no encoding lapses
     "progress_weight": 0.0,  # chosen: learns nothing from unsolved attempts (only from moves shown in them)
     # how it learns
-    "multiplier": 10, "block": 10,  # fitted with full hindsight from this start: 10 puzzles per human trial
+    "multiplier": 10, "block": 10,  # fitted, with the labels: 10 puzzles per human trial
     "lr": 1e-4, "steps": 3,  # chosen: Adam at 1e-4, 3 passes over each block's examples
     "even_batches": True,  # chosen: equal batches, none of a handful of examples
     "agency_step": "skip",  # chosen: how agency acts (with shown_weight < 1, an update is skipped, not scaled)
