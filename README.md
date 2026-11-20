@@ -57,6 +57,7 @@ models/                results and networks (not in git; see MODELS.md)
 | p6 | Hindsight labels (window × multiplier fit to people); agency sweep with equal batches | summary, `archive/p6` |
 | p7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model; a skill filter as good as bayes3's refit gives bayes4, the default teacher | `archive/p7`, `skill_filter.html` |
 | p8 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p8_deliberation` |
+| - | The student written down (`MODEL.md`, `student/spec.py`); its start switched to AND-OR's apprentice, which fits people's start (misfit 0.2) and learning rate (2.8 at ×10) | `MODEL.md` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.

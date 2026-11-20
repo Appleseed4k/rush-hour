@@ -8,7 +8,10 @@ HUMANS = os.path.join(ROOT, "23vrb-osfstorage-archive")  # Olieslagers et al. (2
 MODELS = os.path.join(ROOT, "models")
 SESSIONS = os.path.join(MODELS, "sessions")  # session runs (sessions.py), one folder per run
 APPRENTICE = os.path.join(MODELS, "apprentice")  # expert-iteration runs (experiments/apprentice.py)
-STUDENTS = os.path.join(MODELS, "students")  # candidate starting students, one per round of their pretraining run
-START = os.path.join(STUDENTS, "round6_epoch01.pt")  # the student every session starts from (surrender.py picked it)
-# The newer candidate (from 2026-11-17, runs aostart_* in the archive): the AND-OR apprentice itself,
-# os.path.join(APPRENTICE, "gamma0.07_free", "round1_epoch02.pt"), with giving-up scale 0.30.
+# The student every session starts from: AND-OR's apprentice (gamma 0.07, protect_movers off) after 2 epochs of its
+# first round, the epoch that matches people's start (with giving-up scale 0.30; surrender.py --epochs all).
+START = os.path.join(APPRENTICE, "gamma0.07_free", "round1_epoch02.pt")
+# The start before 2026-11-19, which every older run in the summary used: a network trained on its own solved attempts
+# with a random 10% teacher (the p2 run fresh_p0.1/random_0.1, one checkpoint per round; giving-up scale 0.40).
+STUDENTS = os.path.join(MODELS, "students")
+PREVIOUS_START = os.path.join(STUDENTS, "round6_epoch01.pt")

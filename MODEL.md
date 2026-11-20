@@ -1,14 +1,18 @@
 # The simulated student: model card
 
-This is the student the teaching results rest on. It lists every choice you would have to defend: the parameter
-values, and also the architecture and the way each idea is implemented in code. For each choice it gives the value,
-where the value came from, and the code that implements it. The settings are in
+This is the student the project's teaching results rest on. It lists every choice you would have to defend: the
+parameter values, and also the architecture and the way each idea is implemented in code. For each choice it gives
+the value, where the value came from, and the code that implements it. The settings are in
 [`rushhour/student/spec.py`](rushhour/student/spec.py) (`STUDENT`, `AGENCY`, `PROTOCOL`).
 
 - To run this student, use `python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4`.
 - `spec.differences(config)` checks a saved run against the spec.
 
 Without `--fitted`, the command line's defaults describe a plain, uncalibrated student.
+
+**Since 2026-11-19 the student starts from AND-OR's apprentice.** Before that, every run in the summary started
+from a network trained on its own play with a random teacher, at giving-up scale 0.4 and multiplier 30. Those
+values are `spec.PREVIOUS`; ["The previous start"](#the-previous-start) covers what changed.
 
 **Kind:**
 - **parameter**: a number or switch, in `spec.py`;
@@ -30,11 +34,14 @@ the red car's exit), 60 minutes each.
 ## In one paragraph
 
 The student is a neural network that plays Rush Hour by **intuition only**: on every board it samples a move from
-its policy, with no search. Before a session it is pretrained to people's starting level. During a session it plays
-one puzzle at a time, and may give up as people do. After every 30 puzzles, which stand for one human trial, it
-learns from those puzzles alone, with no replay. It learns only from **solved** attempts: every board it visited is
-labelled with the shortest route to the goal through the boards it saw. A move a teacher shows also teaches, at a
-weight called agency (ΔA), the one parameter the teaching results sweep.
+its policy, with no search. Before a session it imitates the AND-OR planning model, which the paper fitted to
+people's moves. That imitation is stopped at the point where the network solves puzzles as well and as efficiently
+as people do in their first trials.
+
+During a session it plays one puzzle at a time, and may give up as people do. After every 10 puzzles, which stand
+for one human trial, it learns from those puzzles alone, with no replay. It learns only from **solved** attempts:
+every board it visited is labelled with the shortest route to the goal through the boards it saw. A move a teacher
+shows also teaches, at a weight called agency (ΔA), the one parameter the teaching results sweep.
 
 ## 1. Board, moves and the oracle
 
@@ -60,28 +67,30 @@ weight called agency (ΔA), the one parameter the teaching results sweep.
 Notes:
 - **Row and column convolutions:** what blocks a car, or red's path to the exit, is often several cells away (`LaneBlock`).
 - **Start and end channels:** without them, two cars parked end to end look like one longer car.
-- **Dest** exists for deliberation: it orders AND-OR's options (p1, p8).
+- **Dest** exists for deliberation: it orders AND-OR's options (p1, p8). In pretraining it also learns AND-OR's
+  subgoal choices (§3).
 - **Value** was meant for progress labels, which are off. Both heads still shape the trunk the policy reads.
 
-## 3. Starting knowledge (pretraining)
+## 3. Starting knowledge: AND-OR's apprentice
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Starting network | parameter | `models/students/round6_epoch01.pt` | fitted | `STUDENT["init"]`, `paths.START` |
-| Pretrained by expert iteration with **the network as its own expert**: each round it plays fresh puzzles by intuition and trains on its own solved attempts with loops cut out (self-imitation) | design | `student="intuition"` | chosen | [`expert_iteration`](rushhour/student/train.py:232) |
-| ...with a random teacher showing 10% of moves (optimal ones, from the oracle), which also become labels | design | random 10% | chosen | the p2 run `teach/fresh_p0.1` (archived) |
-| Each round: 400 new pool puzzles of 1-20 moves (100 per bin of 1-8, 9-12, 13-16 and 17-20), 2 attempts each | parameter | 10 rounds | chosen | [`label_attempts`](rushhour/student/labels.py:411) |
-| Each round trains to convergence: Adam at learning rate 1e-3, batches of 256, up to 10 epochs. Training stops after 3 epochs without improvement in validation agreement (the policy's top move against held-out attempts' labels), and keeps the best epoch | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:177) |
-| Which round, fitted together with the giving-up scale (§5): the pair that matches people's first 10 trials (solve rate and moves / optimal) on pool test puzzles of people's lengths | parameter | round 6, scale 0.4 | fitted | [`surrender.py`](rushhour/surrender.py:99) |
+| Starting network | parameter | `models/apprentice/gamma0.07_free/round1_epoch02.pt` | fitted | `STUDENT["init"]`, `paths.START` |
+| **The expert is the AND-OR model.** It searches backward from the goal: an OR node picks which car to move, an AND node picks how, and each blocking car becomes a new subgoal | design | - | inherited (Olieslagers et al. 2023) | [`and_or.solve`](rushhour/and_or.py:364) |
+| ...with lapses: at each subgoal, with probability γ, it plays one random legal move instead of planning | parameter | γ = 0.07, the paper's | inherited | [`OrNode.solve`](rushhour/and_or.py:178), [`lapse_move`](rushhour/and_or.py:89) |
+| ...and this repo's variant of it. A completed plan is played out to its end and the search restarts from the new board; the paper's model plays one move per search | design | - | chosen | [`solve_and_or`](rushhour/student/solve.py:46), `attempt_puzzle` |
+| ...with `protect_movers` off: a subgoal may move a car higher up the chain, as in the paper's model | parameter | off | chosen (fits people better than on; p3) | `and_or.PROTECT_MOVERS` |
+| What the apprentice learns: plain AND-OR plays 1,000 pool puzzles of 1-30 moves (200 per bin of 1-8, 9-12, 13-16, 17-20 and 21-30), 4 attempts each. Its solved attempts, loops cut, label the boards (policy, value and dest targets as in §6). Every subgoal of a completed plan, with the option AND-OR took, trains the dest head's ordering | design | 2,966 solved attempts: 68,039 boards, 8,266 subgoals | chosen (phase 1's settings) | [`attempt_puzzle`](rushhour/student/labels.py:363), [`erase_loops`](rushhour/student/labels.py:162), [`experiments/apprentice.py`](experiments/apprentice.py) |
+| Training: Adam at learning rate 1e-3, batches of 256, board and subgoal batches interleaved; validated on 100 held-out puzzles | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:177) |
+| **Stopped at epoch 2 of round 1**, the checkpoint that matches people's first 10 trials. That is 2 passes over plain AND-OR's attempts: imitation learning, with no expert-iteration rounds. Round 1's validation would have kept epoch 5 | parameter | round 1, epoch 2 | fitted | [`surrender.py`](rushhour/surrender.py) |
+| The fit, together with the giving-up scale (§5): every saved epoch plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10 | implementation | best: 86.7% and 2.82, misfit 0.2 (next best: epoch 3 at 0.7) | fitted | `python -m rushhour.surrender` |
 | The session starts with a fresh Adam state and a learning rate 10× lower than pretraining's | implementation | - | chosen | [`PolicyAgent.load`](rushhour/student/network.py:205) |
 
-**This starting network is not AND-OR's apprentice.** The summary's narrative presents expert iteration with
-AND-OR as the expert, and that apprentice exists (`models/apprentice/gamma0.07_free`). But the sessions start from a
-network that imitated its own play and an oracle teacher's moves. So the AND-OR model and its fitted γ play no part
-in the student the teaching results use.
+So the student's starting knowledge is **a partial copy of the paper's model of human planning**: the AND-OR
+model's moves, learned to the point where it plays like people at the start. In the session, AND-OR is never called.
 
-The AND-OR apprentice (`round1_epoch02.pt`, scale 0.30) is the candidate start of the newest runs (`aostart_*`,
-archived). See `paths.py`.
+Later rounds (AND-OR ordered by the network itself) and later epochs are better than people. The summary's
+apprentice curve shows that round 1 passes people's level within a few epochs.
 
 ## 4. Playing a puzzle
 
@@ -101,7 +110,7 @@ archived). See `paths.py`.
 |---|---|---|---|---|
 | A hazard: after each move that doesn't solve the puzzle, it gives up with a probability set by moves made / optimal length. Nothing else matters: not the board, its progress, or its recent success | design | - | people (shape) | [`SurrenderRule`](rushhour/student/solve.py:170), [line 164](rushhour/student/solve.py:164) |
 | People's rates, pooled over lengths and attempts | people | 0.16-0.93% per move over 9 bins (edges 0, 0.5, 1, 1.5, 2, 3, 4, 6, 10) | people | [`human_data.surrender_hazard`](rushhour/human_data.py:213), saved per run as `surrender_table` |
-| Scaled to the student's level | parameter | × 0.4 | fitted (§3) | `surrender_scale` |
+| Scaled to the student's level | parameter | × 0.3 | fitted (§3) | `surrender_scale` |
 | Giving up ends the puzzle unsolved, so the student learns nothing of its own from it (§6) | design | - | chosen | - |
 
 ## 6. What a puzzle teaches
@@ -110,7 +119,7 @@ archived). See `paths.py`.
 |---|---|---|---|---|
 | Only solved attempts produce labels from the student's own play | design | - | chosen | [`intuition_examples`](rushhour/student/labels.py:310), [line 332](rushhour/student/labels.py:332) |
 | Hindsight over a graph of visited boards: two boards are joined when one legal move connects them (moves are reversible). The shortest route to the goal in that graph is computed by breadth-first search from the goal | implementation | - | chosen | [`shortcut_routes`](rushhour/student/labels.py:186) |
-| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | chosen among equal fits (§9) | [`solved_routes`](rushhour/student/labels.py:249) |
+| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | chosen | [`solved_routes`](rushhour/student/labels.py:249) |
 | Each labelled board gets, from its shortest route(s): the policy target, every first move tied for shortest; the value target, moves left on the route ÷ 10; and dest targets, 0.8^(k-1) for a car reaching a cell k moves later. A board seen in several routes takes the one with the fewest moves left | implementation | dest decay 0.8 | chosen | [`attempt_examples`](rushhour/student/labels.py:264), [`DEST_DECAY`](rushhour/student/network.py:21) |
 | A shown move teaches that move on that board, solved or not, with no value or dest target. It is skipped if a solved route already labels the board | design | - | chosen | [`_shown_example`](rushhour/student/labels.py:300) |
 | Everything is remembered (no encoding lapses), and nothing is learned from failed moves (no progress labels) | parameter | `encode 1`, `progress_weight 0` | chosen | `intuition_examples`, `progress_examples` |
@@ -121,11 +130,13 @@ Two things follow from these choices:
 - **A wandering attempt leaves more labels than a direct one.** Every visited board is labelled, so a puzzle the
   student wandered through and solved teaches more than a short, direct solve (§8).
 
+Note that pretraining labelled AND-OR's attempts with loops cut, not with full hindsight.
+
 ## 7. How it learns
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 30 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:457), update at [line 563](rushhour/student/train.py:563) |
+| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 10 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:457), update at [line 563](rushhour/student/train.py:563) |
 | Each update: 3 passes over the block's examples, reshuffled each pass, one Adam step per batch | parameter + implementation | `steps 3` | chosen | [`online_update`](rushhour/student/train.py:329) |
 | Equal batches: each pass is split into ceil(n / 256) batches of equal size, not 256s and a remainder | implementation | `even_batches` | chosen | `online_update` |
 | Adam at a constant learning rate; its state (moment estimates) carries over across the session's updates | parameter + implementation | `lr 1e-4` | chosen | [`PolicyAgent`](rushhour/student/network.py:157) |
@@ -149,14 +160,13 @@ Notes:
   weight shared by a whole batch. A block where every move was shown would then learn at full strength
   (`online_update`). The alternative, `scale`, shrinks the step instead.
 - **Help has a second cost that ΔA doesn't control.** A shown move keeps the student on the optimal path, so a fully
-  shown puzzle leaves fewer boards to label (17 examples against 29-39; p6). That is why the assistance dilemma
-  survives at ΔA = 1.
+  shown puzzle leaves fewer boards to label (17 examples against 29-39, measured on the previous start; p6).
 
 ## 9. Time scale: the multiplier
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Each human trial stands for m simulated puzzles, because networks learn far less per example than people | parameter | m = 30, so a 72-trial session is 2,160 puzzles | fitted in p3 with own labels (loops cut); not refitted for full hindsight | [`sessions.multiplier`](rushhour/sessions.py:220) |
+| Each human trial stands for m simulated puzzles, because networks learn far less per example than people | parameter | m = 10, so a 72-trial session is 720 puzzles | fitted with full hindsight from this start (below) | [`sessions.multiplier`](rushhour/sessions.py:220) |
 | Implemented as m **different** puzzles, all learned from in one update per trial, not as one puzzle replayed or extra passes | implementation | block = m ([line 184](rushhour/sessions.py:184)) | chosen | [`sessions.sample_puzzles`](rushhour/sessions.py:204) |
 
 ## 10. Randomness and reproducibility
@@ -170,87 +180,112 @@ Notes:
 ## What is fitted to people, and how well
 
 1. **Giving up, by moves / optimal**: people's hazard, used as measured (§5).
-2. **Starting level**: the start network and the giving-up scale (0.4), fitted to people's first 10 trials (§3).
-3. **Learning rate over trials 1-30**: hindsight × multiplier. The table is the misfit to people over three
-   statistics, so lower is better and about 3 would be a good fit. It covers within-learner change in log moves /
-   optimal per 10 trials on 6+10-move and on 13+15-move puzzles, plus moves / optimal in trials 1-10. Each cell
-   is 8 students with no teacher, from the `people_*` runs, as in `summary.ipynb`.
+2. **Starting level**: the checkpoint (round 1, epoch 2) and the giving-up scale (0.3), fitted to people's first
+   10 trials. The misfit is 0.2, in squared standard errors over 2 statistics (§3).
+3. **Learning rate over trials 1-30**: the multiplier, with full hindsight. The fit uses three statistics, each
+   compared with people's:
+   - **short:** within-learner change in log moves / optimal per 10 trials, on 6- and 10-move puzzles;
+   - **long:** the same on 13- and 15-move puzzles;
+   - **start:** moves / optimal in trials 1-10.
 
-   | hindsight | ×10 | ×20 | ×30 | ×60 | ×120 |
+   Misfit is the sum of the three z², so about 3 is a good fit. Each cell is 8 students with no teacher at
+   people's lengths (runs `ao_people_all_m*`; `models/summary/aoconsistent_calibration.csv`):
+
+   | start | ×10 | ×20 | ×30 | ×60 | ×120 |
    |---|---|---|---|---|---|
-   | own (loops cut) | 21.4 | 16.7 | 14.2 | 12.0 | **6.8** |
-   | W=3 | 13.4 | 14.6 | **9.7** | 20.8 | 34.9 |
-   | W=10 | 14.9 | **11.6** | 14.0 | 26.6 | 39.9 |
-   | full | **8.8** | 12.2 | 13.2 | 31.2 | 42.4 |
+   | **AND-OR apprentice** (full hindsight) | **2.8** | 6.6 | 13.4 | 28.6 | 45.6 |
+   | previous start (full hindsight) | 8.8 | 12.2 | 13.2 | 31.2 | 42.4 |
 
-   Every window fits about equally well at some multiplier: the longer the window, the smaller the multiplier it
-   needs. So people's curves don't pin the window (p6). With 10-move puzzles alone as "short", p6 found misfits of
-   3.7-5.9, with full hindsight best at ×10-20.
+   At ×10 the apprentice's z are −1.4 (short), +1.0 (long) and +0.3 (start). That is the best fit of any start,
+   window or multiplier tried.
 
-   The spec's pair, **full × 30, is not the best fit for full hindsight**. ×30 came from p3's calibration with own
-   labels, and the summary's "fitted student" figure shows full × 20. Settling this is the first thing to defend or
-   change.
+   **Only full hindsight has been tried from this start.** On the previous start every window fitted about equally
+   well at some multiplier (p6), so full hindsight is still a choice, not a fit (phase 2 of the switch adds own,
+   W=3 and W=10).
 
 **Everything else is chosen, not fitted:**
 - the architecture;
-- the pretraining curriculum and its oracle teacher;
+- the expert's variant (plans played out, `protect_movers` off) and pretraining's settings;
 - temperature, memory, the move cap, single attempts;
 - learning only from success, the labels, the loss, the optimizer and its settings;
 - agency.
 
-People's plateau after trial 30 isn't matched by any setting (p6).
+γ is the paper's value, not refitted here: p3's sweep fits people best near 0.01 with `protect_movers` off. But
+apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 
 ## Which saved runs use this student
 
-`spec.differences` over the 34 session runs kept in `models/sessions` (2026-11-19; `and_or_gamma` is not a
-session run):
+`spec.differences` over the session runs in `models/sessions` (2026-11-19):
 
 | Runs | Matches? | How they differ |
 |---|---|---|
-| `teach_shortcut_agency{0.0,0.1,0.3,0.5,0.7,0.9,1}_even` (the summary's agency × teacher sweep; no teacher is in `0.0_even`) | **exactly** | only ΔA, the swept parameter |
-| `teach_shortcut_agency{0,0.1,0.3}`, `teach_shortcut_agency0_confirm`, `pilot_all_agency0.1_skip` | student yes | uneven batches (before `even_batches`); the confirm run has 24 students and seed 1; the pilot has 6 puzzles per bin and tests every 12 trials |
-| `people_*` (20 runs: the fit above) | calibration variants | window and multiplier as named; uneven batches; sessions and tests at people's lengths (6, 10, 13, 15), tests with giving up |
-| `fitted_teachers` (the first teacher comparison) | earlier student | own labels instead of full hindsight; uneven batches; people's lengths |
+| `aostart_free_m10_agency{0,0.1,0.3,0.5,0.7,0.9,1}` (none, bayes4, random 30%, random 100%; no teacher is in `agency1`) | **exactly** | only ΔA, the swept parameter |
+| `aostart_free_m10_s1_agency{0,0.1,0.3,1}` | student yes | seed 1 (a second set of 8 students): bayes4, plus none in `agency1` |
+| `ao_people_all_m{10,20,30,60,120}` | the calibration | multiplier as named; sessions and tests at people's lengths, tests with giving up |
+| `aostart_free_agency*`, `aolambda_free_s1_agency*` | this start at ×30 | multiplier 30 (before the multiplier was refitted); seed 1 for `aolambda` |
+| `aostart_protected_agency{0.1,1}` | another start | phase 1's apprentice (`protect_movers` on), scale 0.25 |
+| `teach_shortcut_agency*`, `people_*`, `pilot_*`, `fitted_teachers` | the previous start | see below |
 | `calibrated_v2` | - | holds only the test puzzles `surrender.py` fits on |
 
 The teaching sweep runs on **pool puzzles of 9-26 moves**, longer than any puzzle people played. The calibration
 runs use people's lengths.
 
+**At 8 students per condition, the teaching effects at ×10 depend on the seed.** bayes4's gain over no teacher is
+−0.39 to −0.66 with seed 0, but −0.04 to −0.23 with seed 1 (`models/summary/ao10_agency.csv`). Phase 2 of the
+switch adds seeds before any claim rests on them.
+
+## The previous start
+
+Until 2026-11-19 every session started from `models/students/round6_epoch01.pt`, at giving-up scale 0.4 and
+multiplier 30 (`spec.PREVIOUS`; `spec.differences(config, previous=True)` matches the old sweep
+`teach_shortcut_agency*_even` exactly).
+
+**What it was:** expert iteration with the network as its own expert. Over 10 rounds it played 400 fresh pool puzzles
+of 1-20 moves, 2 attempts each, by intuition, with a random teacher showing 10% of moves. It trained on its own
+solved attempts with loops cut, plus the shown moves (Adam at 1e-3, up to 10 epochs a round, patience 3). Round 6
+was the round that matched people (the p2 run `teach/fresh_p0.1`, archived).
+
+**Why it was replaced:** it came out of p2's question (teaching during pretraining) and was kept when p3 calibrated
+to people. So its starting knowledge came from its own play and an oracle, not from a model of human planning.
+Its multiplier was calibrated with own labels and never refitted for full hindsight: full × 30 has a misfit of 13.2,
+against the apprentice's 2.8 at ×10.
+
 ## What is not part of the student
 
-- **AND-OR and γ** (`and_or.py`, `paper_model.py`) are the model of people's planning. They are used for the
-  apprentice and for deliberation (p1, p8), not by the sessions' student (§3).
+- **AND-OR and γ** are the student's teacher during pretraining only (§3). In a session it plays by intuition, and
+  AND-OR is never called. Deliberation, AND-OR ordered by the network, is p8's comparison, not part of this student.
 - **The teacher's model of the student** (`teachers.Bayesian4`: skill per distance, puzzle difficulty) is the
   teacher's belief, not this network.
 - **The session protocol** (`spec.PROTOCOL`) is the experimental design: 8 students, sessions of 72 trials (18 per
-  length bin, each trial 30 puzzles), tests of 50 puzzles per bin every 18 trials, untaught, with no giving up.
+  length bin, each trial 10 puzzles), tests of 50 puzzles per bin every 18 trials, untaught, with no giving up.
 
 ## Premises worth challenging
 
 These are the places where the student is a choice rather than a fit.
 
 **How it thinks**
-1. **No deliberation.** People plan, and AND-OR fits their moves. In p8, network-ordered AND-OR matches people's
-   efficiency, yet the student is pure intuition.
+1. **No deliberation.** People plan, and AND-OR fits their moves. The student starts as a copy of AND-OR's moves but
+   never plans itself. In p8, network-ordered AND-OR matches people's efficiency.
 2. **One network for every puzzle, keyed by cell.** What it learns transfers by board pattern. Whether people
    transfer that way is untested.
 3. **Heads trained but unused.** Dest and value shape the shared features without ever acting.
 
 **Where it starts**
 
-4. **The starting network's origin.** It was self-trained with an oracle teacher, not trained on a model of human
-   planning (§3). Its learning rate also drops 10× at the session's start.
+4. **An imitation stopped early.** People's starting level is matched by stopping training at epoch 2, not by
+   anything in how the network learns. The expert is this repo's AND-OR variant (plans played out) at the paper's γ.
+   Pretraining's learning rate is also 10× the session's.
 
 **What it learns from**
 
 5. **Learning only from success.** Unsolved and abandoned attempts teach nothing of the student's own.
 6. **Labels from perfect hindsight:** exact shortest routes through every board seen. This is also what makes
-   wandering pay (§6, §8).
+   wandering pay (§6, §8). It was not compared with shorter windows from this start.
 
 **How it learns**
 
-7. **The multiplier as a data-efficiency patch.** 30 network puzzles for each human trial, and inconsistent with
-   the hindsight fit (§9).
+7. **The multiplier.** 10 network puzzles for each human trial still patches the network's data hunger, though it now
+   fits people's learning rate (§9).
 8. **Online learning by Adam with BatchNorm.** Its forgetting and drift are those of the optimizer, not anything
    fitted (§7).
 9. **Agency as a weight on shown moves, implemented by skipping updates.** It is unfitted, and the dilemma depends

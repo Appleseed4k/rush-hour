@@ -1,8 +1,12 @@
 """Picks a starting checkpoint and surrender scale so the student begins a
 session where people do.
 
-    python -m rushhour.surrender                    # rounds 3-10 of the default folder
-    python -m rushhour.surrender --rounds 5 6 7 --runs 20
+    python -m rushhour.surrender                    # every epoch of the start's run (paths.START's folder)
+    python -m rushhour.surrender --rounds 1         # round 1's epochs only
+    python -m rushhour.surrender --folder models/students --epochs kept --rounds 3 4 5 6 7 8 9 10   # the previous start's fit
+
+The candidates are a pretraining run's checkpoints (its manifest.json): every
+epoch (--epochs all, the default), or only each round's kept one (--epochs kept).
 
 The target is people's first --block trials (default 10): solve rate and
 moves / optimal over solved puzzles (this repo's lengths), each a mean of
@@ -32,7 +36,7 @@ import numpy as np
 
 from . import human_data as hd, paths, sessions as se, student as st
 
-FOLDER = paths.STUDENTS
+FOLDER = os.path.dirname(paths.START)
 
 
 def human_target(block=10):
@@ -98,8 +102,12 @@ def predict(runs, puzzles, first, edges, rates, scale, by_length):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--folder", default=FOLDER, help="teach run folder whose kept checkpoints are the candidates")
-    ap.add_argument("--rounds", type=int, nargs="+", default=list(range(3, 11)))
+    ap.add_argument("--folder", default=FOLDER, help="pretraining run folder (with manifest.json) whose checkpoints "
+                    "are the candidates (default: the session start's)")
+    ap.add_argument("--epochs", choices=("all", "kept"), default="all",
+                    help="every saved epoch, or only each round's kept one")
+    ap.add_argument("--rounds", type=int, nargs="+", default=None, help="only these rounds (default: every round "
+                    "from 1)")
     ap.add_argument("--puzzles", choices=("test", "human"), default="test")
     ap.add_argument("--runs", type=int, default=10, help="attempts per puzzle")
     ap.add_argument("--block", type=int, default=10, help="human trials 1..block are the target")
@@ -113,12 +121,13 @@ def main(argv=None):
     edges, rates, _ = hd.surrender_hazard()
     puzzles = puzzle_set(args.puzzles)
     manifest = json.load(open(os.path.join(args.folder, "manifest.json")))
-    files = {m["round"]: m["file"] for m in manifest if m["kept"]}
+    files = [m["file"] for m in manifest if m["round"] >= 1 and (args.epochs == "all" or m["kept"])
+             and (args.rounds is None or m["round"] in args.rounds)]
     os.makedirs(args.cache, exist_ok=True)
     scales = np.arange(args.scales[0], args.scales[1] + 1e-9, args.scales[2])
-    for rnd in args.rounds:
-        path = os.path.join(args.folder, files[rnd])
-        cache = os.path.join(args.cache, f"{os.path.basename(args.folder)}_{files[rnd][:-3]}_{args.puzzles}_runs{args.runs}.json")
+    for file in files:
+        path = os.path.join(args.folder, file)
+        cache = os.path.join(args.cache, f"{os.path.basename(args.folder)}_{file[:-3]}_{args.puzzles}_runs{args.runs}.json")
         if os.path.exists(cache):
             runs = json.load(open(cache))
         else:
@@ -128,7 +137,7 @@ def main(argv=None):
         loss = [((ps - hs) / hs_se) ** 2 + ((pr - hr) / hr_se) ** 2 for _, ps, pr in fits]
         best = fits[int(np.argmin(loss))]
         at = {round(s, 6): (ps, pr) for s, ps, pr in fits}
-        print(f"round {rnd:>2}: best scale {best[0]:.2f} -> solved {best[1]:.1%}, moves / optimal {best[2]:.2f} "
+        print(f"{file[:-3]}: best scale {best[0]:.2f} -> solved {best[1]:.1%}, moves / optimal {best[2]:.2f} "
               f"(misfit {min(loss):.1f})   scale 0: {at[0.0][0]:.1%} {at[0.0][1]:.2f}   "
               f"scale 1: {at[1.0][0]:.1%} {at[1.0][1]:.2f}", flush=True)
 

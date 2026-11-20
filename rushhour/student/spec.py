@@ -2,8 +2,8 @@
 it assumes, where its value came from, and the code that implements it).
 
 The code's own defaults (sessions.parse_args, learning_session) describe a plain, uncalibrated student. The student
-that the summary's teaching results use is those defaults plus the settings in STUDENT, which until now lived only
-in the saved runs' config.json. Use it as
+the project uses is those defaults plus the settings in STUDENT. Since 2026-11-19 it starts from AND-OR's apprentice
+(PREVIOUS below: the start, giving-up scale and multiplier the older runs used). Use it as
 
     python -m rushhour.sessions my_run --fitted --teachers none bayes4 --shown-weight 0.1
 
@@ -20,7 +20,7 @@ import os
 from .. import paths
 
 STUDENT = {
-    # starting knowledge
+    # starting knowledge: AND-OR's apprentice, stopped where it matches people's start
     "init": os.path.relpath(paths.START, paths.ROOT).replace(os.sep, "/"),  # fitted, with surrender_scale
     # playing
     "explore": 1.0,  # chosen: its own moves sampled from the policy at temperature 1
@@ -28,25 +28,25 @@ STUDENT = {
     "max_attempts": 1,  # chosen: one attempt per puzzle, no restarts
     "step_factor": 10.0, "min_steps": 50, "max_steps": None,  # chosen: the move cap, max(50, 10 x optimal)
     "surrender": True,  # people: gives up as people do (the hazard by moves / optimal, saved as surrender_table)...
-    "surrender_scale": 0.4,  # fitted: ...at 0.4 x people's rates, together with init
+    "surrender_scale": 0.3,  # fitted: ...at 0.3 x people's rates, together with init
     # what it learns from
-    "labels": "all", "window": -1,  # chosen among fits: full hindsight (shortcut labels through every board seen)
+    "labels": "all", "window": -1,  # chosen: full hindsight (shortcut labels through every board seen)
     "encode": 1.0,  # chosen: no encoding lapses
     "progress_weight": 0.0,  # chosen: learns nothing from unsolved attempts (only from moves shown in them)
     # how it learns
-    "multiplier": 30, "block": 30,  # fitted (with own labels, before shortcut labels): 30 puzzles per human trial
+    "multiplier": 10, "block": 10,  # fitted with full hindsight from this start: 10 puzzles per human trial
     "lr": 1e-4, "steps": 3,  # chosen: Adam at 1e-4, 3 passes over each block's examples
     "even_batches": True,  # chosen: equal batches, none of a handful of examples
     "agency_step": "skip",  # chosen: how agency acts (with shown_weight < 1, an update is skipped, not scaled)
 }
 
 # Agency (Delta A): how much a move a teacher showed teaches, the student's own play 1. Not fitted to people: the
-# teaching results are a sweep over it (teach_shortcut_agency*_even).
+# teaching results are a sweep over it (aostart_free_m10_agency*).
 AGENCY = "shown_weight"
 AGENCIES = (0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0)
 
-# The session and its tests (an experimental design, not the student): the teaching runs' sessions of 18 puzzles
-# per length bin (x multiplier) and held-out tests every 18 human trials, all untaught and with no giving up.
+# The session and its tests (an experimental design, not the student): the teaching runs' sessions of 18 trials per
+# length bin (each trial `multiplier` puzzles) and held-out tests every 18 human trials, untaught, with no giving up.
 PROTOCOL = {
     "students": 8,
     "session_bins": ["9-11", "14-16", "19-21", "24-26"], "per_bin": 18,
@@ -55,6 +55,11 @@ PROTOCOL = {
     "seed": 0,
 }
 
+# What the older runs (teach_shortcut_agency*, people_*, fitted_teachers) had instead: a network trained on its own
+# solved attempts with a random 10% teacher, and the multiplier calibrated for it with own labels.
+PREVIOUS = {"init": os.path.relpath(paths.PREVIOUS_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.4,
+            "multiplier": 30, "block": 30}
+
 
 def _same(key, value):
     if key == "init" and value is not None:  # compare a checkpoint by its file name: saved runs keep the old path
@@ -62,11 +67,12 @@ def _same(key, value):
     return value
 
 
-def differences(config, protocol=True):
-    """{setting: (spec value, the run's value)} where a saved run's config differs from STUDENT (and PROTOCOL);
-    settings a run saved before they existed count as the code's default then (sessions.ADDED_SETTINGS)."""
+def differences(config, protocol=True, previous=False):
+    """{setting: (spec value, the run's value)} where a saved run's config differs from STUDENT (and PROTOCOL; with
+    `previous`, the older start's STUDENT | PREVIOUS); settings a run saved before they existed count as the code's
+    default then (sessions.ADDED_SETTINGS)."""
     from ..sessions import ADDED_SETTINGS  # sessions imports this package
-    spec = STUDENT | (PROTOCOL if protocol else {})
+    spec = STUDENT | (PREVIOUS if previous else {}) | (PROTOCOL if protocol else {})
     out = {}
     for key, want in spec.items():
         have = config.get(key, ADDED_SETTINGS.get(key))
