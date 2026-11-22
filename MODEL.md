@@ -10,9 +10,10 @@ the value, where the value came from, and the code that implements it. The setti
 
 Without `--fitted`, the command line's defaults describe a plain, uncalibrated student.
 
-**Since 2026-11-19 the student starts from AND-OR's apprentice.** Before that, every run in the summary started
+**Since 2026-11-19 the student starts from AND-OR's apprentice.** Before that, every run started
 from a network trained on its own play with a random teacher, at giving-up scale 0.4 and multiplier 30. Those
-values are `spec.PREVIOUS`; ["The previous start"](#the-previous-start) covers what changed.
+values are `spec.PREVIOUS`; ["The previous start"](#the-previous-start) covers what changed. The summary notebook shows the apprentice's runs, and keeps the
+previous start's teacher comparisons, which have no counterpart on the apprentice, marked as such.
 
 **Kind:**
 - **parameter**: a number or switch, in `spec.py`;
