@@ -67,17 +67,19 @@ def keep_subject(rows):
     return ok_span and any(r["event"] == "win" for r in rows) and min(b - a for a, b in zip(minutes, minutes[1:])) >= 0
 
 
-def attempts(rows):
+def attempts(rows, unsolved=False):
     """Yields (instance, attempt_index, solved, [Move, ...]) per attempt.
 
     A move is the last drag of a move number whose piece actually changed cell
     (the number counts completed slides; earlier drags under it are no-op
-    touches). An attempt starts at each 'start' event and ends at 'win'."""
+    touches). An attempt starts at each 'start' event and ends at 'win'.
+    Puzzles the subject never solved are skipped, as pre_process.jl does,
+    unless `unsolved`."""
     by_instance = collections.OrderedDict()
     for r in rows:
         by_instance.setdefault(r["instance"], []).append(r)
     for instance, rs in by_instance.items():
-        if rs[-1]["event"] != "win" and not any(r["event"] == "win" for r in rs):
+        if not unsolved and not any(r["event"] == "win" for r in rs):
             continue  # pre_process.jl drops puzzles the subject never solved
         attempt, current, solved, drag, first_touch, t_prev = 0, None, False, None, {}, None
         for r in rs:
@@ -106,13 +108,13 @@ def attempts(rows):
             yield instance, attempt, solved, current
 
 
-def load(path=RAW, filtered=True):
-    """{subject: [(instance, attempt, solved, moves), ...]}"""
+def load(path=RAW, filtered=True, unsolved=False):
+    """{subject: [(instance, attempt, solved, moves), ...]} (`unsolved`: also the puzzles never solved)"""
     out = {}
     for subject, rows in read_events(path).items():
         if filtered and not keep_subject(rows):
             continue
-        out[subject] = list(attempts(rows))
+        out[subject] = list(attempts(rows, unsolved))
     return out
 
 

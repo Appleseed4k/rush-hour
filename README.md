@@ -37,6 +37,7 @@ notebooks/
   summary.ipynb        the narrative and its figures
   p8_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
   forward_planning.ipynb  a forward planner for the student: novelty and relevance rollouts, the value head
+  human_likeness.ipynb   people against the models move by move: revisits, car roles, slides, timing
   skill_filter.html    the offline test behind bayes4: carrying skill across puzzles by a filter
                        (experiments/skill_tracking.py)
   archive/             p3-p7 lab notebooks, frozen with their outputs (see archive/README.md)

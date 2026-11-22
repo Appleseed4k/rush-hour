@@ -1,6 +1,6 @@
 # What is in `models/` (not in git)
 
-`models/` holds only what the live notebooks (`summary.ipynb`, `p8_deliberation.ipynb`, `forward_planning.ipynb`) read, the networks needed
+`models/` holds only what the live notebooks (`summary.ipynb`, `p8_deliberation.ipynb`, `forward_planning.ipynb`, `human_likeness.ipynb`) read, the networks needed
 to regenerate it, and the starting students: about 1 GB. Everything else from earlier work was moved, unchanged and
 at the same relative paths, to the archive folder **`C:\dev\rush-hour-archive\`** on the Windows PC (about 50 GB,
 2026-11-19). Nothing was deleted.
@@ -19,7 +19,8 @@ at the same relative paths, to the archive folder **`C:\dev\rush-hour-archive\`*
 | `summary/apprentice_curve/` | Each apprentice checkpoint on the test puzzles | `experiments/apprentice_curve.py` | summary |
 | `summary/aoconsistent_calibration.csv`, `aoconsistent_agency.csv`, `ao10_agency.csv` | Tables from the apprentice-start runs: the multiplier fit, and the agency sweeps at ×30 and ×10 (restored from the archive) | the p3 notebook's last section (archived) | MODEL.md |
 | `summary/hindsight_fit.csv`, `ao10_agency_seeds.csv`, `bayes4_theta.csv` | Phase 2's tables: the fit of each hindsight and multiplier, the ×10 agency sweep pooled over seeds 0-2, and bayes4's θ | `experiments/phase2_analysis.py` | MODEL.md |
-| `summary/dest_quality.csv`, `dest_quality_session.csv`, `forward.csv`, `forward_uniform.csv`, `forward_value.csv` | The dest head's relevance map against BFS truth (every apprentice epoch; a session's snapshots), and the forward planner's attempts (novelty x relevance rollouts, its ablations, the uniform-proposal control and the value head as evaluator) | `experiments/dest_quality.py`, `experiments/forward.py` | `forward_planning.ipynb` |
+| `summary/dest_quality.csv`, `dest_quality_session.csv`, `forward.csv`, `forward_uniform.csv`, `forward_value.csv`, `forward_sweep.csv` | The dest head's relevance map against BFS truth (every apprentice epoch; a session's snapshots), and the forward planner's attempts (novelty x relevance rollouts, its ablations, the uniform-proposal control, the value head as evaluator, and the novelty-weight and fading-memory sweep) | `experiments/dest_quality.py`, `experiments/forward.py` | `forward_planning.ipynb` |
+| `summary/human_profile/` | `moves.csv.gz`: one row per move, for people (every attempt) and for simulated models on the 70 human layouts (paper and network AND-OR, intuition, the forward planner, random), with distance, revisit, car-role, slide and timing measures; `sims_70x10.pkl` caches the simulations and AND-OR roles | `experiments/human_profile.py` | `human_likeness.ipynb` |
 | `summary/and_or_network/` | Network-ordered AND-OR and intuition on the human layouts | `experiments/and_or_network.py` | p8 |
 | `apprentice/gamma0.07_free/` | The AND-OR apprentice (γ 0.07, protect_movers off): every epoch's checkpoint. `round1_epoch02.pt` is `paths.START`, the start of every new session | `experiments/apprentice.py` | sessions, `rushhour.surrender`, summary (manifest), the curve and p8 scripts |
 | `students/` | The previous start's candidates, one per round of their pretraining run (was `teach/fresh_p0.1/random_0.1/`). `round6_epoch01.pt` is `paths.PREVIOUS_START`, the start of the runs the summary marks *previous start* | the p2 teaching run | `rushhour.surrender --folder models/students --epochs kept` |
