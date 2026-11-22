@@ -49,7 +49,10 @@ import forward  # noqa: E402
 OUT = os.path.join(paths.MODELS, "summary", "human_profile")
 RUNS, STEP_FACTOR, MIN_STEPS = 10, 10, 50
 GAMMA = 0.07
-MODELS = ["AND-OR (paper)", "AND-OR (network)", "intuition", "forward", "random"]
+MODELS = ["AND-OR (paper)", "AND-OR (network)", "intuition", "forward", "random", "intuition, soft memory",
+          "forward, soft memory", "forward, fitted", "value planner, soft memory", "backward 1, soft memory",
+          "backward 4, soft memory", "forward 4 + backward 4, soft memory"]
+SOFT = (2, 1)  # the soft board memory fitted to people's revisits (experiments/fit_memory.py): beta 2, half-life 1
 ROLES = ["red", "depth 1", "depth 2", "depth 3+", "not in tree", "tree too large"]
 
 
@@ -185,8 +188,18 @@ def simulate(job):
             return att if type(att) is list else att[1]
         boards, moves, solved = _record(start, play_one, cap)
     else:
-        kw = {"intuition": {"k": 1}, "random": {"k": 1, "proposals": "uniform"},
-              "forward": {"k": 8, "depth": 4, "evaluation": "weighted", "lam": 16, "half_life": 80}}[model]
+        fw = {"k": 8, "depth": 4, "evaluation": "weighted", "lam": 16, "half_life": 80}
+        kw = {"intuition": {"k": 1}, "random": {"k": 1, "proposals": "uniform"}, "forward": fw,
+              "intuition, soft memory": {"k": 1, "soft_memory": SOFT},
+              "forward, soft memory": fw | {"soft_memory": SOFT},
+              # fitted to people's revisits (fit_memory.py planner): little novelty, short-lived
+              "forward, fitted": fw | {"lam": 2, "half_life": 2, "soft_memory": SOFT},
+              "value planner, soft memory": {"k": 8, "depth": 4, "evaluation": "value", "soft_memory": SOFT},
+              # forward and backward together (forward.py INTEGRATE)
+              "backward 1, soft memory": {"k": 0, "backward": 1, "evaluation": "value", "soft_memory": SOFT},
+              "backward 4, soft memory": {"k": 0, "backward": 4, "evaluation": "value", "soft_memory": SOFT},
+              "forward 4 + backward 4, soft memory": {"k": 4, "depth": 4, "backward": 4, "evaluation": "value",
+                                                      "soft_memory": SOFT}}[model]
         trace = []
         out = forward.solve_forward(agent, start, cap, rng=rng, trace=trace, **kw)
         boards, moves, solved = [start] + [b for _, b in trace], [m for m, _ in trace], out["solved"]
@@ -219,14 +232,13 @@ def build(instances=None, runs=RUNS, max_people=None):
     jobs = [(m, i, r) for m in MODELS for i in instances for r in range(runs)]
     random.Random(0).shuffle(jobs)
     cache = os.path.join(OUT, f"sims_{len(instances)}x{runs}.pkl")  # the simulations and roles, reused if present
+    sims, roles = [], {}
     if os.path.exists(cache):
         with open(cache, "rb") as f:
             sims, roles = pickle.load(f)
-    else:
-        sims, roles = None, {}
+    done = {s[0] for s in sims}
     with mp.Pool(initializer=_init, initargs=(weights,)) as pool:
-        if sims is None:
-            sims = pool.map(simulate, jobs, chunksize=1)
+        sims += pool.map(simulate, [j for j in jobs if j[0] not in done], chunksize=1)
         print(f"{len(people)} human attempts, {len(sims)} model attempts", flush=True)
         boards = {b for a in people for b in a[4][:-1]} | {b for s in sims for b in s[3][:-1]}
         roles.update(all_roles(boards - set(roles), pool))

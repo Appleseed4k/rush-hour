@@ -23,6 +23,7 @@ K=1 is intuition exactly: one sampled move. Rollout boards are evaluated in batc
     python experiments/forward.py uniform              # the uniform-proposal control: forward_uniform.csv
     python experiments/forward.py value                # the value head as evaluator: forward_value.csv
     python experiments/forward.py sweep                # novelty's weight against value, and fading memory
+    python experiments/forward.py integrate            # forward rollouts and backward AND-OR plans as candidates
 """
 import io
 import math
@@ -39,7 +40,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from rushhour import board, paths, sessions  # noqa: E402
-from rushhour.and_or import _red_steps  # noqa: E402
+from rushhour.and_or import AndNode, _red_steps, solve as and_or_solve  # noqa: E402
 from rushhour.student import PolicyAgent  # noqa: E402
 from rushhour.student.labels import _destinations  # noqa: E402
 
@@ -64,10 +65,10 @@ def evaluate_many(agent, states):
 def values(agent, states):
     """The value head's moves to go (its output x 10) for each of `states`, batched and cached on the agent."""
     cache = agent.__dict__.setdefault("_values", {})
+    if len(cache) > 50_000:  # clear before working out what is missing, so every state asked for is filled
+        cache.clear()
     missing = list({s for s in states if s not in cache})
     if missing:
-        if len(cache) > 50_000:
-            cache.clear()
         agent.net.eval()
         with torch.no_grad():
             v = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))[2]
@@ -85,10 +86,16 @@ def relevance_map(agent, state):
     return out
 
 
-def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=False):
+def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=False, penalty=None):
     """A (move, next board) sampled from the policy head (`uniform`: uniformly, the network unused), avoiding
-    boards in `avoid` if it can."""
+    boards in `avoid` if it can. With `penalty` (board -> a number), nothing is avoided: each move's logit is
+    lowered by the penalty of the board it leads to (a soft memory)."""
     options = list(board.neighbors(state, orientations))
+    if penalty is not None:
+        logits = (torch.zeros(len(options)) if uniform else
+                  agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]] / max(temperature, 1e-9))
+        logits = logits - torch.tensor([penalty(b) for _, b in options], dtype=logits.dtype)
+        return rng.choices(options, torch.softmax(logits, dim=0).tolist())[0]
     fresh = [o for o in options if o[1] not in avoid] or options
     if uniform:
         return rng.choice(fresh)
@@ -99,7 +106,7 @@ def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=Fal
 
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
-                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None):
+                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None):
     """One attempt by the forward planner (module docstring). proposals="uniform": rollout moves drawn uniformly
     from the legal ones (same avoidance), so the network acts only through relevance (or value).
 
@@ -115,18 +122,46 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
 
     `trace`, if a list, gets (move, board after it) for every move played.
 
-    Returns {"solved", "moves", "ties"} - ties: turns on which every rollout had the same novelty score (with
+    soft_memory=(beta, half_life) replaces the hard rule (never back to one of the last `memory` boards) with a
+    fading one: a move to a board the attempt last had `age` moves ago (2 = undoing the last move) has its logit
+    lowered by beta x 0.5^(age / half_life) - for the move played and inside rollouts (where the rollout's own
+    boards count too, at their place in it).
+
+    backward=N adds N candidates from backward reasoning to the k policy rollouts each turn (k may be 0): one
+    and_or.solve pass each from the current board, ordered by the agent's dest head with Gumbel noise at temperature 1
+    and lapse rate `gamma` - a whole plan to the goal (it competes as a solving candidate) or the moves made until a
+    lapse. Candidates of both kinds are judged alike by `evaluation`; the first move of the best is played.
+
+    rollout_gamma: rollouts lose the thread as AND-OR does - after each simulated move past the first, a rollout
+    stops with this probability (a geometric length averaging 1 / rollout_gamma moves, capped at `depth`). Setting it
+    to `gamma` shares one lapse rate between forward and backward reasoning.
+
+    Returns {"solved", "moves", "ties", "backward"} - backward: turns on which a backward plan was chosen; ties: turns on which every rollout had the same novelty score (with
     "novelty", nothing to choose between, so a plain policy sample; with "novelty then value", the value decides)."""
     rng = rng or random
     uniform = proposals == "uniform"
+    if backward:
+        agent.temperature = 1.0  # Gumbel noise in the heuristic, as AND-OR's network ordering uses it
     orientations = board.car_orientations(state)
     recent = deque([state], maxlen=memory)
     seen = set(state)
     last_seen = {f: 0 for f in state}  # feature -> the move count when it was last on the attempt's board
-    moves, ties = 0, 0
+    last_board = {state: 0}  # board -> the move count when the attempt was last there
+
+    def soft(now, extra=None):
+        """The soft memory's penalty for a move made after `now` moves (extra: a rollout's own boards)."""
+        if soft_memory is None:
+            return None
+        beta, half = soft_memory
+
+        def penalty(b):
+            when = extra.get(b, last_board.get(b)) if extra else last_board.get(b)
+            return 0.0 if when is None else beta * 0.5 ** ((now + 1 - when) / half)
+        return penalty
+    moves, ties, chose_backward = 0, 0, 0
     while moves < max_steps and _red_steps(state) > 0:
-        if k == 1:
-            move, state = sample_move(agent, state, orientations, recent, temperature, rng, uniform)
+        if k == 1 and not backward:
+            move, state = sample_move(agent, state, orientations, recent, temperature, rng, uniform, soft(moves))
         else:
             use_novelty, use_value = evaluation != "value", evaluation != "novelty"
             rel = relevance_map(agent, state) if relevance == "dest" and use_novelty else None
@@ -134,21 +169,37 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
             paths_ = [[state] for _ in range(k)]
             firsts = [None] * k
             done = [None] * k  # the move at which a rollout solves
+            stopped = set()  # rollouts that lost the thread (rollout_gamma)
             for t in range(depth):
-                live = [i for i in range(k) if done[i] is None]
+                if rollout_gamma is not None and t > 0:
+                    stopped |= {i for i in range(k) if done[i] is None and rng.random() < rollout_gamma}
+                live = [i for i in range(k) if done[i] is None and i not in stopped]
                 if not live:
                     break
                 if not uniform:
                     evaluate_many(agent, [paths_[i][-1] for i in live])
                 for i in live:
+                    own = {b: moves + j for j, b in enumerate(paths_[i])} if soft_memory else None
                     move, nxt = sample_move(agent, paths_[i][-1], orientations, set(recent) | set(paths_[i]),
-                                            temperature, rng, uniform)
+                                            temperature, rng, uniform, soft(moves + t, own))
                     if t == 0:
                         firsts[i] = (move, nxt)
                     paths_[i].append(nxt)
                     if _red_steps(nxt) <= 0:
                         done[i] = t + 1
-            solved = [i for i in range(k) if done[i] is not None]
+            for _ in range(backward):
+                att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
+                plan = att if type(att) is list else att[1]
+                if not plan:
+                    continue
+                path = [state]
+                for m in plan:
+                    path.append(AndNode(path[-1], *m).apply(path[-1]))
+                paths_.append(path)
+                firsts.append((plan[0], path[1]))
+                done.append(len(plan) if type(att) is list else None)
+            n = len(paths_)
+            solved = [i for i in range(n) if done[i] is not None]
             if solved:
                 best = min(solved, key=lambda i: done[i])
             elif evaluation == "weighted":
@@ -168,7 +219,7 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                     scores.append(lam * nov - end)
                 best = int(np.argmax(scores))
             else:
-                scores = [0.0] * k if not use_novelty else []
+                scores = [0.0] * n if not use_novelty else []
                 for path in paths_ if use_novelty else []:
                     got, score = set(), 0.0
                     for t, b in enumerate(path[1:]):
@@ -177,18 +228,20 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                                 got.add(f)
                                 score += (rel[f] if rel is not None else 1.0) * discount ** t
                     scores.append(score)
-                ends = [-v for v in values(agent, [path[-1] for path in paths_])] if use_value else [0.0] * k
-                best = max(range(k), key=lambda i: (scores[i], ends[i]))  # the first, on a full tie
+                ends = [-v for v in values(agent, [path[-1] for path in paths_])] if use_value else [0.0] * n
+                best = max(range(n), key=lambda i: (scores[i], ends[i]))  # the first, on a full tie
                 ties += use_novelty and all(s == scores[best] for s in scores)
+            chose_backward += best >= k
             move, state = firsts[best]
         moves += 1
         if trace is not None:
             trace.append((move, state))
+        last_board[state] = moves
         recent.append(state)
         seen.update(state)
         for f in state:
             last_seen[f] = moves
-    return {"solved": _red_steps(state) <= 0, "moves": moves, "ties": ties}
+    return {"solved": _red_steps(state) <= 0, "moves": moves, "ties": ties, "backward": chose_backward}
 
 
 _W = {}
@@ -197,6 +250,12 @@ _W = {}
 def _init(weights):
     torch.set_num_threads(1)
     _W["agents"] = {name: _load_bytes(b) for name, b in weights.items()}
+
+
+def _init_one(weights):
+    """Pool initializer for one network: _W["agent"]."""
+    torch.set_num_threads(1)
+    _W["agent"] = _load_bytes(weights)
 
 
 def _load_bytes(b):
@@ -260,6 +319,18 @@ SWEEP = ([{"name": f"K8 D4 weighted lam{lam}", "kw": {"k": 8, "depth": 4, "evalu
              "kw": {"k": 8, "depth": 4, "evaluation": "weighted", "lam": lam, "half_life": h}}
             for lam in (4, 16) for h in (5, 20, 80)])
 
+# forward and backward together: policy rollouts and AND-OR passes as candidates, judged by the value head, with the
+# soft board memory fitted to people (experiments/fit_memory.py)
+SOFT = (2, 1)
+INTEGRATE = [
+    {"name": "intuition, soft memory", "kw": {"k": 1, "soft_memory": SOFT}},
+    {"name": "forward 8", "kw": {"k": 8, "depth": 4, "evaluation": "value", "soft_memory": SOFT}},
+    {"name": "backward 1", "kw": {"k": 0, "backward": 1, "evaluation": "value", "soft_memory": SOFT}},
+    {"name": "backward 4", "kw": {"k": 0, "backward": 4, "evaluation": "value", "soft_memory": SOFT}},
+    {"name": "forward 4 + backward 4", "kw": {"k": 4, "depth": 4, "backward": 4, "evaluation": "value",
+                                              "soft_memory": SOFT}},
+]
+
 # the control: rollouts proposed uniformly, judged with and without the dest head (novelty only uses no network)
 UNIFORM = [
     {"name": "K8 D4 uniform", "kw": {"k": 8, "depth": 4, "proposals": "uniform"}},
@@ -295,6 +366,11 @@ if __name__ == "__main__":
         items = puzzles(2)
         nets = {k: v for k, v in networks().items() if k in ("start", "round 3")}
         df = run(nets, CONDITIONS, items, 1)
+        print(summarize(df).round(3).to_string())
+        sys.exit()
+    if sys.argv[1:2] == ["integrate"]:  # models/summary/forward_integrate.csv; 4 students per teacher
+        df = run(networks(4), INTEGRATE, puzzles(), 2)
+        df.to_csv(OUT.replace(".csv", "_integrate.csv"), index=False)
         print(summarize(df).round(3).to_string())
         sys.exit()
     if sys.argv[1:2] == ["sweep"]:  # models/summary/forward_sweep.csv; 4 students per teacher
