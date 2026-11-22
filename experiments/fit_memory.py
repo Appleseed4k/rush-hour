@@ -23,8 +23,15 @@ the soft board memory) over a grid of the rollouts' lapse rate (each simulated m
 probability 1 - gamma, at most 20) crossed with AND-OR's. The diagonal is one shared gamma. Fitted to people's skill
 (chance of an optimal move by distance to the goal; moves / optimal on solved attempts) and revisits (as above).
 
+Learning over the session (`learning`): van Opheusden et al. fit their model to successive blocks of play and found
+expertise as deeper search. Here the same mixed planner runs over a finer grid of one shared gamma (rollouts capped at
+40 moves), and each stage of people's session (trials 1-10, 11-20, 21-35, 36+) gets its own best gamma: the model's
+attempts are weighted by how often people at that stage played each layout, and the misfit is the gamma fit's (skill
++ revisits) against that stage's people.
+
     python experiments/fit_memory.py planner   # writes models/summary/memory_fit_planner.csv
     python experiments/fit_memory.py gamma     # writes models/summary/gamma_fit.csv
+    python experiments/fit_memory.py learning  # writes models/summary/gamma_learning.csv
 """
 import multiprocessing as mp
 import os
@@ -68,6 +75,22 @@ GAMMA = [{"name": f"forward gamma {gf}, backward gamma {gb}", "gamma forward": g
           "kw": {"k": 4, "depth": 20, "backward": 4, "evaluation": "value", "soft_memory": SOFT, "gamma": gb,
                  "rollout_gamma": gf}} for gf in GAMMA_GRID for gb in GAMMA_GRID]
 DBINS, DEDGES = ["2-3", "4-6", "7-9", "10+"], [1, 3, 6, 9, 1000]
+LEARN_RUNS = 10
+LEARN_GRID = (0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3)
+LEARN = [{"name": f"gamma {g}", "gamma forward": g, "gamma backward": g,
+          "kw": {"k": 4, "depth": 40, "backward": 4, "evaluation": "value", "soft_memory": SOFT, "gamma": g,
+                 "rollout_gamma": g}} for g in LEARN_GRID]
+UNDO_RUNS = 10
+_MIX = {"k": 4, "depth": 20, "backward": 4, "evaluation": "value", "soft_memory": SOFT, "gamma": 0.03,
+        "rollout_gamma": 0.03}
+UNDO = [{"name": "mixed (gamma 0.03)", "kw": _MIX},
+        {"name": "candidate memory x1", "kw": {**_MIX, "candidate_memory": 1}},
+        {"name": "candidate memory x4", "kw": {**_MIX, "candidate_memory": 4}},
+        {"name": "candidate memory x16", "kw": {**_MIX, "candidate_memory": 16}},
+        {"name": "commit to plan", "kw": {**_MIX, "commit": "plan"}},
+        {"name": "plan stays a candidate", "kw": {**_MIX, "commit": "candidate"}},
+        {"name": "commit + candidate memory x4", "kw": {**_MIX, "commit": "plan", "candidate_memory": 4}}]
+STAGES = {"1-10": (1, 10), "11-20": (11, 20), "21-35": (21, 35), "36+": (36, 1000)}
 _DIST = {}
 
 
@@ -96,9 +119,9 @@ def job(args):
     rng = random.Random(zlib.crc32(f"{cond['name']}|{instance}|{run}".encode()))
     start = hd.puzzle(instance)
     distance = hd.distance(instance)
-    trace = []
+    trace, sources = [], []
     out = forward.solve_forward(forward._W["agent"], start, max(50, 10 * distance), rng=rng, trace=trace,
-                                **cond["kw"])
+                                sources=sources, **cond["kw"])
     boards = [start] + [b for _, b in trace]
     if instance not in _DIST:
         _DIST[instance] = board.multi_bfs(start)
@@ -109,14 +132,19 @@ def job(args):
     keep = d0 > 1
     totals = {f"n {b}": int(((idx == i) & keep).sum()) for i, b in enumerate(DBINS)}
     optimal = {f"opt {b}": int(((idx == i) & keep & better).sum()) for i, b in enumerate(DBINS)}
-    a = [x for x in ages(boards) if x is not None]
+    every = ages(boards)
+    by_source = {}
+    for src in ("forward", "backward", "commit"):
+        by_source[f"{src} moves"] = sum(x == src for x in sources)
+        by_source[f"{src} undos"] = sum(x == src and a_ == 2 for x, a_ in zip(sources, every))
+    a = [x for x in every if x is not None]
     pa = [x for x in placement_ages(boards) if x is not None]
     return {"condition": cond["name"], "beta": cond.get("beta"), "half-life": cond.get("half"),
             "lam": cond.get("lam"), "novelty half-life": cond.get("nov"),
             "instance": instance, "run": run, "optimal": distance, "moves": len(trace),
             "solved": out["solved"], "ages": " ".join(map(str, a)), "placement ages": " ".join(map(str, pa)),
             "gamma forward": cond.get("gamma forward"), "gamma backward": cond.get("gamma backward"),
-            "chose backward": out.get("backward"), **totals, **optimal}
+            "chose backward": out.get("backward"), **totals, **optimal, **by_source}
 
 
 def binned(df, column="ages", prefix=""):
@@ -130,10 +158,16 @@ def _init(weights):
     forward._init_one(weights)
 
 
-def people_target():
-    """People's share of moves returning to a board, by age bin, on matched attempts (and their move count)."""
+def _people(stage=None):
     mv = pd.read_csv(PROFILE, dtype={"who": str})
     mv = mv[mv.source == "people"]
+    return mv if stage is None else mv[mv.trial.between(*stage)]
+
+
+def people_target(stage=None):
+    """People's share of moves returning to a board, by age bin, on matched attempts (and their move count); `stage`
+    = (first, last) trial keeps that part of the session."""
+    mv = _people(stage)
     keys = ["who", "instance", "attempt"]
     att = mv.groupby(keys).agg(n=("move", "size"), L=("optimal length", "first"), solved=("solved", "first"))
     ok = att[(att.n / att.L).between(*MATCHED) & att.solved].index
@@ -178,11 +212,10 @@ def summarize_planner(df):
     return out, want
 
 
-def people_skill():
+def people_skill(stage=None):
     """People's chance of an optimal move by distance bin (all moves, distance 1 left out) and moves / optimal on
     solved attempts."""
-    mv = pd.read_csv(PROFILE, dtype={"who": str})
-    mv = mv[(mv.source == "people")]
+    mv = _people(stage)
     d = mv[mv.distance > 1]
     opt = (d.after < d.distance).groupby(pd.cut(d.distance, DEDGES, labels=DBINS), observed=True).mean()
     keys = ["who", "instance", "attempt"]
@@ -211,8 +244,89 @@ def summarize_gamma(df):
     return out, people
 
 
+def summarize_undo(df):
+    """The gamma fit's summary plus, over all attempts, the undo rate and where undos come from."""
+    out, people = summarize_gamma(df)
+    rev, want = summarize_planner(df)
+    g = df.groupby("condition", sort=False)
+    out = out.drop(columns=["gamma forward", "gamma backward"])
+    out["undo (matched)"] = rev["2"]
+    out["board return (matched)"] = rev[BINS].sum(axis=1)
+    out["car return (matched)"] = rev[["car " + b for b in BINS]].sum(axis=1)
+    for src in ("forward", "backward", "commit"):
+        out[f"{src} share"] = g[f"{src} moves"].sum() / g.moves.sum()
+        out[f"{src} undo rate"] = g[f"{src} undos"].sum() / g[f"{src} moves"].sum().replace(0, np.nan)
+    people["undo (matched)"] = want["2"]
+    people["board return (matched)"] = want[BINS].sum()
+    people["car return (matched)"] = want[["car " + b for b in BINS]].sum()
+    return out, people
+
+
+def summarize_learning(df):
+    """Per stage of people's session x gamma: the gamma fit's misfits, with the model's attempts weighted by how
+    often people at that stage played each layout. Returns (table, people's targets per stage)."""
+    df = binned(binned(df), "placement ages", "car ").assign(ratio=df.moves / df.optimal)
+    mv = _people()
+    first = mv.groupby(["who", "instance", "attempt"]).agg(trial=("trial", "first"), instance_=("instance", "first"))
+    rows, people = [], {}
+    for stage, (lo, hi) in STAGES.items():
+        mix = first[first.trial.between(lo, hi)].instance_.value_counts()
+        w = df.instance.map(mix).fillna(0) / df.groupby(["condition", "instance"]).run.transform("size")
+        target, _, placed = people_target((lo, hi))
+        opt_p, ratio_p = people_skill((lo, hi))
+        people[stage] = pd.Series({**{f"optimal {b}": v for b, v in zip(DBINS, opt_p.values)},
+                                   "moves / optimal": ratio_p, **target.add_prefix("board ").to_dict(),
+                                   **placed.to_dict()})
+        for cond, d in df.assign(w=w).groupby("condition", sort=False):
+            opt = pd.Series({b: (d.w * d[f"opt {b}"]).sum() / (d.w * d[f"n {b}"]).sum() for b in DBINS})
+            s_ = d[d.solved]
+            ratio = (s_.w * s_.ratio).sum() / s_.w.sum()
+            m = d[d.ratio.between(*MATCHED) & d.solved]
+            board_ = (m[BINS].mul(m.w, axis=0).sum() / (m.w * m.moves).sum())
+            car = (m[list(placed.index)].mul(m.w, axis=0).sum() / (m.w * m.moves).sum())
+            skill = ((opt - opt_p.values) ** 2 / opt_p.values).sum() + (ratio - ratio_p) ** 2 / ratio_p
+            revisit = ((board_ - target) ** 2 / target).sum() + ((car - placed) ** 2 / placed).sum()
+            rows.append({"stage": stage, "condition": cond, "gamma": d["gamma forward"].iloc[0],
+                         **{f"optimal {b}": opt[b] for b in DBINS}, "moves / optimal": ratio,
+                         **{f"board {b}": board_[b] for b in BINS}, "skill misfit": skill,
+                         "revisit misfit": revisit, "misfit": skill + revisit,
+                         "solved": (d.w * d.solved).sum() / d.w.sum()})
+    return pd.DataFrame(rows), pd.DataFrame(people).T
+
+
 if __name__ == "__main__":
     instances = sorted(hd.trials().instance.unique())
+    if sys.argv[1:2] in (["undo"], ["undo-smoke"]):
+        with open(paths.START, "rb") as f:
+            weights = f.read()
+        smoke = sys.argv[1] == "undo-smoke"
+        jobs = [(c, i, r) for c in UNDO for i in (instances[:6] if smoke else instances)
+                for r in range(2 if smoke else UNDO_RUNS)]
+        random.Random(0).shuffle(jobs)
+        with mp.Pool(4 if smoke else None, initializer=_init, initargs=(weights,)) as pool:
+            df = pd.DataFrame(pool.map(job, jobs, chunksize=1))
+        if not smoke:
+            df.to_csv(os.path.join(paths.MODELS, "summary", "undo_fit.csv"), index=False)
+        out, people = summarize_undo(df)
+        print(pd.concat([people.to_frame("people").T, out]).round(3).T.to_string())
+        sys.exit()
+    if sys.argv[1:2] == ["learning"]:
+        with open(paths.START, "rb") as f:
+            weights = f.read()
+        jobs = [(c, i, r) for c in LEARN for i in instances for r in range(LEARN_RUNS)]
+        random.Random(0).shuffle(jobs)
+        rows = []
+        with mp.Pool(initializer=_init, initargs=(weights,)) as pool:
+            for n, row in enumerate(pool.imap_unordered(job, jobs, chunksize=1), 1):
+                rows.append(row)
+                if n % 500 == 0:
+                    print(n, "of", len(jobs), flush=True)
+        df = pd.DataFrame(rows)
+        df.to_csv(os.path.join(paths.MODELS, "summary", "gamma_learning.csv"), index=False)
+        out, people = summarize_learning(df)
+        print(people.round(3).to_string())
+        print(out.pivot(index="gamma", columns="stage", values="misfit")[list(STAGES)].round(3).to_string())
+        sys.exit()
     if sys.argv[1:2] == ["gamma"]:
         with open(paths.START, "rb") as f:
             weights = f.read()

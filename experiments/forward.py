@@ -106,7 +106,8 @@ def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=Fal
 
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
-                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None):
+                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None,
+                  candidate_memory=0.0, commit=None, sources=None):
     """One attempt by the forward planner (module docstring). proposals="uniform": rollout moves drawn uniformly
     from the legal ones (same avoidance), so the network acts only through relevance (or value).
 
@@ -136,6 +137,16 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
     stops with this probability (a geometric length averaging 1 / rollout_gamma moves, capped at `depth`). Setting it
     to `gamma` shares one lapse rate between forward and backward reasoning.
 
+    Backward plans and the memory (the mixed planner undoes too often - each turn's fresh AND-OR pass can move a car
+    straight back):
+    candidate_memory=c: the soft memory also judges the candidates - a candidate whose first move leads to a board the
+    attempt had `age` moves ago is ranked as if c x beta x 0.5^(age / half_life) more moves from the goal (a solving
+    one as that many moves longer).
+    commit="plan": once a backward plan is played, the student keeps to it without deliberating, each later move with
+    probability 1 - gamma (the shared lapse), until it ends or lapses. commit="candidate": the rest of the plan joins
+    the next turn's candidates (judged alike; a whole plan to the goal still counts as solving).
+    `sources`, if a list, gets "forward", "backward" or "commit" for every move played.
+
     Returns {"solved", "moves", "ties", "backward"} - backward: turns on which a backward plan was chosen; ties: turns on which every rollout had the same novelty score (with
     "novelty", nothing to choose between, so a plain policy sample; with "novelty then value", the value decides)."""
     rng = rng or random
@@ -159,8 +170,18 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
             return 0.0 if when is None else beta * 0.5 ** ((now + 1 - when) / half)
         return penalty
     moves, ties, chose_backward = 0, 0, 0
+    plan_left, plan_solves = [], False  # the rest of the backward plan last played: [(move, board)]
+
+    def first_penalty(b):
+        pen = soft(moves)
+        return candidate_memory * pen(b) if candidate_memory and pen else 0.0
     while moves < max_steps and _red_steps(state) > 0:
-        if k == 1 and not backward:
+        source = "forward"
+        if commit == "plan" and plan_left and rng.random() >= gamma:
+            move, state = plan_left.pop(0)
+            source = "commit"
+            chose_backward += 1
+        elif k == 1 and not backward:
             move, state = sample_move(agent, state, orientations, recent, temperature, rng, uniform, soft(moves))
         else:
             use_novelty, use_value = evaluation != "value", evaluation != "novelty"
@@ -187,6 +208,14 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                     paths_[i].append(nxt)
                     if _red_steps(nxt) <= 0:
                         done[i] = t + 1
+            plans = {}  # candidate -> (its [(move, board)], whether it reaches the goal)
+            remembered = None
+            if commit == "candidate" and plan_left:
+                remembered = len(paths_)
+                plans[remembered] = (plan_left, plan_solves)
+                paths_.append([state] + [b for _, b in plan_left])
+                firsts.append(plan_left[0])
+                done.append(len(plan_left) if plan_solves else None)
             for _ in range(backward):
                 att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
                 plan = att if type(att) is list else att[1]
@@ -195,13 +224,14 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                 path = [state]
                 for m in plan:
                     path.append(AndNode(path[-1], *m).apply(path[-1]))
+                plans[len(paths_)] = (list(zip(plan, path[1:])), type(att) is list)
                 paths_.append(path)
                 firsts.append((plan[0], path[1]))
                 done.append(len(plan) if type(att) is list else None)
             n = len(paths_)
             solved = [i for i in range(n) if done[i] is not None]
             if solved:
-                best = min(solved, key=lambda i: done[i])
+                best = min(solved, key=lambda i: done[i] + first_penalty(firsts[i][1]))
             elif evaluation == "weighted":
                 scores = []
                 ends = values(agent, [path[-1] for path in paths_])
@@ -229,13 +259,18 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                                 score += (rel[f] if rel is not None else 1.0) * discount ** t
                     scores.append(score)
                 ends = [-v for v in values(agent, [path[-1] for path in paths_])] if use_value else [0.0] * n
+                ends = [e - first_penalty(f[1]) for e, f in zip(ends, firsts)]
                 best = max(range(n), key=lambda i: (scores[i], ends[i]))  # the first, on a full tie
                 ties += use_novelty and all(s == scores[best] for s in scores)
             chose_backward += best >= k
+            source = "commit" if best == remembered else "backward" if best >= k else "forward"
+            plan_left, plan_solves = (plans[best][0][1:], plans[best][1]) if best in plans else ([], False)
             move, state = firsts[best]
         moves += 1
         if trace is not None:
             trace.append((move, state))
+        if sources is not None:
+            sources.append(source)
         last_board[state] = moves
         recent.append(state)
         seen.update(state)
