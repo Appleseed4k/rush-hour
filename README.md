@@ -36,6 +36,7 @@ experiments/           scripts that write the caches the notebooks read (models/
 notebooks/
   summary.ipynb        the narrative and its figures
   p8_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
+  forward_planning.ipynb  a forward planner for the student: novelty and relevance rollouts, the value head
   skill_filter.html    the offline test behind bayes4: carrying skill across puzzles by a filter
                        (experiments/skill_tracking.py)
   archive/             p3-p7 lab notebooks, frozen with their outputs (see archive/README.md)
@@ -58,6 +59,7 @@ models/                results and networks (not in git; see MODELS.md)
 | p7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model; a skill filter as good as bayes3's refit gives bayes4, the default teacher | `archive/p7`, `skill_filter.html` |
 | p8 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p8_deliberation` |
 | - | The student written down (`MODEL.md`, `student/spec.py`); its start switched to AND-OR's apprentice, which fits people's start (misfit 0.2) and learning rate (2.8 at ×10); hindsight, seeds and θ checked (phase 2), and the summary moved to it | `MODEL.md`, summary |
+| - | Forward planning: rollouts judged by attempt-level novelty halve moves/optimal for every network; the dest head's relevance adds nothing, the value head helps only by breaking novelty's ties, and experience enters through the policy's proposals | `forward_planning` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.
