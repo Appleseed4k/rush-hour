@@ -22,6 +22,7 @@ K=1 is intuition exactly: one sampled move. Rollout boards are evaluated in batc
     python experiments/forward.py                      # the comparison: models/summary/forward.csv
     python experiments/forward.py uniform              # the uniform-proposal control: forward_uniform.csv
     python experiments/forward.py value                # the value head as evaluator: forward_value.csv
+    python experiments/forward.py sweep                # novelty's weight against value, and fading memory
 """
 import io
 import math
@@ -98,13 +99,21 @@ def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=Fal
 
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
-                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", rng=None):
+                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None):
     """One attempt by the forward planner (module docstring). proposals="uniform": rollout moves drawn uniformly
     from the legal ones (same avoidance), so the network acts only through relevance (or value).
 
     evaluation: how unsolved rollouts are ranked - "novelty" (the module docstring's score), "value" (the end board's
     moves to go by the value head, fewest first; no novelty) or "novelty then value" (novelty score first, the value
-    head breaking ties, as best-first width search ranks by novelty, then a goal heuristic).
+    head breaking ties, as best-first width search ranks by novelty, then a goal heuristic) or "weighted" (one
+    compensatory score: lam x novelty - the end board's moves to go, so lam is how many moves of predicted progress
+    one new feature is worth; lam -> infinity is "novelty then value", lam = 0 is "value").
+
+    With "weighted", novelty fades: a feature last on the attempt's boards `age` moves ago counts
+    1 - 0.5^(age / half_life) (1 if never seen; 0 on the current board), so a placement seen long ago detracts
+    less than one seen recently. half_life=None never forgets (every seen feature counts 0, as in "novelty").
+
+    `trace`, if a list, gets (move, board after it) for every move played.
 
     Returns {"solved", "moves", "ties"} - ties: turns on which every rollout had the same novelty score (with
     "novelty", nothing to choose between, so a plain policy sample; with "novelty then value", the value decides)."""
@@ -113,6 +122,7 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
     orientations = board.car_orientations(state)
     recent = deque([state], maxlen=memory)
     seen = set(state)
+    last_seen = {f: 0 for f in state}  # feature -> the move count when it was last on the attempt's board
     moves, ties = 0, 0
     while moves < max_steps and _red_steps(state) > 0:
         if k == 1:
@@ -141,6 +151,22 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
             solved = [i for i in range(k) if done[i] is not None]
             if solved:
                 best = min(solved, key=lambda i: done[i])
+            elif evaluation == "weighted":
+                scores = []
+                ends = values(agent, [path[-1] for path in paths_])
+                for path, end in zip(paths_, ends):
+                    got, nov = set(), 0.0
+                    for b in path[1:]:
+                        for f in b:
+                            if f in got:
+                                continue
+                            got.add(f)
+                            if f not in last_seen:
+                                nov += 1.0
+                            elif half_life is not None:
+                                nov += 1.0 - 0.5 ** ((moves - last_seen[f]) / half_life)
+                    scores.append(lam * nov - end)
+                best = int(np.argmax(scores))
             else:
                 scores = [0.0] * k if not use_novelty else []
                 for path in paths_ if use_novelty else []:
@@ -156,8 +182,12 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                 ties += use_novelty and all(s == scores[best] for s in scores)
             move, state = firsts[best]
         moves += 1
+        if trace is not None:
+            trace.append((move, state))
         recent.append(state)
         seen.update(state)
+        for f in state:
+            last_seen[f] = moves
     return {"solved": _red_steps(state) <= 0, "moves": moves, "ties": ties}
 
 
@@ -193,11 +223,11 @@ def puzzles(per_bin=25):
     return [p for b in range(4) for p in test[b * 50: b * 50 + per_bin]]
 
 
-def networks():
+def networks(students=8):
     nets = {"start": paths.START,
             "round 3": os.path.join(paths.APPRENTICE, "gamma0.07_free", "round3_epoch03.pt")}
     for teacher in ("no_teacher", "random_1.0"):
-        for s in range(8):
+        for s in range(students):
             nets[f"{teacher} 720 s{s}"] = os.path.join(SESSION, teacher, f"student{s:02d}_puzzle720.pt")
     return nets
 
@@ -219,6 +249,16 @@ VALUE = [
     {"name": "K8 D4 uniform novelty then value", "kw": {"k": 8, "depth": 4, "evaluation": "novelty then value",
                                                         "relevance": "none", "proposals": "uniform"}},
 ]
+
+# one compensatory score, lam x novelty - moves to go: lam swept (never forgetting), then fading memory
+LAMS = (0.5, 1, 2, 4, 8, 16, 32)
+SWEEP = ([{"name": f"K8 D4 weighted lam{lam}", "kw": {"k": 8, "depth": 4, "evaluation": "weighted", "lam": lam}}
+          for lam in LAMS]
+         + [{"name": f"K8 D4 uniform weighted lam{lam}",
+             "kw": {"k": 8, "depth": 4, "evaluation": "weighted", "lam": lam, "proposals": "uniform"}} for lam in LAMS]
+         + [{"name": f"K8 D4 weighted lam{lam} half-life{h}",
+             "kw": {"k": 8, "depth": 4, "evaluation": "weighted", "lam": lam, "half_life": h}}
+            for lam in (4, 16) for h in (5, 20, 80)])
 
 # the control: rollouts proposed uniformly, judged with and without the dest head (novelty only uses no network)
 UNIFORM = [
@@ -255,6 +295,11 @@ if __name__ == "__main__":
         items = puzzles(2)
         nets = {k: v for k, v in networks().items() if k in ("start", "round 3")}
         df = run(nets, CONDITIONS, items, 1)
+        print(summarize(df).round(3).to_string())
+        sys.exit()
+    if sys.argv[1:2] == ["sweep"]:  # models/summary/forward_sweep.csv; 4 students per teacher
+        df = run(networks(4), SWEEP, puzzles(), 2)
+        df.to_csv(OUT.replace(".csv", "_sweep.csv"), index=False)
         print(summarize(df).round(3).to_string())
         sys.exit()
     if sys.argv[1:2] in (["uniform"], ["value"]):  # models/summary/forward_uniform.csv, forward_value.csv
