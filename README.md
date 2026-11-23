@@ -47,6 +47,8 @@ notebooks/
   p2.3_human_likeness.ipynb  people against the models move by move: revisits, car roles, slides, timing;
                        the soft memory fitted to people's revisits
 web/                   the playable Rush Hour page with teachers, for collecting human play
+visualization/          figures by phase; p2_two_mode/two_mode_moves.html steps through how the two-mode student
+                       picks each move of one attempt (experiments/two_mode_animation.py)
 data/rush_nw.txt       every puzzle with its optimal length (the analysis pool)
 23vrb-osfstorage-archive/  the paper's data (not in git)
 models/                results and networks (not in git; see MODELS.md)
