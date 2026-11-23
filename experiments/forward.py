@@ -372,7 +372,8 @@ def _flat_pick(agent, state, options, pen, consider, tau, rng):
 
 def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop", stall=4, window=10, gamma=0.07,
                    soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
-    """Forward by default, backward at an impasse.
+    """The impasse switch: forward by default, backward at an impasse. (Called "two modes" before the two-mode
+    student, solve_lean, took that name.)
 
     Forward mode: a sharp flat choice (solve_flat without the check: the policy's `consider` most likely moves, looked
     at one move deep, softmax over -moves to go / tau; the soft board memory as there). Alone it gets stuck in loops
@@ -451,9 +452,29 @@ def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop",
             "backward": from_plan}
 
 
+def goal_in_sight(state, orientations, depth):
+    """(first move, board after it) of a shortest sequence of at most `depth` moves that gets red out, or None."""
+    frontier, seen = [(state, None)], {state}
+    for _ in range(depth):
+        nxt = []
+        for b, first in frontier:
+            for m, c in board.neighbors(b, orientations):
+                if c in seen:
+                    continue
+                seen.add(c)
+                f = first or (m, c)
+                if _red_steps(c) <= 0:
+                    return f
+                nxt.append((c, f))
+        frontier = nxt
+    return None
+
+
 def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
-               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
-    """The lean student - the generative side of the move-by-move mixture (notebooks/p2.2_forward_planning.ipynb, 2c):
+               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0):
+    """The two-mode student (w_ao > 0) or, with w_ao 0, the forward student - named "lean" in the code (solve_lean,
+    LeanSolver, --lean, lean_* runs and tables). The generative side of the move-by-move mixture
+    (notebooks/p2.2_forward_planning.ipynb, 2c):
     each move is made by one of three modes, drawn independently per move:
     - with probability w_ao, a deliberation: one AND-OR pass from the board (the dest head ordering its options with
       Gumbel noise, lapse rate `gamma`), and its first move is played - one move per search, as in the paper's model;
@@ -465,8 +486,11 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
     opening=True: the attempt's first move is always a deliberation, and the move after it is the same pass's second
     move (people's slow first look and its one-move follow-through).
 
-    `sources`, if a list, gets "intuition", "flat" or "and-or" per move. Returns {"solved", "surrendered", "moves",
-    "backward"} (backward: AND-OR moves)."""
+    sight=D ("goal in sight"): before anything else, a search of every sequence of up to D moves; if one gets red
+    out, its first move is played. temperature: intuition's sampling temperature (1: as the session student).
+
+    `sources`, if a list, gets "intuition", "flat", "and-or" or "sight" per move. Returns {"solved", "surrendered",
+    "moves", "backward"} (backward: AND-OR moves)."""
     rng = rng or random
     agent.temperature = 1.0
     orientations = board.car_orientations(state)
@@ -482,9 +506,13 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
         r = rng.random()
         src = "intuition"
         played = None
+        seen_goal = goal_in_sight(state, orientations, sight) if sight and not pending else None
         if pending:
             played = pending.pop(0)
             src = "and-or"
+        elif seen_goal is not None:
+            played = seen_goal
+            src = "sight"
         elif (opening and moves == 0) or r < w_ao:
             att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
             steps = (att if type(att) is list else att[1]) or []
@@ -499,7 +527,7 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
             played = options[_flat_pick(agent, state, options, [penalty(b) for _, b in options], consider, tau, rng)]
             src = "flat"
         if played is None:
-            played = sample_move(agent, state, orientations, set(), 1.0, rng, penalty=penalty)
+            played = sample_move(agent, state, orientations, set(), temperature, rng, penalty=penalty)
             src = "intuition"
         move, state = played
         moves += 1

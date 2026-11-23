@@ -40,10 +40,10 @@ notebooks/
   p1.7_skill_filter.html  the offline test behind bayes4: carrying skill across puzzles by a filter
                        (experiments/skill_tracking.py)
   archive/             p1.3-p1.7 lab notebooks, frozen with their outputs (see archive/README.md)
-  p2_summary.ipynb     phase 2's narrative: from AND-OR and forward planners to the lean student
+  p2_summary.ipynb     phase 2's narrative: from AND-OR and forward planners to the forward and two-mode students
   p2.1_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
   p2.2_forward_planning.ipynb  forward planning, forward + backward, planners in the session, calibration to
-                       people's start, people's move times, the mixture of modes, the lean student
+                       people's start, people's move times, the mixture of modes, the forward and two-mode students and how their learning compares with people's
   p2.3_human_likeness.ipynb  people against the models move by move: revisits, car roles, slides, timing;
                        the soft memory fitted to people's revisits
 web/                   the playable Rush Hour page with teachers, for collecting human play
@@ -72,7 +72,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | Step | What | Where |
 |---|---|---|
 | p2.1 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p2.1_deliberation` |
-| p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the lean student, which starts and learns like people | `p2.2_forward_planning` |
+| p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the two-mode student (intuition, flat planning and single AND-OR moves), which starts where people do and gains as much as they do, and the forward student (without AND-OR), which stalls | `p2.2_forward_planning` |
 | p2.3 | People against the models move by move; the hard 10-board memory replaced by a soft one fitted to people's revisits | `p2.3_human_likeness` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag

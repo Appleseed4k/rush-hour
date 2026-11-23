@@ -21,11 +21,14 @@ with sessions.json (one record per puzzle). fit_memory.py `snapshots --run <run>
     python experiments/planner_session.py --fit-start          # the gamma that starts where people do
     python experiments/planner_session.py --fit-forward        # forward planning alone: rollouts x gamma
     python experiments/planner_session.py --fit-flat           # flat (moves considered x tau), with/without a check
-    python experiments/planner_session.py --fit-two-mode       # sharp flat forward + AND-OR plans at impasses
-    python experiments/planner_session.py --fit-lean           # intuition + flat + one-move AND-OR deliberations
-    python experiments/planner_session.py --lean --run lean_people_all_m10_ao     # the session played by the lean
+    python experiments/planner_session.py --fit-two-mode       # the impasse switch: sharp flat forward + AND-OR plans at impasses
+    python experiments/planner_session.py --fit-lean           # forward / two-mode students: intuition + flat + one-move AND-OR
+    python experiments/planner_session.py --fit-shape          # ... with goal in sight and a sharper intuition
+    python experiments/planner_session.py --fit-human          # the start (checkpoints, planners) on people's layouts
+    python experiments/planner_session.py --fit-strong         # stronger networks x higher temperatures, ditto
+    python experiments/planner_session.py --lean --run lean_people_all_m10_ao     # the session played by the two-mode student
     python experiments/planner_session.py --lean --run lean_people_all_m10_noao --w-ao 0 --flat-start 0.18 \\
-        --flat-end 0.28 --no-opening                           # ... and without AND-OR (flat set to match the start)
+        --flat-end 0.28 --no-opening                           # ... and by the forward student (flat set to match the start)
     python experiments/planner_session.py --gamma 0.5 --run planner_people_all_m10_g0.5
 
 --fit-start calibrates gamma as rushhour/surrender.py calibrated the start network: the planner (start network)
@@ -110,20 +113,46 @@ FLAT_START = ({f"flat m{m} tau {t}": {"flat": True, "consider": m, "tau": t}
                  for m in FLAT_CONSIDER for t in FLAT_TAU})
 
 
-# two modes: sharp flat forward choice, an AND-OR plan at an impasse (forward.solve_two_mode)
+# the impasse switch: sharp flat forward choice, an AND-OR plan at an impasse (forward.solve_two_mode)
 TWO_CONSIDER, TWO_TAU, TWO_TRIGGER, TWO_GAMMA = (3, 5), (0.25, 0.5, 1), ("loop", "stall", "either"), (0.07, 0.3)
 TWO_START = {f"two-mode m{m} tau {t} {tr} gamma {g}": {"two_mode": True, "consider": m, "tau": t, "trigger": tr,
                                                          "gamma": g}
              for m in TWO_CONSIDER for t in TWO_TAU for tr in TWO_TRIGGER for g in TWO_GAMMA}
 
 
-# the lean student: intuition, flat planning (w_flat) and one-move AND-OR deliberations (w_ao); opening: the first
+# the two-mode student (the forward student: w_ao 0), "lean" in the code: intuition, flat planning (w_flat) and
+# one-move AND-OR deliberations (w_ao); opening: the first
 # move a deliberation with a one-move follow-through (forward.solve_lean)
 LEAN_FLAT, LEAN_AO = (0, 0.08, 0.18), (0, 0.1, 0.2)
 LEAN_START = {f"lean flat {f} and-or {a}{' opening' if o else ''}": {"lean": True, "w_flat": f, "w_ao": a,
                                                                        "opening": o}
               for f in LEAN_FLAT for a in LEAN_AO for o in (False, True)}
 
+
+# the near-goal gap: goal in sight (a search of up to D moves for red's way out) and a sharper intuition (temperature),
+# with a weaker checkpoint to give the sharper policy a chance to start where people do (forward.solve_lean)
+NETS = {"start": paths.START, "epoch 1": os.path.join(paths.APPRENTICE, "gamma0.07_free", "round1_epoch01.pt")}
+NETS |= {f"round {r} epoch {e}": os.path.join(paths.APPRENTICE, "gamma0.07_free", f"round{r}_epoch{e:02d}.pt")
+         for r, e in [(1, 3), (1, 4), (1, 5), (1, 8), (1, 11), (2, 2), (2, 5)]}
+# the start on people's own layouts: phase 1's choice of checkpoint (intuition, hard memory) refitted there, and the
+# planners of phase 2 with the start network
+_LEAN = {"lean": True, "w_flat": 0.08, "w_ao": 0.1, "opening": True}
+HUMAN_START = ({f"intuition, hard memory, {net}": {"k": 1, "net": net}
+                for net in ["epoch 1", "start", "round 1 epoch 3", "round 1 epoch 4", "round 1 epoch 5",
+                            "round 1 epoch 8", "round 1 epoch 11", "round 2 epoch 2", "round 2 epoch 5"]}
+               | {"intuition, soft memory": {"k": 1, "soft_memory": (2, 1)},
+                  "lean": dict(_LEAN), "lean, sight 2": {**_LEAN, "sight": 2},
+                  "lean, sight 2, temperature 0.75": {**_LEAN, "sight": 2, "temperature": 0.75},
+                  "lean, temperature 0.5": {**_LEAN, "temperature": 0.5}})  # no rollouts: implausible at people's speed
+SHAPE = {f"lean {net}, temperature {t}, sight {d}": {"lean": True, "w_flat": 0.08, "w_ao": 0.1, "opening": True,
+                                                       "net": net, "temperature": t, "sight": d}
+         for net in NETS for t in (1.0, 0.75, 0.5) for d in (0, 2, 3)}
+
+# robust but inefficient: a stronger network sampled at a higher temperature (intuition, hard memory), on people's
+# layouts against their trials and their first attempts
+STRONG = {f"intuition, {net}, temperature {t}": {"k": 1, "net": net, "temperature": t}
+          for net in ["start", "round 1 epoch 8", "round 1 epoch 11", "round 2 epoch 2", "round 2 epoch 5"]
+          for t in (1.0, 1.25, 1.5, 2.0)}
 
 def _start_job(args):
     name, kw, puzzle, state, distance, run = args
@@ -133,6 +162,7 @@ def _start_job(args):
     random.seed(rng.random())
     trace = []
     kw = dict(kw)
+    forward._W["agent"] = forward._W["agents"][kw.pop("net", "start")]
     solve = (forward.solve_flat if kw.pop("flat", False) else
              forward.solve_two_mode if kw.pop("two_mode", False) else
              forward.solve_lean if kw.pop("lean", False) else forward.solve_forward)
@@ -142,33 +172,73 @@ def _start_job(args):
             "backward": out.get("backward"), "impasses": out.get("impasses")}
 
 
-def fit_start(configs, out, runs=10, scale=0.3):
+def human_puzzles():
+    """{layout: (distance, state)} for the 70 layouts people played (human_data.puzzles() trips on stray files)."""
+    from rushhour import human_data as hd
+    return {n: (hd.distance(n), hd.puzzle(n)) for n in sorted(hd.trials().instance.unique())}
+
+
+def first_attempt_target(block=10):
+    """People's first attempts in trials 1..block (a restart ends an attempt, as giving up does): per-person means of
+    solving and of moves / optimal when solved, each (mean, se) across people."""
+    import pandas as pd
+    from rushhour import human_data as hd, sessions as se
+    trial = hd.trials()[["subject", "instance", "trial", "distance"]]
+    rows = [(s, inst, att, solved, len(moves)) for s, atts in hd.load(unsolved=True).items()
+            for inst, att, solved, moves in atts]
+    a = pd.DataFrame(rows, columns=["subject", "instance", "attempt", "solved", "moves"]).merge(
+        trial, on=["subject", "instance"])
+    a = a[a.trial <= block]
+    a = a[a.attempt == a.groupby(["subject", "instance"]).attempt.transform("min")]
+    won = a[a.solved]
+    return (se.mean_se(list(a.groupby("subject").solved.mean())),
+            se.mean_se(list((won.moves / won.distance).groupby(won.subject).mean())))
+
+
+def fit_start(configs, out, runs=10, scale=0.3, layouts="test"):
     """Each config (name -> solve_forward kwargs) with the start network on the session's test puzzles, no giving
-    up; then giving up at `scale` applied (surrender.predict) and compared with people's first 10 trials."""
+    up; then giving up at `scale` applied (surrender.predict) and compared with people's first 10 trials.
+    layouts="human": on the 70 layouts people played instead, each of their first 10 trials predicted on its own
+    layout (surrender.py --puzzles human); also prints the giving-up scale that fits best."""
+    import numpy as np
     import random
     import pandas as pd
     from rushhour import human_data as hd, surrender as sr
     (hs, hs_se), (hr, hr_se), first = sr.human_target(10)
+    (fs, fs_se), (fr, fr_se) = first_attempt_target(10)
     edges, rates, _ = hd.surrender_hazard()
-    puzzles = sr.puzzle_set("test")
-    with open(paths.START, "rb") as f:
-        weights = f.read()
+    puzzles = human_puzzles() if layouts == "human" else sr.puzzle_set("test")
+    by_length = layouts != "human"
+    weights = {}
+    for name in {kw.get("net", "start") for kw in configs.values()}:
+        with open(NETS[name], "rb") as f:
+            weights[name] = f.read()
     jobs = [(c, kw, n, s, d, r) for c, kw in configs.items() for n, (d, s) in puzzles.items() for r in range(runs)]
     random.Random(0).shuffle(jobs)
-    with Pool(initializer=forward._init_one, initargs=(weights,)) as pool:
+    with Pool(initializer=forward._init, initargs=(weights,)) as pool:
         df = pd.DataFrame(pool.map(_start_job, jobs, chunksize=2))
     df.to_csv(os.path.join(paths.MODELS, "summary", out), index=False)
-    print(f"people, trials 1-10: solved {hs:.1%} ± {hs_se:.1%}, moves / optimal {hr:.2f} ± {hr_se:.2f}")
+    print(f"people, trials 1-10: solved {hs:.1%} ± {hs_se:.1%}, moves / optimal {hr:.2f} ± {hr_se:.2f}; "
+          f"first attempts: solved {fs:.1%} ± {fs_se:.1%}, moves / optimal {fr:.2f} ± {fr_se:.2f}")
     for c in configs:
         d = df[df.config == c]
         att = {n: [None if m != m else int(m) for m in x.moves] for n, x in d.groupby("puzzle")}
-        ps, pr = sr.predict(att, puzzles, first, edges, rates, scale, True)
-        p0, r0 = sr.predict(att, puzzles, first, edges, rates, 0.0, True)
+        ps, pr = sr.predict(att, puzzles, first, edges, rates, scale, by_length)
+        p0, r0 = sr.predict(att, puzzles, first, edges, rates, 0.0, by_length)
         misfit = ((ps - hs) / hs_se) ** 2 + ((pr - hr) / hr_se) ** 2
+        fits = [(((p - hs) / hs_se) ** 2 + ((q - hr) / hr_se) ** 2, s_)
+                for s_ in np.arange(0, 2.01, 0.05)
+                for p, q in [sr.predict(att, puzzles, first, edges, rates, s_, by_length)]]
+        best_m, best_s = min(fits)
+        firsts = [(((p - fs) / fs_se) ** 2 + ((q - fr) / fr_se) ** 2, s_, p, q)
+                  for s_ in np.arange(0, 2.01, 0.05)
+                  for p, q in [sr.predict(att, puzzles, first, edges, rates, s_, by_length)]]
+        f_m, f_s, f_p, f_q = min(firsts)
         extra = (f"   backward moves {d.backward.sum() / d.played.sum():.1%}, impasses per 10 moves "
                  f"{10 * d.impasses.sum() / d.played.sum():.2f}" if d.impasses.notna().any() else "")
         print(f"{c}: solved {ps:.1%}, moves / optimal {pr:.2f} (misfit {misfit:.1f})   "
-              f"no giving up: {p0:.1%} {r0:.2f}{extra}", flush=True)
+              f"no giving up: {p0:.1%} {r0:.2f}   best scale {best_s:.2f} (misfit {best_m:.1f})   "
+              f"vs first attempts: scale {f_s:.2f} -> {f_p:.1%} {f_q:.2f} (misfit {f_m:.1f}){extra}", flush=True)
 
 
 def main():
@@ -181,7 +251,11 @@ def main():
     ap.add_argument("--fit-flat", action="store_true")
     ap.add_argument("--fit-two-mode", action="store_true")
     ap.add_argument("--fit-lean", action="store_true")
-    ap.add_argument("--lean", action="store_true", help="play the session with the lean student")
+    ap.add_argument("--fit-shape", action="store_true")
+    ap.add_argument("--fit-human", action="store_true", help="the start on people's own 70 layouts")
+    ap.add_argument("--fit-strong", action="store_true", help="stronger networks x higher temperatures, ditto")
+    ap.add_argument("--lean", action="store_true",
+                    help="play the session with the two-mode student (--w-ao 0: the forward student)")
     ap.add_argument("--w-ao", type=float, default=0.1)
     ap.add_argument("--flat-start", type=float, default=0.08)
     ap.add_argument("--flat-end", type=float, default=0.18)
@@ -201,6 +275,15 @@ def main():
         return
     if args.fit_lean:
         fit_start(LEAN_START, "lean_start_fit.csv")
+        return
+    if args.fit_shape:
+        fit_start(SHAPE, "shape_start_fit.csv")
+        return
+    if args.fit_human:
+        fit_start(HUMAN_START, "human_start_fit.csv", layouts="human")
+        return
+    if args.fit_strong:
+        fit_start(STRONG, "strong_start_fit.csv", layouts="human")
         return
     with open(CALIBRATED) as f:
         config = json.load(f)

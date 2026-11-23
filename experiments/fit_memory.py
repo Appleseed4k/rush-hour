@@ -43,6 +43,8 @@ is fitted to the stage of people's session it sits in the middle of (trials 10-2
                                                # (forward.solve_lean) with and without AND-OR, against people
     python experiments/fit_memory.py lean-snapshots --run lean_people_all_m10_ao   # lean_snapshots_<run>.csv: a
                                                # lean session's snapshots, as it played them, per stage
+    python experiments/fit_memory.py shape     # writes models/summary/shape_profile.csv: the lean student with goal
+                                               # in sight / a sharper intuition, by distance, against trials 1-9
     python experiments/fit_memory.py snapshots # writes models/summary/gamma_snapshots.csv
     python experiments/fit_memory.py snapshots --run planner_people_all_m10  # gamma_snapshots_<run>.csv: a run's
                                                # own snapshots (experiments/planner_session.py), start not rerun
@@ -117,6 +119,7 @@ SNAPSHOT = ([{"name": f"after {n} trials, intuition", "snapshot": n, "kind": "in
             + [{"name": f"after {n} trials, gamma {g}", "snapshot": n, "kind": "mixed", "gamma forward": g,
                 "gamma backward": g, "kw": LEARN[LEARN_GRID.index(g)]["kw"]} for n in SNAP_TRIALS for g in SNAP_GRID])
 LEAN_RUNS = 10
+SHAPE_RUNS = 6
 LEAN = [{"name": name, "kw": {"lean": True, **kw}} for name, kw in [
     ("intuition", {"w_flat": 0, "w_ao": 0}),
     ("intuition + flat", {"w_flat": 0.08, "w_ao": 0}),
@@ -406,6 +409,25 @@ if __name__ == "__main__":
         print(paired[["stage", "condition", "optimal 2-3", "optimal 4-6", "optimal 7-9", "optimal 10+",
                       "moves / optimal", "board 2", "skill misfit", "revisit misfit", "misfit",
                       "solved"]].round(3).to_string(index=False))
+        sys.exit()
+    if sys.argv[1:2] == ["shape"]:
+        import planner_session as ps
+        weights = {}
+        for name, f in ps.NETS.items():
+            with open(f, "rb") as fh:
+                weights[name] = fh.read()
+        conds = [{"name": name, "kind": "lean", "snapshot": 0, "kw": {k: v for k, v in kw.items() if k != "net"},
+                  "net": kw["net"]} for name, kw in ps.SHAPE.items()]
+        jobs = [(c, i, f"{r}", c["net"]) for c in conds for i in instances for r in range(SHAPE_RUNS)]
+        random.Random(0).shuffle(jobs)
+        with mp.Pool(initializer=forward._init, initargs=(weights,)) as pool:
+            df = pd.DataFrame(pool.map(job_snapshot, jobs, chunksize=4))
+        df.to_csv(os.path.join(paths.MODELS, "summary", "shape_profile.csv"), index=False)
+        out, people = summarize_learning(df, {"1-9": SNAP_STAGES["1-9"]})
+        print(people[["optimal 2-3", "optimal 4-6", "optimal 7-9", "optimal 10+", "moves / optimal",
+                      "board 2"]].round(3).to_string())
+        print(out[["condition", "optimal 2-3", "optimal 4-6", "optimal 7-9", "optimal 10+", "moves / optimal",
+                   "board 2", "skill misfit", "solved"]].round(3).to_string(index=False))
         sys.exit()
     if sys.argv[1:2] == ["lean"]:
         with open(paths.START, "rb") as f:
