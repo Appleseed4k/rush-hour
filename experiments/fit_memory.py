@@ -41,6 +41,8 @@ is fitted to the stage of people's session it sits in the middle of (trials 10-2
     python experiments/fit_memory.py learning  # writes models/summary/gamma_learning.csv
     python experiments/fit_memory.py lean      # writes models/summary/lean_profile.csv: the lean student
                                                # (forward.solve_lean) with and without AND-OR, against people
+    python experiments/fit_memory.py lean-snapshots --run lean_people_all_m10_ao   # lean_snapshots_<run>.csv: a
+                                               # lean session's snapshots, as it played them, per stage
     python experiments/fit_memory.py snapshots # writes models/summary/gamma_snapshots.csv
     python experiments/fit_memory.py snapshots --run planner_people_all_m10  # gamma_snapshots_<run>.csv: a run's
                                                # own snapshots (experiments/planner_session.py), start not rerun
@@ -372,6 +374,39 @@ def summarize_learning(df, stages=None):
 
 if __name__ == "__main__":
     instances = sorted(hd.trials().instance.unique())
+    if sys.argv[1:2] == ["lean-snapshots"]:
+        import json
+        run = sys.argv[sys.argv.index("--run") + 1]
+        with open(os.path.join(paths.SESSIONS, run, "config.json")) as f:
+            lean = json.load(f)["lean"]
+        solver = forward.LeanSolver(**lean)
+        nets = snapshot_networks(os.path.join(paths.SESSIONS, run, "no_teacher"))
+        weights = {}
+        for name, f in nets.items():
+            with open(f, "rb") as fh:
+                weights[name] = fh.read()
+        jobs = []
+        for n in (0,) + SNAP_TRIALS:
+            c = {"name": f"after {n} trials, lean", "snapshot": n, "kind": "lean",
+                 "kw": {"lean": True, "w_flat": solver.flat_at(n + 1), "w_ao": lean["w_ao"],
+                        "opening": lean["opening"]}}
+            names = ["0"] if n == 0 else [m for m in nets if m.split()[0] == str(n)]
+            for i in instances:
+                for sname in names:
+                    for r in range(16 if n == 0 else 2):
+                        jobs.append((c, i, f"{sname}|{r}", sname))
+        random.Random(0).shuffle(jobs)
+        with mp.Pool(initializer=forward._init, initargs=(weights,)) as pool:
+            df = pd.DataFrame(pool.map(job_snapshot, jobs, chunksize=4))
+        df.to_csv(os.path.join(paths.MODELS, "summary", f"lean_snapshots_{run}.csv"), index=False)
+        out, people = summarize_learning(df, SNAP_STAGES)
+        paired = out[[r.snapshot == SNAP_OF[r.stage] for r in out.itertuples()]]
+        print(people[["optimal 2-3", "optimal 4-6", "optimal 7-9", "optimal 10+", "moves / optimal",
+                      "board 2"]].round(3).to_string())
+        print(paired[["stage", "condition", "optimal 2-3", "optimal 4-6", "optimal 7-9", "optimal 10+",
+                      "moves / optimal", "board 2", "skill misfit", "revisit misfit", "misfit",
+                      "solved"]].round(3).to_string(index=False))
+        sys.exit()
     if sys.argv[1:2] == ["lean"]:
         with open(paths.START, "rb") as f:
             weights = f.read()

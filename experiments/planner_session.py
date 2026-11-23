@@ -23,6 +23,9 @@ with sessions.json (one record per puzzle). fit_memory.py `snapshots --run <run>
     python experiments/planner_session.py --fit-flat           # flat (moves considered x tau), with/without a check
     python experiments/planner_session.py --fit-two-mode       # sharp flat forward + AND-OR plans at impasses
     python experiments/planner_session.py --fit-lean           # intuition + flat + one-move AND-OR deliberations
+    python experiments/planner_session.py --lean --run lean_people_all_m10_ao     # the session played by the lean
+    python experiments/planner_session.py --lean --run lean_people_all_m10_noao --w-ao 0 --flat-start 0.18 \\
+        --flat-end 0.28 --no-opening                           # ... and without AND-OR (flat set to match the start)
     python experiments/planner_session.py --gamma 0.5 --run planner_people_all_m10_g0.5
 
 --fit-start calibrates gamma as rushhour/surrender.py calibrated the start network: the planner (start network)
@@ -78,7 +81,9 @@ def _student(job):
         window=None if config["window"] < 0 else config["window"], encode=config["encode"],
         steps=config["steps"], block=config.get("block", 1), seed=config["seed"] + 7919 * (student + 1),
         on_puzzle=snapshot, labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"),
-        even_batches=config.get("even_batches", False), solver=forward.PlannerSolver(**config["planner"]))
+        even_batches=config.get("even_batches", False),
+        solver=(forward.LeanSolver(multiplier=ss.multiplier(config), **config["lean"]) if config.get("lean") else
+                forward.PlannerSolver(**config["planner"])))
     m = ss.multiplier(config)
     for entry, (i, d, _) in zip(record, puzzles):
         entry.update(step=entry["puzzle"] + 1, trial=entry["puzzle"] // m + 1, puzzle=i, distance=d)
@@ -176,6 +181,11 @@ def main():
     ap.add_argument("--fit-flat", action="store_true")
     ap.add_argument("--fit-two-mode", action="store_true")
     ap.add_argument("--fit-lean", action="store_true")
+    ap.add_argument("--lean", action="store_true", help="play the session with the lean student")
+    ap.add_argument("--w-ao", type=float, default=0.1)
+    ap.add_argument("--flat-start", type=float, default=0.08)
+    ap.add_argument("--flat-end", type=float, default=0.18)
+    ap.add_argument("--no-opening", action="store_true")
     args = ap.parse_args()
     if args.fit_start:
         fit_start(MIXED_START, "planner_start_fit.csv")
@@ -197,6 +207,10 @@ def main():
     config["init"] = paths.START
     config["run"] = args.run
     config["planner"] = {**PLANNER, "gamma": args.gamma, "rollout_gamma": args.gamma}
+    if args.lean:
+        config["lean"] = {"w_ao": args.w_ao, "flat_start": args.flat_start, "flat_end": args.flat_end, "ramp": 30,
+                          "opening": not args.no_opening}
+        del config["planner"]
     run_dir = os.path.join(paths.SESSIONS, args.run)
     if not args.smoke:
         if os.path.exists(os.path.join(run_dir, "no_teacher", "sessions.json")):

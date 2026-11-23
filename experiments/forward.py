@@ -514,6 +514,32 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
     return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "backward": from_ao}
 
 
+class LeanSolver:
+    """solve_lean as learning_session's `solver`, with the flat share rising over the session: on the puzzle of human
+    trial t (t = puzzles played // multiplier + 1), w_flat = flat_start + (flat_end - flat_start) x min(1, (t - 1) /
+    ramp) - people's flat share rose from about 8% to 18% over their first 30 trials (the mixture fit). One instance
+    per student: it counts the attempts it has played (one per puzzle). The value cache is cleared each attempt."""
+
+    def __init__(self, w_ao=0.1, flat_start=0.08, flat_end=0.18, ramp=30, multiplier=10, opening=True, **kw):
+        self.w_ao, self.flat_start, self.flat_end, self.ramp = w_ao, flat_start, flat_end, ramp
+        self.multiplier, self.opening, self.kw, self.calls = multiplier, opening, kw, 0
+
+    def flat_at(self, trial):
+        return self.flat_start + (self.flat_end - self.flat_start) * min(1.0, (trial - 1) / self.ramp)
+
+    def __call__(self, agent, state, cap, rng, gives_up):
+        trial = self.calls // self.multiplier + 1
+        self.calls += 1
+        agent.__dict__.pop("_values", None)
+        random.seed(rng.random())
+        trace = []
+        out = solve_lean(agent, state, cap, w_flat=self.flat_at(trial), w_ao=self.w_ao, opening=self.opening,
+                         rng=rng, trace=trace, surrender=gives_up, **self.kw)
+        return {"solved": out["solved"], "surrendered": out["surrendered"],
+                "boards": [state] + [b for _, b in trace], "moves": [m for m, _ in trace],
+                "taught": [False] * len(trace), "backward": out["backward"]}
+
+
 class PlannerSolver:
     """solve_forward as learning_session's `solver`: one attempt, returned as solve_intuition's dict (the boards
     actually played, start first - the planner's imagined boards teach nothing). Plain and picklable. The value cache
