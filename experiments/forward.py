@@ -451,6 +451,69 @@ def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop",
             "backward": from_plan}
 
 
+def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
+               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
+    """The lean student - the generative side of the move-by-move mixture (notebooks/forward_planning.ipynb, 2c):
+    each move is made by one of three modes, drawn independently per move:
+    - with probability w_ao, a deliberation: one AND-OR pass from the board (the dest head ordering its options with
+      Gumbel noise, lapse rate `gamma`), and its first move is played - one move per search, as in the paper's model;
+      no plan is kept;
+    - with probability w_flat, flat planning (_flat_pick: the policy's `consider` most likely moves, a softmax over
+      -moves to go / tau);
+    - otherwise intuition: a policy sample.
+    The soft board memory (beta x 0.5^(age / half-life)) lowers moves back to recent boards in intuition and flat.
+    opening=True: the attempt's first move is always a deliberation, and the move after it is the same pass's second
+    move (people's slow first look and its one-move follow-through).
+
+    `sources`, if a list, gets "intuition", "flat" or "and-or" per move. Returns {"solved", "surrendered", "moves",
+    "backward"} (backward: AND-OR moves)."""
+    rng = rng or random
+    agent.temperature = 1.0
+    orientations = board.car_orientations(state)
+    last_board = {state: 0}
+    beta, half = soft_memory if soft_memory else (0.0, 1.0)
+    moves, from_ao, pending = 0, 0, []
+
+    def penalty(b):
+        when = last_board.get(b)
+        return 0.0 if when is None else beta * 0.5 ** ((moves + 1 - when) / half)
+
+    while moves < max_steps and _red_steps(state) > 0:
+        r = rng.random()
+        src = "intuition"
+        played = None
+        if pending:
+            played = pending.pop(0)
+            src = "and-or"
+        elif (opening and moves == 0) or r < w_ao:
+            att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
+            steps = (att if type(att) is list else att[1]) or []
+            if steps:
+                nxt = AndNode(state, *steps[0]).apply(state)
+                played = (steps[0], nxt)
+                src = "and-or"
+                if opening and moves == 0 and len(steps) > 1 and _red_steps(nxt) > 0:
+                    pending = [(steps[1], AndNode(nxt, *steps[1]).apply(nxt))]
+        elif r < w_ao + w_flat:
+            options = list(board.neighbors(state, orientations))
+            played = options[_flat_pick(agent, state, options, [penalty(b) for _, b in options], consider, tau, rng)]
+            src = "flat"
+        if played is None:
+            played = sample_move(agent, state, orientations, set(), 1.0, rng, penalty=penalty)
+            src = "intuition"
+        move, state = played
+        moves += 1
+        from_ao += src == "and-or"
+        last_board[state] = moves
+        if trace is not None:
+            trace.append((move, state))
+        if sources is not None:
+            sources.append(src)
+        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(moves):
+            return {"solved": False, "surrendered": True, "moves": moves, "backward": from_ao}
+    return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "backward": from_ao}
+
+
 class PlannerSolver:
     """solve_forward as learning_session's `solver`: one attempt, returned as solve_intuition's dict (the boards
     actually played, start first - the planner's imagined boards teach nothing). Plain and picklable. The value cache

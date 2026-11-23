@@ -39,6 +39,8 @@ is fitted to the stage of people's session it sits in the middle of (trials 10-2
 1-9, its planner runs taken from gamma_learning.csv).
 
     python experiments/fit_memory.py learning  # writes models/summary/gamma_learning.csv
+    python experiments/fit_memory.py lean      # writes models/summary/lean_profile.csv: the lean student
+                                               # (forward.solve_lean) with and without AND-OR, against people
     python experiments/fit_memory.py snapshots # writes models/summary/gamma_snapshots.csv
     python experiments/fit_memory.py snapshots --run planner_people_all_m10  # gamma_snapshots_<run>.csv: a run's
                                                # own snapshots (experiments/planner_session.py), start not rerun
@@ -112,6 +114,16 @@ SNAPSHOT = ([{"name": f"after {n} trials, intuition", "snapshot": n, "kind": "in
              for n in (0,) + SNAP_TRIALS]
             + [{"name": f"after {n} trials, gamma {g}", "snapshot": n, "kind": "mixed", "gamma forward": g,
                 "gamma backward": g, "kw": LEARN[LEARN_GRID.index(g)]["kw"]} for n in SNAP_TRIALS for g in SNAP_GRID])
+LEAN_RUNS = 10
+LEAN = [{"name": name, "kw": {"lean": True, **kw}} for name, kw in [
+    ("intuition", {"w_flat": 0, "w_ao": 0}),
+    ("intuition + flat", {"w_flat": 0.08, "w_ao": 0}),
+    ("intuition + flat + AND-OR", {"w_flat": 0.08, "w_ao": 0.10}),
+    ("intuition + flat + AND-OR, opening", {"w_flat": 0.08, "w_ao": 0.10, "opening": True}),
+    ("intuition + AND-OR", {"w_flat": 0, "w_ao": 0.10}),
+    ("later: intuition + more flat", {"w_flat": 0.18, "w_ao": 0}),
+    ("later: intuition + more flat + AND-OR", {"w_flat": 0.18, "w_ao": 0.10}),
+]]
 STAGES = {"1-10": (1, 10), "11-20": (11, 20), "21-35": (21, 35), "36+": (36, 1000)}
 _DIST = {}
 
@@ -142,8 +154,9 @@ def job(args):
     start = hd.puzzle(instance)
     distance = hd.distance(instance)
     trace, sources = [], []
-    out = forward.solve_forward(forward._W["agent"], start, max(50, 10 * distance), rng=rng, trace=trace,
-                                sources=sources, **cond["kw"])
+    kw = dict(cond["kw"])
+    solve = forward.solve_lean if kw.pop("lean", False) else forward.solve_forward
+    out = solve(forward._W["agent"], start, max(50, 10 * distance), rng=rng, trace=trace, sources=sources, **kw)
     boards = [start] + [b for _, b in trace]
     if instance not in _DIST:
         _DIST[instance] = board.multi_bfs(start)
@@ -156,9 +169,12 @@ def job(args):
     optimal = {f"opt {b}": int(((idx == i) & keep & better).sum()) for i, b in enumerate(DBINS)}
     every = ages(boards)
     by_source = {}
-    for src in ("forward", "backward", "commit"):
+    for src in ("forward", "backward", "commit", "intuition", "flat", "and-or"):
         by_source[f"{src} moves"] = sum(x == src for x in sources)
         by_source[f"{src} undos"] = sum(x == src and a_ == 2 for x, a_ in zip(sources, every))
+        mine = np.array([x == src for x in sources[:len(d0)]], bool)
+        by_source[f"{src} scored"] = int((mine & (d0 > 1)).sum())
+        by_source[f"{src} optimal"] = int((mine & (d0 > 1) & better).sum())
     a = [x for x in every if x is not None]
     pa = [x for x in placement_ages(boards) if x is not None]
     return {"condition": cond["name"], "beta": cond.get("beta"), "half-life": cond.get("half"),
@@ -301,6 +317,24 @@ def job_snapshot(args):
     return job(args[:3])
 
 
+def summarize_lean(df):
+    """The gamma fit's summary (skill and revisits against people) plus, per mode, its share of moves, the chance its
+    moves are optimal (2+ from the goal) and its undo rate."""
+    out, people = summarize_gamma(df)
+    rev, want = summarize_planner(df)
+    out = out.drop(columns=["gamma forward", "gamma backward", "backward chosen"])
+    out["undo (matched)"] = rev["2"]
+    out["board return (matched)"] = rev[BINS].sum(axis=1)
+    people["undo (matched)"] = want["2"]
+    people["board return (matched)"] = want[BINS].sum()
+    g = df.groupby("condition", sort=False)
+    for src in ("intuition", "flat", "and-or"):
+        out[f"{src} share"] = g[f"{src} moves"].sum() / g.moves.sum()
+        out[f"{src} optimal"] = g[f"{src} optimal"].sum() / g[f"{src} scored"].sum().replace(0, np.nan)
+        out[f"{src} undo"] = g[f"{src} undos"].sum() / g[f"{src} moves"].sum().replace(0, np.nan)
+    return out, people
+
+
 def summarize_learning(df, stages=None):
     """Per stage of people's session x gamma: the gamma fit's misfits, with the model's attempts weighted by how
     often people at that stage played each layout. Returns (table, people's targets per stage)."""
@@ -338,6 +372,17 @@ def summarize_learning(df, stages=None):
 
 if __name__ == "__main__":
     instances = sorted(hd.trials().instance.unique())
+    if sys.argv[1:2] == ["lean"]:
+        with open(paths.START, "rb") as f:
+            weights = f.read()
+        jobs = [(c, i, r) for c in LEAN for i in instances for r in range(LEAN_RUNS)]
+        random.Random(0).shuffle(jobs)
+        with mp.Pool(initializer=_init, initargs=(weights,)) as pool:
+            df = pd.DataFrame(pool.map(job, jobs, chunksize=2))
+        df.to_csv(os.path.join(paths.MODELS, "summary", "lean_profile.csv"), index=False)
+        out, people = summarize_lean(df)
+        print(pd.concat([people.to_frame("people").T, out]).round(3).T.to_string())
+        sys.exit()
     if sys.argv[1:2] in (["undo"], ["undo-smoke"]):
         with open(paths.START, "rb") as f:
             weights = f.read()

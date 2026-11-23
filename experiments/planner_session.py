@@ -22,6 +22,7 @@ with sessions.json (one record per puzzle). fit_memory.py `snapshots --run <run>
     python experiments/planner_session.py --fit-forward        # forward planning alone: rollouts x gamma
     python experiments/planner_session.py --fit-flat           # flat (moves considered x tau), with/without a check
     python experiments/planner_session.py --fit-two-mode       # sharp flat forward + AND-OR plans at impasses
+    python experiments/planner_session.py --fit-lean           # intuition + flat + one-move AND-OR deliberations
     python experiments/planner_session.py --gamma 0.5 --run planner_people_all_m10_g0.5
 
 --fit-start calibrates gamma as rushhour/surrender.py calibrated the start network: the planner (start network)
@@ -111,6 +112,14 @@ TWO_START = {f"two-mode m{m} tau {t} {tr} gamma {g}": {"two_mode": True, "consid
              for m in TWO_CONSIDER for t in TWO_TAU for tr in TWO_TRIGGER for g in TWO_GAMMA}
 
 
+# the lean student: intuition, flat planning (w_flat) and one-move AND-OR deliberations (w_ao); opening: the first
+# move a deliberation with a one-move follow-through (forward.solve_lean)
+LEAN_FLAT, LEAN_AO = (0, 0.08, 0.18), (0, 0.1, 0.2)
+LEAN_START = {f"lean flat {f} and-or {a}{' opening' if o else ''}": {"lean": True, "w_flat": f, "w_ao": a,
+                                                                       "opening": o}
+              for f in LEAN_FLAT for a in LEAN_AO for o in (False, True)}
+
+
 def _start_job(args):
     name, kw, puzzle, state, distance, run = args
     import random
@@ -120,7 +129,8 @@ def _start_job(args):
     trace = []
     kw = dict(kw)
     solve = (forward.solve_flat if kw.pop("flat", False) else
-             forward.solve_two_mode if kw.pop("two_mode", False) else forward.solve_forward)
+             forward.solve_two_mode if kw.pop("two_mode", False) else
+             forward.solve_lean if kw.pop("lean", False) else forward.solve_forward)
     out = solve(forward._W["agent"], state, max(50, round(10 * distance)), rng=rng, trace=trace, **kw)
     return {"config": name, "puzzle": puzzle, "distance": distance, "run": run,
             "moves": len(trace) if out["solved"] else None, "played": len(trace),
@@ -165,6 +175,7 @@ def main():
     ap.add_argument("--fit-forward", action="store_true")
     ap.add_argument("--fit-flat", action="store_true")
     ap.add_argument("--fit-two-mode", action="store_true")
+    ap.add_argument("--fit-lean", action="store_true")
     args = ap.parse_args()
     if args.fit_start:
         fit_start(MIXED_START, "planner_start_fit.csv")
@@ -177,6 +188,9 @@ def main():
         return
     if args.fit_two_mode:
         fit_start(TWO_START, "two_mode_start_fit.csv")
+        return
+    if args.fit_lean:
+        fit_start(LEAN_START, "lean_start_fit.csv")
         return
     with open(CALIBRATED) as f:
         config = json.load(f)
