@@ -1,4 +1,4 @@
-"""The Olieslagers et al. (2023) AND-OR model against the 42 participants, cached for notebooks/summary.ipynb.
+"""The Olieslagers et al. (2023) AND-OR model against the 42 participants, cached for notebooks/p1_summary.ipynb.
 
 The model is the port of the archive's gamma_only_model (rushhour/paper_model.py): a per-board
 distribution over the next move, from the board's AND-OR tree with lapse rate gamma. Two passes:

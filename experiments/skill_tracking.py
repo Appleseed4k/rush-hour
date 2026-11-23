@@ -1,7 +1,7 @@
 """Offline test of how a teacher should carry its estimate of the student's skill from one puzzle to the next:
 refit it from the stored history after every puzzle (bayes3), or update a running summary (a filter)?
 
-Data: the trace run (p4_dilemma, "Calibrating the Bayesian teacher's model of the student"): 8 unhelped simulated
+Data: the trace run (p1.4_dilemma, "Calibrating the Bayesian teacher's model of the student"): 8 unhelped simulated
 students x 2160 puzzles at agency 0, each puzzle's distance-to-goal path. Every model sees each student's paths in
 order and, before every move, predicts the chance that the move is optimal (one closer to the goal). They differ
 only in how skill is carried across puzzles:

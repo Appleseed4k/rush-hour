@@ -453,7 +453,7 @@ def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop",
 
 def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
                soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
-    """The lean student - the generative side of the move-by-move mixture (notebooks/forward_planning.ipynb, 2c):
+    """The lean student - the generative side of the move-by-move mixture (notebooks/p2.2_forward_planning.ipynb, 2c):
     each move is made by one of three modes, drawn independently per move:
     - with probability w_ao, a deliberation: one AND-OR pass from the board (the dest head ordering its options with
       Gumbel noise, lapse rate `gamma`), and its first move is played - one move per search, as in the paper's model;

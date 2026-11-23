@@ -1,4 +1,4 @@
-"""Pretraining curves of AND-OR's apprentices, cached for notebooks/summary.ipynb.
+"""Pretraining curves of AND-OR's apprentices, cached for notebooks/p1_summary.ipynb.
 
 Every saved checkpoint of each run (the network before training and after every epoch of every expert-iteration
 round) plays surrender.py's test puzzles - 20 pool puzzles at each of people's lengths 6, 10, 13 and 15 - RUNS

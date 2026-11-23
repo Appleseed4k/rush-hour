@@ -2,7 +2,7 @@
 
 The session student never moves back to one of its last 10 boards (a hard rule, MODEL.md). People do: on solved
 attempts of 1.5-3 x optimal (so efficiency doesn't drive it), 5.6% of their moves undo the last one and about 4%
-return to a board seen 3 or more moves earlier (notebooks/human_likeness.ipynb). The candidate replacement is a soft,
+return to a board seen 3 or more moves earlier (notebooks/p2.3_human_likeness.ipynb). The candidate replacement is a soft,
 fading memory: a move to a board the attempt last had `age` moves ago (2 = an undo) has its logit lowered by
 beta x 0.5^(age / half_life) (forward.solve_forward's soft_memory).
 

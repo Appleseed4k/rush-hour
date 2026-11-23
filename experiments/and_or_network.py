@@ -1,4 +1,4 @@
-"""Network-ordered AND-OR (deliberation only) on the humans' 70 layouts, cached for notebooks/summary.ipynb.
+"""Network-ordered AND-OR (deliberation only) on the humans' 70 layouts, cached for notebooks/p1_summary.ipynb.
 
 The apprentice's dest head orders AND-OR's candidate moves and picks what a lapse plays (PolicyAgent.heuristic, with
 Gumbel noise at temperature HEURISTIC_TEMPERATURE as during expert iteration); no intuitive moves are played - the

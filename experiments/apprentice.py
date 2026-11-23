@@ -3,7 +3,7 @@ learns from plain AND-OR's solved attempts, each later round from AND-OR ordered
 settings are phase 1's (phase 1, at tag pre-cleanup): the same
 1,000 pool puzzles every round (200 per distance bin 1-8 ... 21-30), the same validation puzzles, 4 attempts per
 puzzle, up to 40 epochs a round with patience 6 - but the expert's lapse rate (--gamma) and protect_movers
-(--protect-movers) can be set. notebooks/archive/p3_session.ipynb's gamma section compares plain AND-OR with people at
+(--protect-movers) can be set. notebooks/archive/p1.3_session.ipynb's gamma section compares plain AND-OR with people at
 each setting.
 
 Saved under models/apprentice/<run>/: config.json, and the network before training and after every epoch of every

@@ -17,7 +17,7 @@ RUNS times on each layout, capped at max(50, 10 x optimal), no giving up:
 - "AND-OR (paper)": Olieslagers et al.'s per-board AND-OR distribution at its best-fitting gamma (0.07 on people's
   moves, models/summary/and_or_humans);
 - "AND-OR (network)": and_or.solve ordered by the start network's dest head, gamma 0.07, Gumbel temperature 1 (the
-  apprentice's teacher, p8's deliberation);
+  apprentice's teacher, p2.1's deliberation);
 - "intuition": the start network's policy at temperature 1 with the 10-board memory (the session student);
 - "forward": experiments/forward.py's planner on the start network, K8 D4, lam 16, novelty half-life 80;
 - "random": uniform legal moves with the 10-board memory.

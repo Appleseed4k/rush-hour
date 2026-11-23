@@ -3,7 +3,7 @@
 <html lang="en">
 <head><meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>forward_planning</title><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.1.10/require.min.js"></script>
+<title>p2.2_forward_planning</title><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.1.10/require.min.js"></script>
 <style type="text/css">
     pre { line-height: 125%; }
 td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
@@ -7802,7 +7802,8 @@ a.anchor-link {
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h1 id="Forward-planning-for-the-student:-novelty-and-relevance-(11/21/26)">Forward planning for the student: novelty and relevance (11/21/26)<a class="anchor-link" href="#Forward-planning-for-the-student:-novelty-and-relevance-(11/21/26)">¶</a></h1><p>The fitted student plays by intuition alone: on every board it samples a move from its policy head (MODEL.md). AND-OR's
+<h1 id="p2.2:-Forward-planning-for-the-student-(11/21-11/22/26)">p2.2: Forward planning for the student (11/21-11/22/26)<a class="anchor-link" href="#p2.2:-Forward-planning-for-the-student-(11/21-11/22/26)">¶</a></h1><p><em>Part of phase 2: <code>p2_summary.ipynb</code> connects this notebook with p2.1-p2.3.</em></p>
+<p>The fitted student plays by intuition alone: on every board it samples a move from its policy head (MODEL.md). AND-OR's
 backward reasoning is only its teacher in pretraining. The question here is whether a <strong>heuristically guided forward
 planner</strong> - short rollouts, judged by how much new and goal-relevant ground they cover - is a good candidate for what
 people add as they gain expertise, and where expertise would enter it.</p>
@@ -9149,7 +9150,7 @@ search budget would have to be near zero and grow with practice.</li>
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="2b.-Forward-and-backward-together">2b. Forward and backward together<a class="anchor-link" href="#2b.-Forward-and-backward-together">¶</a></h2><p>People's revisits (notebooks/human_likeness.ipynb) ask for no novelty and a soft board memory (β 2, half-life 1),
+<h2 id="2b.-Forward-and-backward-together">2b. Forward and backward together<a class="anchor-link" href="#2b.-Forward-and-backward-together">¶</a></h2><p>People's revisits (notebooks/p2.3_human_likeness.ipynb) ask for no novelty and a soft board memory (β 2, half-life 1),
 so from here the planner ranks candidates by the value head alone. Backward reasoning joins as a second source of
 candidates: each turn, <code>backward=N</code> adds N AND-OR passes from the current board (ordered by the dest head with Gumbel
 noise, lapse rate γ) to the <code>k</code> policy rollouts - a whole plan to the goal, or the moves made until a lapse. All
@@ -9275,7 +9276,7 @@ teacher):</p>
 about half the turns. More passes help backward reasoning alone (4 vs 1: −0.65 to −1.3).</li>
 <li><strong>Without novelty the planner is much weaker on these puzzles</strong> than the novelty planner above (start: 4.88 against
 about 2.7): the price of matching people's revisits.</li>
-<li>On the human layouts (human_likeness.ipynb's table and the shared-γ fit below) the mix is efficient (1.85 ×
+<li>On the human layouts (p2.3_human_likeness.ipynb's table and the shared-γ fit below) the mix is efficient (1.85 ×
 optimal, people 2.09) but restless: it returns to an earlier board on 13.6% of moves and undoes 9% (people 9.7%,
 5.6%), because the soft memory shapes only the policy rollouts - each turn's fresh AND-OR pass can resolve a
 subgoal differently and move a car straight back.</li>

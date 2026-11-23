@@ -1,7 +1,7 @@
 """The calibrated session with the planner in the loop.
 
 The session student (MODEL.md) plays every puzzle by intuition and learns from its solved attempts. The judgement it
-learns that way doesn't help the forward + backward planner (notebooks/forward_planning.ipynb, "Judgement or depth"):
+learns that way doesn't help the forward + backward planner (notebooks/p2.2_forward_planning.ipynb, "Judgement or depth"):
 its snapshots barely lift the planner's mid-puzzle skill and undo more. Here the same session is played by the planner
 itself, so the network learns from the planner's own experience:
 

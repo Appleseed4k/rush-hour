@@ -1,5 +1,5 @@
 """This repo's plain AND-OR solver (and_or.solve, no network) on the humans' 70 layouts, over a grid of lapse rates
-gamma, with protect_movers on and off - for notebooks/archive/p3_session.ipynb's section on gamma.
+gamma, with protect_movers on and off - for notebooks/archive/p1.3_session.ipynb's section on gamma.
 
 Plain AND-OR is what expert iteration's first round learns from (student.expert_iteration with student "and_or", gamma
 0.07 by default; phase 1). Each layout is played RUNS times per (protect_movers, gamma):

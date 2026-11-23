@@ -1,7 +1,7 @@
 """Phase 2 of the switch to AND-OR's apprentice (experiments/phase2_queue.py): the three questions, as tables in
 models/summary.
 
-1. hindsight_fit.csv: each hindsight (own, W=3, W=10, full) and multiplier against people's learning (p6's fit: the
+1. hindsight_fit.csv: each hindsight (own, W=3, W=10, full) and multiplier against people's learning (p1.6's fit: the
    within-learner change in log moves / optimal per 10 trials over trials 1-30 on short (6, 10) and long (13, 15)
    puzzles, and moves / optimal in trials 1-10; misfit = sum of the three z squared).
 2. ao10_agency_seeds.csv: each teacher's end score against no teacher, paired by student, per seed and pooled over

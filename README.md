@@ -5,7 +5,9 @@ Can a teacher's help make a learner better on their own, and when does more help
 do, fits it to people's play (Olieslagers et al. 2023, 42 participants), and compares teachers that decide move
 by move whether to show the optimal move.
 
-**Start with [`notebooks/summary.ipynb`](notebooks/summary.ipynb)**: the project's progress in one place.
+**Start with the summaries**: [`notebooks/p1_summary.ipynb`](notebooks/p1_summary.ipynb) (phase 1: a student fitted to
+people, and teachers for it) and [`notebooks/p2_summary.ipynb`](notebooks/p2_summary.ipynb) (phase 2: how the student
+plans, and how human-like it is).
 **[`MODEL.md`](MODEL.md)** is the simulated student's model card: every assumption, its value, where the value
 came from, and the code behind it.
 
@@ -34,13 +36,16 @@ rushhour/              the library
   paths.py             where data and results live
 experiments/           scripts that write the caches the notebooks read (models/summary, models/sessions)
 notebooks/
-  summary.ipynb        the narrative and its figures
-  p8_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
-  forward_planning.ipynb  a forward planner for the student: novelty and relevance rollouts, the value head
-  human_likeness.ipynb   people against the models move by move: revisits, car roles, slides, timing
-  skill_filter.html    the offline test behind bayes4: carrying skill across puzzles by a filter
+  p1_summary.ipynb     phase 1's narrative and its figures: the student fitted to people, teachers, agency
+  p1.7_skill_filter.html  the offline test behind bayes4: carrying skill across puzzles by a filter
                        (experiments/skill_tracking.py)
-  archive/             p3-p7 lab notebooks, frozen with their outputs (see archive/README.md)
+  archive/             p1.3-p1.7 lab notebooks, frozen with their outputs (see archive/README.md)
+  p2_summary.ipynb     phase 2's narrative: from AND-OR and forward planners to the lean student
+  p2.1_deliberation.ipynb  network-ordered AND-OR (deliberation only) against people
+  p2.2_forward_planning.ipynb  forward planning, forward + backward, planners in the session, calibration to
+                       people's start, people's move times, the mixture of modes, the lean student
+  p2.3_human_likeness.ipynb  people against the models move by move: revisits, car roles, slides, timing;
+                       the soft memory fitted to people's revisits
 web/                   the playable Rush Hour page with teachers, for collecting human play
 data/rush_nw.txt       every puzzle with its optimal length (the analysis pool)
 23vrb-osfstorage-archive/  the paper's data (not in git)
@@ -49,18 +54,26 @@ models/                results and networks (not in git; see MODELS.md)
 
 ## Progress so far
 
-| Phase | What | Where |
+Phase 1: a student fitted to people, and teachers for it (`p1_summary`).
+
+| Step | What | Where |
 |---|---|---|
-| p1 | Port of the AND-OR model; a policy network trained as its apprentice by expert iteration | summary; tag `pre-cleanup` |
-| p2 | Teachers during expert iteration (offline teaching) | tag `pre-cleanup` |
-| p3 | Within-session learning fitted to people: giving up, starting checkpoint, AND-OR's γ | summary, `archive/p3` |
-| p4 | The assistance dilemma: agency ΔA (how much a shown move teaches) and random-help sweeps | summary, `archive/p4` |
-| p5 | The simplest good teacher: stuck-Bayes ablations down to `bayes3` (help when the chance of solving alone < θ = 0.45) | summary, `archive/p5` |
-| p6 | Hindsight labels (window × multiplier fit to people); agency sweep with equal batches | summary, `archive/p6` |
-| p7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model; a skill filter as good as bayes3's refit gives bayes4, the default teacher | `archive/p7`, `skill_filter.html` |
-| p8 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p8_deliberation` |
-| - | The student written down (`MODEL.md`, `student/spec.py`); its start switched to AND-OR's apprentice, which fits people's start (misfit 0.2) and learning rate (2.8 at ×10); hindsight, seeds and θ checked (phase 2), and the summary moved to it | `MODEL.md`, summary |
-| - | Forward planning: rollouts judged by attempt-level novelty halve moves/optimal for every network; the dest head's relevance adds nothing, the value head helps only by breaking novelty's ties, and experience enters through the policy's proposals | `forward_planning` |
+| p1.1 | Port of the AND-OR model; a policy network trained as its apprentice by expert iteration | p1_summary; tag `pre-cleanup` |
+| p1.2 | Teachers during expert iteration (offline teaching) | tag `pre-cleanup` |
+| p1.3 | Within-session learning fitted to people: giving up, starting checkpoint, AND-OR's γ | p1_summary, `archive/p1.3` |
+| p1.4 | The assistance dilemma: agency ΔA (how much a shown move teaches) and random-help sweeps | p1_summary, `archive/p1.4` |
+| p1.5 | The simplest good teacher: stuck-Bayes ablations down to `bayes3` (help when the chance of solving alone < θ = 0.45) | p1_summary, `archive/p1.5` |
+| p1.6 | Hindsight labels (window × multiplier fit to people); agency sweep with equal batches | p1_summary, `archive/p1.6` |
+| p1.7 | Toward a POMDP teacher: a fitted learning model; schedules and an upper bound put bayes3 near optimal in-model; a skill filter as good as bayes3's refit gives bayes4, the default teacher | `archive/p1.7`, `p1.7_skill_filter.html` |
+| - | The student written down (`MODEL.md`, `student/spec.py`); its start switched to AND-OR's apprentice, which fits people's start (misfit 0.2) and learning rate (2.8 at ×10); hindsight, seeds and θ checked, and the summary moved to it | `MODEL.md`, p1_summary |
+
+Phase 2: how the student plans, and how human-like it is (`p2_summary`).
+
+| Step | What | Where |
+|---|---|---|
+| p2.1 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p2.1_deliberation` |
+| p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the lean student, which starts and learns like people | `p2.2_forward_planning` |
+| p2.3 | People against the models move by move; the hard 10-board memory replaced by a soft one fitted to people's revisits | `p2.3_human_likeness` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.

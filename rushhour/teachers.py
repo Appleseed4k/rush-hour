@@ -263,7 +263,7 @@ class Bayesian4(Teacher):
     sessions'), by backward induction over (moves made, difficulty, distance); on each turn averaged over the
     current belief about the puzzle's difficulty.
 
-    History: the last of a line of Bayesian teachers (p4-p5; the older ones, "bayes", "stuck-bayes1" and "bayes3",
+    History: the last of a line of Bayesian teachers (p1.4-p1.5; the older ones, "bayes", "stuck-bayes1" and "bayes3",
     are at tag pre-cleanup). It is bayes3 - the simplest of the stuck-Bayes ablations, each part it keeps needed
     (difficulty updated within the puzzle: without, -0.12 learning at matched spend; backward mistakes: without,
     -0.15) - with the refit of skill from the stored history after every puzzle replaced by the filter. Offline
