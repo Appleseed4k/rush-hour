@@ -16,8 +16,20 @@ intuition session (ao_people_all_m10 in the archive; snapshots after 18, 36, 54 
 averaged) - so that a rising w isn't just people's intuition improving.
 
     python experiments/mode_mixture.py   # writes models/summary/mode_mixture/{moves.csv.gz, fit.csv, people.csv}
+
+Backward reasoning (`andor`): a third component, the two-mode student's backward mode - one AND-OR pass from the board
+(the network's dest head ordering its options with Gumbel noise, lapse rate 0.07), scored by its first move. That
+probability has no closed form, so it is estimated by sampling passes from every board people played on (100 with the
+start network; 25 per student with a stage's 8 snapshots). Each move is scored as the first move of a fresh pass (plan
+following - later steps of a plan made earlier - is not modelled). The three-way weights (intuition, flat, AND-OR) are
+fitted per stage, per distance to the goal, per fast / slow move and per person, with (consider, tau) from the two-way
+fit and eps refitted.
+
+    python experiments/mode_mixture.py andor   # adds andor_counts.npz, fit3.csv, people3.csv
 """
+import multiprocessing as mp
 import os
+import random
 import sys
 
 import numpy as np
@@ -26,6 +38,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from rushhour import board, human_data as hd, paths  # noqa: E402
+from rushhour.and_or import solve as and_or_solve  # noqa: E402
 from rushhour.student import PolicyAgent  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -179,6 +192,175 @@ def per_person(df, p_int, pf, eps, min_moves=150):
     return pd.DataFrame(rows)
 
 
+N_START, N_STUDENT, AO_GAMMA = 100, 25, 0.07
+STEP = 0.02
+SIMPLEX = np.array([(a, b) for a in np.arange(0, 1 + 1e-9, STEP) for b in np.arange(0, 1 - a + 1e-9, STEP)],
+                   dtype=np.float32)  # (w flat, w AND-OR); w intuition = 1 - both
+_AO = {}
+
+
+def _ao_job(job):
+    """AND-OR first-move counts for a chunk of boards: [(board, legal moves, passes)] with the network at `path`."""
+    path, chunk, seed = job
+    if _AO.get("path") != path:
+        torch.set_num_threads(1)
+        agent = PolicyAgent.load(path)
+        agent.temperature = 1.0
+        _AO.update(path=path, agent=agent)
+    agent = _AO["agent"]
+    random.seed(seed)
+    out = []
+    for b, moves, n in chunk:
+        idx = {m: i for i, m in enumerate(moves)}
+        c = np.zeros(len(moves), np.int32)
+        for _ in range(n):
+            att = and_or_solve(b, heuristic=agent.heuristic, gamma=AO_GAMMA)
+            plan = att if type(att) is list else att[1]
+            if plan and plan[0] in idx:
+                c[idx[plan[0]]] += 1
+        out.append(c)
+    return out
+
+
+def andor_counts(parents, df):
+    """Per move: AND-OR first-move counts over its legal moves and the passes run - with the start network (every
+    move), and pooled over the stage's 8 snapshots (moves in stages after the first)."""
+    cache = os.path.join(OUT, "andor_counts.npz")
+    if os.path.exists(cache):
+        z = np.load(cache, allow_pickle=True)
+        return list(z["start"]), list(z["stage"]), z["n_start"], z["n_stage"]
+    jobs, where = [], []
+
+    def add(path, ids, n, tag):
+        uniq = {}
+        for k in ids:
+            uniq.setdefault(parents[k][0], []).append(k)
+        items = [(b, parents[ks[0]][1], n) for b, ks in uniq.items()]
+        for i in range(0, len(items), 40):
+            jobs.append((path, items[i:i + 40], len(jobs)))
+            where.append((tag, [uniq[b] for b, _, _ in items[i:i + 40]]))
+
+    add(paths.START, range(len(parents)), N_START, "start")
+    snaps = fm.snapshot_networks()
+    for st, n in fm.SNAP_OF.items():
+        if n == 0:
+            continue
+        ids = np.nonzero((df.stage == st).values)[0]
+        for name, f in snaps.items():
+            if name.split()[0] == str(n):
+                add(f, ids, N_STUDENT, "stage")
+    start = [None] * len(parents)
+    stage = [np.zeros(len(parents[k][1]), np.int32) for k in range(len(parents))]
+    with mp.Pool() as pool:
+        for i, res in enumerate(pool.imap(_ao_job, jobs)):
+            tag, groups = where[i]
+            for c, ks in zip(res, groups):
+                for k in ks:
+                    if tag == "start":
+                        start[k] = c
+                    else:
+                        stage[k] = stage[k] + c
+            if i % 200 == 0:
+                print(f"AND-OR: {i} of {len(jobs)} chunks", flush=True)
+    n_start = np.full(len(parents), N_START)
+    n_stage = np.where((df.stage == list(fm.SNAP_OF)[0]).values, N_START, 8 * N_STUDENT)
+    for k in np.nonzero(n_stage == N_START)[0]:
+        stage[k] = start[k]
+    np.savez(cache, start=np.array(start, dtype=object), stage=np.array(stage, dtype=object), n_start=n_start,
+             n_stage=n_stage)
+    return start, stage, n_start, n_stage
+
+
+def ll3(pi, pf, pa, n, eps):
+    """Summed log likelihood of the moves for every (w flat, w AND-OR) on SIMPLEX."""
+    wf, wa = SIMPLEX[:, :1], SIMPLEX[:, 1:]
+    f32 = lambda x: x[None].astype(np.float32)  # noqa: E731
+    mix = (1 - wf - wa) * f32(pi) + wf * f32(pf) + wa * f32(pa)
+    return np.log((1 - eps) * mix + eps / n[None]).sum(axis=1)
+
+
+def three_way(df, pi, pf, pa, eps, rng, boots=100):
+    """Weights (intuition, flat, AND-OR) with 90% people-bootstrap intervals, per stage, distance and speed; and the
+    log likelihood per move of intuition alone, intuition + flat, intuition + AND-OR and all three."""
+    n = df.n.values
+    one_flat = np.abs(SIMPLEX[:, 1]) < 1e-6
+    one_ao = np.abs(SIMPLEX[:, 0]) < 1e-6
+    rows = []
+    for by in ("stage", "dist", "speed"):
+        for level, g in df.groupby(by, observed=True):
+            idx = g.index.values
+            ll = ll3(pi[idx], pf[idx], pa[idx], n[idx], eps)
+            k = ll.argmax()
+            people = g.who.unique()
+            by_who = {w: g.index[g.who == w].values for w in people}
+            boot = []
+            for _ in range(boots):
+                pick = np.concatenate([by_who[w] for w in rng.choice(people, len(people))])
+                boot.append(SIMPLEX[ll3(pi[pick], pf[pick], pa[pick], n[pick], eps).argmax()])
+            boot = np.array(boot)
+            wf, wa = SIMPLEX[k]
+            rows.append({"by": by, "level": level, "moves": len(idx), "people": len(people),
+                         "w intuition": 1 - wf - wa, "w flat": wf, "w AND-OR": wa,
+                         "w flat lo": np.percentile(boot[:, 0], 5), "w flat hi": np.percentile(boot[:, 0], 95),
+                         "w AND-OR lo": np.percentile(boot[:, 1], 5), "w AND-OR hi": np.percentile(boot[:, 1], 95),
+                         "w intuition lo": np.percentile(1 - boot.sum(1), 5),
+                         "w intuition hi": np.percentile(1 - boot.sum(1), 95),
+                         "ll intuition": ll[0] / len(idx), "ll + flat": ll[one_ao].max() / len(idx),
+                         "ll + AND-OR": ll[one_flat].max() / len(idx), "ll all three": ll[k] / len(idx)})
+    return pd.DataFrame(rows)
+
+
+def people3(df, pi, pf, pa, eps, min_moves=150):
+    rows = []
+    for who, g in df.groupby("who"):
+        early, late = g.index[g.trial <= 27].values, g.index[g.trial >= 28].values
+        if len(early) < min_moves or len(late) < min_moves:
+            continue
+        e = SIMPLEX[ll3(pi[early], pf[early], pa[early], df.n.values[early], eps).argmax()]
+        l_ = SIMPLEX[ll3(pi[late], pf[late], pa[late], df.n.values[late], eps).argmax()]
+        rows.append({"who": who, "w flat early": e[0], "w AND-OR early": e[1], "w flat late": l_[0],
+                     "w AND-OR late": l_[1]})
+    return pd.DataFrame(rows)
+
+
+def main_andor():
+    df, parents, children = records()
+    df["stage"] = pd.cut(df.trial, [0, 9, 27, 45, 1000], labels=list(fm.SNAP_STAGES))
+    df["speed"] = np.where(df.seconds > SLOW * df.groupby("who").seconds.transform("median"), "slow", "fast")
+    df["dist"] = pd.cut(df.distance, [1, 3, 6, 9, 99], labels=["2-3", "4-6", "7-9", "10+"])
+    saved = pd.read_csv(os.path.join(OUT, "moves.csv.gz"), dtype={"who": str})
+    assert len(saved) == len(df) and (saved.who.values == df.who.values).all() and \
+        (saved.move.values == df.move.values).all(), "moves.csv.gz doesn't match the replayed moves"
+    start, stage, n_start, n_stage = andor_counts(parents, df)
+    chosen = df.chosen.values
+    pa = {"start network": np.array([c[k] for c, k in zip(start, chosen)]) / n_start,
+          "stage's network": np.array([c[k] for c, k in zip(stage, chosen)]) / n_stage}
+    df["p AND-OR (start network)"] = pa["start network"]
+    df["p AND-OR (stage's network)"] = pa["stage's network"]
+    rng = np.random.default_rng(0)
+    tables, people = [], []
+    for version in ("start network", "stage's network"):
+        pi = saved[f"p intuition ({version})"].values
+        pf = saved[f"p flat ({version})"].values
+        eps = max(EPS, key=lambda e: ll3(pi, pf, pa[version], df.n.values, e).max())
+        t = three_way(df, pi, pf, pa[version], eps, rng).assign(version=version, eps=eps)
+        tables.append(t)
+        people.append(people3(df, pi, pf, pa[version], eps).assign(version=version))
+        print(f"== {version} (eps {eps}); AND-OR gives the played move {pa[version].mean():.3f} on average "
+              f"(intuition {pi.mean():.3f}, flat {pf.mean():.3f})")
+        print(t.drop(columns=["version"]).round(3).to_string(index=False), flush=True)
+        pp = people[-1]
+        print(f"per person ({len(pp)}): AND-OR early {pp['w AND-OR early'].mean():.2f} late "
+              f"{pp['w AND-OR late'].mean():.2f}; flat early {pp['w flat early'].mean():.2f} late "
+              f"{pp['w flat late'].mean():.2f}", flush=True)
+    pd.concat(tables).to_csv(os.path.join(OUT, "fit3.csv"), index=False)
+    pd.concat(people).to_csv(os.path.join(OUT, "people3.csv"), index=False)
+    saved["p AND-OR (start network)"] = pa["start network"]
+    saved["p AND-OR (stage's network)"] = pa["stage's network"]
+    saved.to_csv(os.path.join(OUT, "moves.csv.gz"), index=False)
+    print("saved to", OUT)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -236,4 +418,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main_andor() if sys.argv[1:2] == ["andor"] else main()
