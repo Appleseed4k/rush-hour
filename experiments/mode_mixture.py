@@ -26,6 +26,23 @@ fitted per stage, per distance to the goal, per fast / slow move and per person,
 fit and eps refitted.
 
     python experiments/mode_mixture.py andor   # adds andor_counts.npz, fit3.csv, people3.csv
+
+The two-mode switch (`loops`): the two-mode student turns to an AND-OR plan when a move leads back to a board the
+attempt had within the last 10 moves (a loop) and follows it for a few moves. People's loops are observable (the
+human profile's board age), so their moves are split by how long ago their last loop was - on the board a loop just
+led to (1 move after), 2-3 moves after, or elsewhere (4+ moves after one, or none yet) - and by the loop's kind (an
+undo, age 2, or a longer return, 3-10) - and the three-way weights are refitted per group, and per group x distance to
+the goal and x move speed (after a loop, boards and moves differ in both).
+
+    python experiments/mode_mixture.py loops   # writes loops.csv
+
+Plan, then execute (`slow`): if a slow move is a deliberation that produces a backward plan, the quick moves after it
+carry the plan out. Every move of an attempt is slow if it took over 2.5 x the person's median time (all their moves);
+mixture moves are split into the slow moves themselves, fast moves 1 or 2-3 moves after the attempt's last slow move,
+and other fast moves (4+ after one, or none yet), and by whether that slow move opened the attempt (move 0, the 2.9 s
+first look) or came mid-attempt; the three-way weights are refitted per group and per group x distance to the goal.
+
+    python experiments/mode_mixture.py slow    # writes slow.csv
 """
 import multiprocessing as mp
 import os
@@ -361,6 +378,135 @@ def main_andor():
     print("saved to", OUT)
 
 
+LOOP_WINDOW = 10
+
+
+def loop_groups(df):
+    """Per mixture move: moves since the attempt's last loop ("1", "2-3", "elsewhere") and that loop's kind."""
+    prof = pd.read_csv(os.path.join(paths.MODELS, "summary", "human_profile", "moves.csv.gz"), dtype={"who": str})
+    prof = prof[prof.source == "people"].sort_values(["who", "instance", "attempt", "move"])
+    keys = ["who", "instance", "attempt"]
+    since, kind = [], []
+    for _, g in prof.groupby(keys, sort=False):
+        last, last_kind = None, None
+        for t, age in zip(g.move.values, g["board age"].values):
+            since.append(None if last is None else t - last)
+            kind.append(last_kind)
+            if age == age and age <= LOOP_WINDOW:  # move t led back to a recent board
+                last, last_kind = t, "undo" if age == 2 else "longer"
+    prof = prof.assign(since=since, kind=kind)
+    out = df.merge(prof[keys + ["move", "since", "kind"]], on=keys + ["move"], how="left", validate="1:1")
+    out["after loop"] = np.select([out.since == 1, out.since.isin([2, 3])], ["1", "2-3"], "elsewhere")
+    out.loc[out["after loop"] == "elsewhere", "kind"] = None
+    return out
+
+
+def weights(df, pi, pf, pa, eps, groups, rng, boots=100, first="after loop"):
+    """Three-way weights with 90% people-bootstrap intervals for each group (name -> row indices)."""
+    n = df.n.values
+    rows = []
+    for name, idx in groups.items():
+        if len(idx) < 200:
+            continue
+        g = df.iloc[idx]
+        ll = ll3(pi[idx], pf[idx], pa[idx], n[idx], eps)
+        wf, wa = SIMPLEX[ll.argmax()]
+        by_who = {w: idx[(g.who == w).values] for w in g.who.unique()}
+        people = list(by_who)
+        boot = np.array([SIMPLEX[ll3(pi[k], pf[k], pa[k], n[k], eps).argmax()]
+                         for k in (np.concatenate([by_who[w] for w in rng.choice(people, len(people))])
+                                   for _ in range(boots))])
+        rows.append({**dict(zip((first, "breakdown", "level"), name)), "moves": len(idx), "people": len(people),
+                     "w intuition": 1 - wf - wa, "w flat": wf, "w AND-OR": wa,
+                     "w AND-OR lo": np.percentile(boot[:, 1], 5), "w AND-OR hi": np.percentile(boot[:, 1], 95),
+                     "w flat lo": np.percentile(boot[:, 0], 5), "w flat hi": np.percentile(boot[:, 0], 95),
+                     "mean p AND-OR / p intuition": np.mean(pa[idx]) / np.mean(pi[idx]),
+                     "slow": (g.speed == "slow").mean()})
+    return pd.DataFrame(rows)
+
+
+def main_loops():
+    saved = pd.read_csv(os.path.join(OUT, "moves.csv.gz"), dtype={"who": str})
+    df = loop_groups(saved)
+    df["dist"] = pd.cut(df.distance, [1, 3, 6, 9, 99], labels=["2-3", "4-6", "7-9", "10+"]).astype(str)
+    fit3 = pd.read_csv(os.path.join(OUT, "fit3.csv"))
+    rng = np.random.default_rng(0)
+    tables = []
+    for version in ("start network", "stage's network"):
+        pi = df[f"p intuition ({version})"].values
+        pf = df[f"p flat ({version})"].values
+        pa = df[f"p AND-OR ({version})"].values
+        eps = fit3[fit3.version == version].eps.iloc[0]
+        groups = {}
+        for a, g in df.groupby("after loop"):
+            groups[(a, "all", "all")] = g.index.values
+            for by in ("dist", "speed", "kind"):
+                if by == "kind" and a == "elsewhere":
+                    continue
+                for level, h in g.groupby(by):
+                    groups[(a, by, level)] = h.index.values
+        t = weights(df, pi, pf, pa, eps, groups, rng).assign(version=version, eps=eps)
+        tables.append(t)
+        print(f"== {version} (eps {eps})")
+        print(t.drop(columns=["version"]).round(3).to_string(index=False), flush=True)
+    pd.concat(tables).to_csv(os.path.join(OUT, "loops.csv"), index=False)
+    print(df["after loop"].value_counts().to_dict())
+    print("saved to", OUT)
+
+
+def slow_groups(df):
+    """Per mixture move: "slow" (itself), "1" / "2-3" (a fast move that many moves after the attempt's last slow
+    move), "other fast"; and whether that slow move opened the attempt."""
+    prof = pd.read_csv(os.path.join(paths.MODELS, "summary", "human_profile", "moves.csv.gz"), dtype={"who": str})
+    prof = prof[(prof.source == "people") & prof.seconds.notna()].sort_values(["who", "instance", "attempt", "move"])
+    prof["is slow"] = prof.seconds > SLOW * prof.groupby("who").seconds.transform("median")
+    keys = ["who", "instance", "attempt"]
+    since, opener = [], []
+    for _, g in prof.groupby(keys, sort=False):
+        last = None
+        for t, slow in zip(g.move.values, g["is slow"].values):
+            since.append(None if last is None else t - last)
+            opener.append(None if last is None else ("opening" if last == 0 else "mid-attempt"))
+            if slow:
+                last = t
+    prof = prof.assign(since=since, opener=opener)
+    out = df.merge(prof[keys + ["move", "since", "opener", "is slow"]], on=keys + ["move"], how="left",
+                   validate="1:1")
+    out["after slow"] = np.select([out["is slow"] == True, out.since == 1, out.since.isin([2, 3])],  # noqa: E712
+                                  ["slow", "1", "2-3"], "other fast")
+    out.loc[out["after slow"].isin(["slow", "other fast"]), "opener"] = None
+    return out
+
+
+def main_slow():
+    saved = pd.read_csv(os.path.join(OUT, "moves.csv.gz"), dtype={"who": str})
+    df = slow_groups(saved)
+    df["dist"] = pd.cut(df.distance, [1, 3, 6, 9, 99], labels=["2-3", "4-6", "7-9", "10+"]).astype(str)
+    fit3 = pd.read_csv(os.path.join(OUT, "fit3.csv"))
+    rng = np.random.default_rng(0)
+    tables = []
+    for version in ("start network", "stage's network"):
+        pi = df[f"p intuition ({version})"].values
+        pf = df[f"p flat ({version})"].values
+        pa = df[f"p AND-OR ({version})"].values
+        eps = fit3[fit3.version == version].eps.iloc[0]
+        groups = {}
+        for a, g in df.groupby("after slow"):
+            groups[(a, "all", "all")] = g.index.values
+            for by in ("dist", "opener"):
+                if by == "opener" and a in ("slow", "other fast"):
+                    continue
+                for level, h in g.groupby(by):
+                    groups[(a, by, level)] = h.index.values
+        t = weights(df, pi, pf, pa, eps, groups, rng, first="after slow").assign(version=version, eps=eps)
+        tables.append(t)
+        print(f"== {version} (eps {eps})")
+        print(t.drop(columns=["version"]).round(3).to_string(index=False), flush=True)
+    pd.concat(tables).to_csv(os.path.join(OUT, "slow.csv"), index=False)
+    print(df["after slow"].value_counts().to_dict())
+    print("saved to", OUT)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -418,4 +564,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main_andor() if sys.argv[1:2] == ["andor"] else main()
+    {"andor": main_andor, "loops": main_loops, "slow": main_slow}.get(sys.argv[1] if sys.argv[1:] else "", main)()
