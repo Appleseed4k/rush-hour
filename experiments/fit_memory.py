@@ -31,8 +31,19 @@ attempts are weighted by how often people at that stage played each layout, and 
 
     python experiments/fit_memory.py planner   # writes models/summary/memory_fit_planner.csv
     python experiments/fit_memory.py gamma     # writes models/summary/gamma_fit.csv
+Judgement or depth (`snapshots`): the start network can't reach later people's mid-puzzle skill at any gamma. The
+session student's own learning changes its judgement: the calibrated session (ao_people_all_m10, 8 students, x10,
+full hindsight; snapshots in the archive) saved each student's network after 18, 36 and 54 of people's trials. Each
+snapshot plays the 70 layouts by intuition (as in the session) and in the mixed planner over a coarse gamma grid, and
+is fitted to the stage of people's session it sits in the middle of (trials 10-27, 28-45, 46+; the start network to
+1-9, its planner runs taken from gamma_learning.csv).
+
     python experiments/fit_memory.py learning  # writes models/summary/gamma_learning.csv
+    python experiments/fit_memory.py snapshots # writes models/summary/gamma_snapshots.csv
+    python experiments/fit_memory.py snapshots --run planner_people_all_m10  # gamma_snapshots_<run>.csv: a run's
+                                               # own snapshots (experiments/planner_session.py), start not rerun
 """
+import glob
 import multiprocessing as mp
 import os
 import random
@@ -90,6 +101,17 @@ UNDO = [{"name": "mixed (gamma 0.03)", "kw": _MIX},
         {"name": "commit to plan", "kw": {**_MIX, "commit": "plan"}},
         {"name": "plan stays a candidate", "kw": {**_MIX, "commit": "candidate"}},
         {"name": "commit + candidate memory x4", "kw": {**_MIX, "commit": "plan", "candidate_memory": 4}}]
+ARCHIVE_RUN = os.path.join(os.path.dirname(os.path.dirname(paths.ROOT)), "rush-hour-archive", "models", "sessions",
+                           "ao_people_all_m10", "no_teacher")
+SNAP_TRIALS = (18, 36, 54)  # x 10 = the simulated puzzles of the saved snapshots
+SNAP_STAGES = {"1-9": (1, 9), "10-27": (10, 27), "28-45": (28, 45), "46+": (46, 1000)}
+SNAP_OF = {"1-9": 0, "10-27": 18, "28-45": 36, "46+": 54}  # the snapshot (trials played) for each stage
+SNAP_GRID = (0.01, 0.03, 0.1, 0.3)
+SNAP_RUNS = {"intuition": 2, "mixed": 1}  # per student and layout
+SNAPSHOT = ([{"name": f"after {n} trials, intuition", "snapshot": n, "kind": "intuition", "kw": {"k": 1}}
+             for n in (0,) + SNAP_TRIALS]
+            + [{"name": f"after {n} trials, gamma {g}", "snapshot": n, "kind": "mixed", "gamma forward": g,
+                "gamma backward": g, "kw": LEARN[LEARN_GRID.index(g)]["kw"]} for n in SNAP_TRIALS for g in SNAP_GRID])
 STAGES = {"1-10": (1, 10), "11-20": (11, 20), "21-35": (21, 35), "36+": (36, 1000)}
 _DIST = {}
 
@@ -144,7 +166,8 @@ def job(args):
             "instance": instance, "run": run, "optimal": distance, "moves": len(trace),
             "solved": out["solved"], "ages": " ".join(map(str, a)), "placement ages": " ".join(map(str, pa)),
             "gamma forward": cond.get("gamma forward"), "gamma backward": cond.get("gamma backward"),
-            "chose backward": out.get("backward"), **totals, **optimal, **by_source}
+            "chose backward": out.get("backward"), "snapshot": cond.get("snapshot"), "kind": cond.get("kind"),
+            **totals, **optimal, **by_source}
 
 
 def binned(df, column="ages", prefix=""):
@@ -262,14 +285,31 @@ def summarize_undo(df):
     return out, people
 
 
-def summarize_learning(df):
+def snapshot_networks(folder=ARCHIVE_RUN):
+    """{name: path}: the start network and every student's snapshot in a session run's teacher folder (default:
+    the calibrated session's, in the archive)."""
+    nets = {"0": paths.START}
+    for n in SNAP_TRIALS:
+        for f in sorted(glob.glob(os.path.join(folder, f"student*_puzzle{10 * n:03d}.pt"))):
+            nets[f"{n} {os.path.basename(f)[:9]}"] = f
+    return nets
+
+
+def job_snapshot(args):
+    """job() with the network named in args[3] (loaded by forward._init)."""
+    forward._W["agent"] = forward._W["agents"][args[3]]
+    return job(args[:3])
+
+
+def summarize_learning(df, stages=None):
     """Per stage of people's session x gamma: the gamma fit's misfits, with the model's attempts weighted by how
     often people at that stage played each layout. Returns (table, people's targets per stage)."""
+    stages = stages or STAGES
     df = binned(binned(df), "placement ages", "car ").assign(ratio=df.moves / df.optimal)
     mv = _people()
     first = mv.groupby(["who", "instance", "attempt"]).agg(trial=("trial", "first"), instance_=("instance", "first"))
     rows, people = [], {}
-    for stage, (lo, hi) in STAGES.items():
+    for stage, (lo, hi) in stages.items():
         mix = first[first.trial.between(lo, hi)].instance_.value_counts()
         w = df.instance.map(mix).fillna(0) / df.groupby(["condition", "instance"]).run.transform("size")
         target, _, placed = people_target((lo, hi))
@@ -287,6 +327,8 @@ def summarize_learning(df):
             skill = ((opt - opt_p.values) ** 2 / opt_p.values).sum() + (ratio - ratio_p) ** 2 / ratio_p
             revisit = ((board_ - target) ** 2 / target).sum() + ((car - placed) ** 2 / placed).sum()
             rows.append({"stage": stage, "condition": cond, "gamma": d["gamma forward"].iloc[0],
+                         "snapshot": d["snapshot"].iloc[0] if "snapshot" in d else 0,
+                         "kind": d["kind"].iloc[0] if "kind" in d else "mixed",
                          **{f"optimal {b}": opt[b] for b in DBINS}, "moves / optimal": ratio,
                          **{f"board {b}": board_[b] for b in BINS}, "skill misfit": skill,
                          "revisit misfit": revisit, "misfit": skill + revisit,
@@ -309,6 +351,43 @@ if __name__ == "__main__":
             df.to_csv(os.path.join(paths.MODELS, "summary", "undo_fit.csv"), index=False)
         out, people = summarize_undo(df)
         print(pd.concat([people.to_frame("people").T, out]).round(3).T.to_string())
+        sys.exit()
+    if sys.argv[1:2] in (["snapshots"], ["snapshots-smoke"]):
+        smoke = sys.argv[1] == "snapshots-smoke"
+        run = sys.argv[sys.argv.index("--run") + 1] if "--run" in sys.argv else None
+        nets = snapshot_networks(os.path.join(paths.SESSIONS, run, "no_teacher") if run else ARCHIVE_RUN)
+        assert len(nets) == 1 + 8 * len(SNAP_TRIALS), f"{len(nets)} networks"
+        weights = {}
+        for name, f in nets.items():
+            with open(f, "rb") as fh:
+                weights[name] = fh.read()
+        print(len(nets), "networks", flush=True)
+        jobs = []
+        for c in SNAPSHOT:
+            names = ["0"] if c["snapshot"] == 0 else [m for m in nets if m.split()[0] == str(c["snapshot"])]
+            for i in (instances[:4] if smoke else instances):
+                for sname in names:
+                    for r in range(1 if smoke else SNAP_RUNS[c["kind"]] * (8 if c["snapshot"] == 0 else 1)):
+                        jobs.append((c, i, f"{sname}|{r}", sname))
+        if smoke:
+            jobs = [j for j in jobs if j[0]["kind"] == "intuition" or j[0]["gamma forward"] == 0.1][:200]
+        if run:  # the start network is shared with the archive's run: only the run's own snapshots
+            jobs = [j for j in jobs if j[0]["snapshot"] != 0]
+        random.Random(0).shuffle(jobs)
+        rows = []
+        with mp.Pool(4 if smoke else None, initializer=forward._init, initargs=(weights,)) as pool:
+            for n, row in enumerate(pool.imap_unordered(job_snapshot, jobs, chunksize=1), 1):
+                rows.append(row)
+                if n % 500 == 0:
+                    print(n, "of", len(jobs), flush=True)
+        df = pd.DataFrame(rows)
+        if not smoke:
+            df.to_csv(os.path.join(paths.MODELS, "summary", f"gamma_snapshots{'_' + run if run else ''}.csv"),
+                      index=False)
+        out, people = summarize_learning(df, SNAP_STAGES)
+        print(people.round(3).to_string())
+        print(out[["stage", "condition", "misfit", "skill misfit", "revisit misfit", "optimal 7-9",
+                   "moves / optimal", "solved"]].round(3).to_string())
         sys.exit()
     if sys.argv[1:2] == ["learning"]:
         with open(paths.START, "rb") as f:

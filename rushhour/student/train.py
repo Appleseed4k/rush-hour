@@ -457,7 +457,7 @@ def _log_losses(record, losses, puzzle, kind):
 def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200, memory=10, explore=1.0,
                      window=10, encode=1.0, steps=1, block=1, seed=0, on_puzzle=None,
                      surrender=None, shown_weight=1.0, judge=None, progress_weight=0.0, progress_tail=0.2,
-                     labels="own", agency_step="off", even_batches=False, log_loss=False):
+                     labels="own", agency_step="off", even_batches=False, log_loss=False, solver=None):
     """A session in which a simulated, pure-intuition student (`agent`) learns online, a
     few puzzles at a time, under human-like limits on learning:
 
@@ -503,6 +503,9 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
     judge). `on_puzzle(n, agent)`, if given, is called after each update with
     the number of puzzles played so far - e.g. to snapshot the student.
 
+    `solver`, if given, plays each attempt instead of solve_intuition: solver(agent, state, cap, rng, gives_up)
+    returning solve_intuition's dict (e.g. a planner; experiments/planner_session.py). No teacher with a solver.
+
     `log_loss` also records, per puzzle, what its examples gave the update: "loss" = {kind: sums of
     example_losses over its examples, measured just before the update that learns from them}, kind "own" or
     "shown" (on a board where a move was shown; "progress" for progress labels), and "update" = online_update's
@@ -524,8 +527,12 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
             if teacher is not None:
                 teacher.start(state, rng)
             gives_up = surrender.for_puzzle(state, sum(len(r["moves"]) for r in results)) if surrender else None
-            results.append(solve_intuition(agent, state, _cap(max_steps, state), memory, explore, teacher, rng,
-                                           gives_up))
+            if solver is not None:
+                assert teacher is None, "a solver plays without a teacher"
+                results.append(solver(agent, state, _cap(max_steps, state), rng, gives_up))
+            else:
+                results.append(solve_intuition(agent, state, _cap(max_steps, state), memory, explore, teacher, rng,
+                                               gives_up))
             if teacher is not None:
                 teacher.end_attempt(results[-1])
             if results[-1]["solved"] or results[-1]["surrendered"]:

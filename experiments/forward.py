@@ -107,7 +107,7 @@ def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=Fal
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
                   relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None,
-                  candidate_memory=0.0, commit=None, sources=None):
+                  candidate_memory=0.0, commit=None, sources=None, surrender=None):
     """One attempt by the forward planner (module docstring). proposals="uniform": rollout moves drawn uniformly
     from the legal ones (same avoidance), so the network acts only through relevance (or value).
 
@@ -147,7 +147,10 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
     the next turn's candidates (judged alike; a whole plan to the goal still counts as solving).
     `sources`, if a list, gets "forward", "backward" or "commit" for every move played.
 
-    Returns {"solved", "moves", "ties", "backward"} - backward: turns on which a backward plan was chosen; ties: turns on which every rollout had the same novelty score (with
+    `surrender` (a function of moves made, as solve_intuition's): after each move that doesn't solve the puzzle, the
+    student gives up with that probability (drawn from `rng`).
+
+    Returns {"solved", "surrendered", "moves", "ties", "backward"} - backward: turns on which a backward plan was chosen; ties: turns on which every rollout had the same novelty score (with
     "novelty", nothing to choose between, so a plain policy sample; with "novelty then value", the value decides)."""
     rng = rng or random
     uniform = proposals == "uniform"
@@ -271,12 +274,199 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
             trace.append((move, state))
         if sources is not None:
             sources.append(source)
+        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(moves):
+            return {"solved": False, "surrendered": True, "moves": moves, "ties": ties, "backward": chose_backward}
         last_board[state] = moves
         recent.append(state)
         seen.update(state)
         for f in state:
             last_seen[f] = moves
-    return {"solved": _red_steps(state) <= 0, "moves": moves, "ties": ties, "backward": chose_backward}
+    return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "ties": ties,
+            "backward": chose_backward}
+
+
+def solve_flat(agent, state, max_steps, consider=3, tau=1.0, check=False, rollout_gamma=0.3, depth=20, retries=2,
+               soft_memory=(2, 1), rng=None, trace=None, surrender=None, rejections=None):
+    """Flat, then (optionally) fast - the novice planner of Collins et al.: each turn the student considers only the
+    policy's `consider` most likely moves (consider=None: every legal move), looks one move deep at each (the value
+    head's moves to go from the board it leads to) and picks one by a softmax over -moves to go / `tau` (a move that
+    solves the puzzle is always taken). The soft board memory (beta x 0.5^(age / half-life) for a move back to a board
+    the attempt had `age` moves ago) lowers a move's policy score when choosing what to consider, and its choice score.
+
+    check=True adds one simulated run from the chosen move: a policy rollout (soft memory, each move past the first
+    continuing with probability 1 - rollout_gamma, at most `depth`). The move is played if the rollout solves the puzzle
+    or ends on a board the value head rates closer to the goal than the current one; otherwise it is rejected and
+    another considered move is picked from the rest, up to `retries` rejections (then the next pick is played
+    unchecked). `rejections`, if a list, gets the number of rejections on every turn.
+
+    Returns {"solved", "surrendered", "moves", "checks"} (checks: rollouts run)."""
+    rng = rng or random
+    orientations = board.car_orientations(state)
+    last_board = {state: 0}
+    beta, half = soft_memory if soft_memory else (0.0, 1.0)
+
+    def penalty(b, now, extra=None):
+        when = extra.get(b, last_board.get(b)) if extra else last_board.get(b)
+        return 0.0 if when is None else beta * 0.5 ** ((now + 1 - when) / half)
+
+    moves, checks = 0, 0
+    while moves < max_steps and _red_steps(state) > 0:
+        options = list(board.neighbors(state, orientations))
+        pen = [penalty(b, moves) for _, b in options]
+        logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]].tolist()
+        order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
+        pool = order if consider is None else order[:consider]
+        ends = dict(zip(pool, values(agent, [options[i][1] for i in pool])))
+        here = None
+        rejected = 0
+        while True:
+            win = [i for i in pool if _red_steps(options[i][1]) <= 0]
+            if win:
+                pick = win[0]
+            else:
+                score = torch.tensor([-ends[i] / tau - pen[i] for i in pool])
+                pick = pool[rng.choices(range(len(pool)), torch.softmax(score, 0).tolist())[0]]
+            if not check or win or rejected >= retries or len(pool) == 1:
+                break
+            checks += 1
+            path = [state, options[pick][1]]
+            own = {state: moves, options[pick][1]: moves + 1}
+            for t in range(1, depth):
+                if _red_steps(path[-1]) <= 0 or rng.random() < rollout_gamma:
+                    break
+                _, nxt = sample_move(agent, path[-1], orientations, set(), 1.0, rng,
+                                     penalty=lambda b, now=moves + t: penalty(b, now, own))
+                own[nxt] = moves + t + 1
+                path.append(nxt)
+            if here is None:
+                here = values(agent, [state])[0]
+            if _red_steps(path[-1]) <= 0 or values(agent, [path[-1]])[0] < here:
+                break
+            rejected += 1
+            pool = [i for i in pool if i != pick]
+        if rejections is not None:
+            rejections.append(rejected)
+        move, state = options[pick]
+        moves += 1
+        if trace is not None:
+            trace.append((move, state))
+        last_board[state] = moves
+        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(moves):
+            return {"solved": False, "surrendered": True, "moves": moves, "checks": checks}
+    return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "checks": checks}
+
+
+def _flat_pick(agent, state, options, pen, consider, tau, rng):
+    """solve_flat's choice: the index (into `options`) of the move picked from the policy's `consider` most likely
+    (memory penalties `pen` subtracted), by a softmax over -moves to go / tau - pen; a solving move always."""
+    logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]].tolist()
+    order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
+    pool = order if consider is None else order[:consider]
+    win = [i for i in pool if _red_steps(options[i][1]) <= 0]
+    if win:
+        return win[0]
+    ends = values(agent, [options[i][1] for i in pool])
+    score = torch.tensor([-e / tau - pen[i] for e, i in zip(ends, pool)])
+    return pool[rng.choices(range(len(pool)), torch.softmax(score, 0).tolist())[0]]
+
+
+def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop", stall=4, window=10, gamma=0.07,
+                   soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
+    """Forward by default, backward at an impasse.
+
+    Forward mode: a sharp flat choice (solve_flat without the check: the policy's `consider` most likely moves, looked
+    at one move deep, softmax over -moves to go / tau; the soft board memory as there). Alone it gets stuck in loops
+    (a board the value head rates better than its neighbours without being on the way out).
+
+    Impasse (`trigger`), judged after each forward move: "loop" - the move led back to a board the attempt had within
+    the last `window` moves; "stall" - the value head's moves to go haven't beaten the attempt's best for `stall`
+    forward moves; "either".
+
+    Backward mode: at an impasse, one AND-OR pass from the current board (the dest head ordering its options with
+    Gumbel noise; lapse rate `gamma`) - a whole plan to the goal or the moves made until it lapsed. The student follows
+    it without deliberating: its first move at once, each later one with probability 1 - gamma. When it ends or lapses,
+    back to forward mode (the stall count restarts from the board reached).
+
+    `sources`, if a list, gets "forward" or "backward" per move. Returns {"solved", "surrendered", "moves",
+    "impasses", "backward"} (backward: moves played from a plan)."""
+    rng = rng or random
+    agent.temperature = 1.0
+    orientations = board.car_orientations(state)
+    last_board = {state: 0}
+    beta, half = soft_memory if soft_memory else (0.0, 1.0)
+    moves, impasses, from_plan = 0, 0, 0
+
+    def penalty(b):
+        when = last_board.get(b)
+        return 0.0 if when is None else beta * 0.5 ** ((moves + 1 - when) / half)
+
+    best, since = values(agent, [state])[0], 0
+    plan, impasse = [], False
+    while moves < max_steps and _red_steps(state) > 0:
+        source = "forward"
+        if plan and rng.random() < gamma:
+            plan = []  # lost the thread
+            best, since = values(agent, [state])[0], 0
+        if impasse and not plan:
+            impasses += 1
+            att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
+            steps = (att if type(att) is list else att[1]) or []
+            path = [state]
+            for m in steps:
+                path.append(AndNode(path[-1], *m).apply(path[-1]))
+            plan = list(zip(steps, path[1:]))
+        impasse = False
+        if plan:
+            move, state = plan.pop(0)
+            source = "backward"
+            from_plan += 1
+            if not plan:
+                best, since = values(agent, [state])[0], 0
+        else:
+            options = list(board.neighbors(state, orientations))
+            pick = _flat_pick(agent, state, options, [penalty(b) for _, b in options], consider, tau, rng)
+            move, state = options[pick]
+        moves += 1
+        if source == "forward" and _red_steps(state) > 0:
+            prev = last_board.get(state)
+            looped = prev is not None and moves - prev <= window
+            v = values(agent, [state])[0]
+            if v < best - 1e-9:
+                best, since = v, 0
+            else:
+                since += 1
+            stalled = since >= stall
+            impasse = {"loop": looped, "stall": stalled, "either": looped or stalled}[trigger]
+            if impasse:
+                since = 0
+        last_board[state] = moves
+        if trace is not None:
+            trace.append((move, state))
+        if sources is not None:
+            sources.append(source)
+        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(moves):
+            return {"solved": False, "surrendered": True, "moves": moves, "impasses": impasses,
+                    "backward": from_plan}
+    return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "impasses": impasses,
+            "backward": from_plan}
+
+
+class PlannerSolver:
+    """solve_forward as learning_session's `solver`: one attempt, returned as solve_intuition's dict (the boards
+    actually played, start first - the planner's imagined boards teach nothing). Plain and picklable. The value cache
+    is cleared each attempt (the network changes between puzzles), and AND-OR's random module is seeded from `rng`."""
+
+    def __init__(self, **kw):
+        self.kw = kw
+
+    def __call__(self, agent, state, cap, rng, gives_up):
+        agent.__dict__.pop("_values", None)
+        random.seed(rng.random())
+        trace = []
+        out = solve_forward(agent, state, cap, rng=rng, trace=trace, surrender=gives_up, **self.kw)
+        return {"solved": out["solved"], "surrendered": out["surrendered"],
+                "boards": [state] + [b for _, b in trace], "moves": [m for m, _ in trace],
+                "taught": [False] * len(trace), "backward": out["backward"]}
 
 
 _W = {}

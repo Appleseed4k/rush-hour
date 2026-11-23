@@ -137,7 +137,7 @@ Note that pretraining labelled AND-OR's attempts with loops cut, not with full h
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 10 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:457), update at [line 563](rushhour/student/train.py:563) |
+| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 10 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:457), update at [line 570](rushhour/student/train.py:570) |
 | Each update: 3 passes over the block's examples, reshuffled each pass, one Adam step per batch | parameter + implementation | `steps 3` | chosen | [`online_update`](rushhour/student/train.py:329) |
 | Equal batches: each pass is split into ceil(n / 256) batches of equal size, not 256s and a remainder | implementation | `even_batches` | chosen | `online_update` |
 | Adam at a constant learning rate; its state (moment estimates) carries over across the session's updates | parameter + implementation | `lr 1e-4` | chosen | [`PolicyAgent`](rushhour/student/network.py:157) |
