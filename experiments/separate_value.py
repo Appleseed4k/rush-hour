@@ -85,13 +85,13 @@ def startfit(runs=("shared", "policy only", "shared, other weights", "policy onl
     cache_dir = os.path.join(paths.SESSIONS, "surrender_fit")
     rows = []
     for name in runs:
-        folder = os.path.join(A, RUNS[name])
+        folder = os.path.join(A, RUNS.get(name, name))
         if not os.path.exists(os.path.join(folder, "manifest.json")):
             continue
         for m in json.load(open(os.path.join(folder, "manifest.json"))):
             if m["round"] != 1:
                 continue
-            cache = os.path.join(cache_dir, f"{RUNS[name]}_{m['file'][:-3]}_test_runs10.json")
+            cache = os.path.join(cache_dir, f"{RUNS.get(name, name)}_{m['file'][:-3]}_test_runs10.json")
             runs_ = json.load(open(cache)) if os.path.exists(cache) else fs.attempts(os.path.join(folder, m["file"]),
                                                                                      puzzles, 10)
             if not os.path.exists(cache):

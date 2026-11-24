@@ -28,8 +28,11 @@ left. People's moves and the network's policy on the boards people played are th
 the list.
 
     python experiments/rule_mining.py          # writes models/summary/rules/{rules,decision_list,adherence}.csv
+    python experiments/rule_mining.py specificity   # the same for other students (the forward student, phase 1's
+                                                    # intuition student at x10/x30/x120, ...): specificity.csv
 """
 import itertools
+import json
 import multiprocessing as mp
 import os
 import random
@@ -415,6 +418,84 @@ def network_adherence(extra, list_name, nets, device=None):
     return out
 
 
+def _people_cached():
+    """people_moves for the visited-board list, cached in OUT (people_moves.pkl) next to the list it was made with."""
+    import pickle
+    f = os.path.join(OUT, "people_moves.pkl")
+    lf = os.path.join(OUT, "decision_list_visited.csv")
+    if os.path.exists(f) and os.path.getmtime(f) > os.path.getmtime(lf):
+        with open(f, "rb") as fh:
+            return pickle.load(fh)
+    moves, extra = people_moves({"visited": pd.read_csv(lf)})
+    with open(f, "wb") as fh:
+        pickle.dump((moves, extra), fh)
+    return moves, extra
+
+
+def rule_following(runs, trials=(18, 36, 54), students=8):
+    """How often each session run's policy follows the visited-board list on people's boards, its snapshot for each
+    stage of people's session paired with that stage (the run's own start for trials 1-9; the run's multiplier gives
+    the snapshot names), averaged over its students - and people's own moves. `runs`: {name: run folder}. Returns a
+    long table: who, stage, by ("all", "distance" or "rule"), key, follows, moves."""
+    moves, extra = _people_cached()
+    ok = (moves["visited rule"] >= 0).values
+    fired = [e[2]["visited"] for e in extra]
+    names = dict(enumerate(pd.read_csv(os.path.join(OUT, "decision_list_visited.csv")).rule))
+    stage = pd.cut(moves.trial, [0, 9, 27, 45, 1000], labels=list(STAGES)).astype(str).values
+    dbin = pd.cut(moves.distance, [1, 3, 9, 99], labels=["2-3", "4-9", "10+"]).astype(str).values
+    rule = moves["visited rule"].map(names).values
+    people = np.array([np.nan if f is None else float(f[c]) for f, c in zip(fired, moves.chosen)])
+
+    def table(who, values):
+        out = []
+        for st in STAGES:
+            sel = ok & (stage == st)
+            out.append({"who": who, "stage": st, "by": "all", "key": "all", "follows": np.nanmean(values[sel]),
+                        "moves": int(sel.sum())})
+            for by, keys in (("distance", dbin), ("rule", rule)):
+                for k in pd.unique(keys[sel]):
+                    m = sel & (keys == k)
+                    out.append({"who": who, "stage": st, "by": by, "key": k, "follows": np.nanmean(values[m]),
+                                "moves": int(m.sum())})
+        return out
+
+    rows = table("people", people)
+    for who, folder in runs.items():
+        config = json.load(open(os.path.join(folder, "config.json")))
+        m = int(config.get("multiplier", 10))
+        start = os.path.join(folder, "initial.pt")
+        nets = {"0": start if os.path.exists(start) else config["init"]}
+        for n in trials:
+            for k in range(students):
+                f = os.path.join(folder, "no_teacher", f"student{k:02d}_puzzle{m * n:03d}.pt")
+                if os.path.exists(f):
+                    nets[f"{n} s{k:02d}"] = f
+        net = network_adherence(extra, "visited", nets)
+        paired = np.full(len(moves), np.nan)
+        for st, n in SNAP_OF.items():
+            keys = [k for k in net if (k == "0" if n == 0 else k.split()[0] == str(n))]
+            if keys:
+                v = np.nanmean(np.stack([net[k] for k in keys]), axis=0)
+                paired[stage == st] = v[stage == st]
+        rows += table(who, paired)
+    return pd.DataFrame(rows)
+
+
+def distance_from_people(follows):
+    """Per student: the mean absolute difference from people's rule-following, over the 4 stages ("all"), over
+    stage x distance cells, and over stage x rule cells with 500+ of people's moves."""
+    f = follows.set_index(["by", "key", "stage", "who"]).follows.unstack("who")
+    big = follows[(follows.who == "people") & (follows.moves >= 500)].set_index(["by", "key", "stage"]).index
+    out = {}
+    for who in f.columns:
+        if who == "people":
+            continue
+        d = (f[who] - f["people"]).abs()
+        out[who] = {by: d.loc[by][d.loc[by].index.isin(big.droplevel(0)[big.get_level_values(0) == by])].mean()
+                    for by in ("all", "distance", "rule")}
+    return pd.DataFrame(out).T
+
+
 STAGES = {"1-9": (1, 9), "10-27": (10, 27), "28-45": (28, 45), "46+": (46, 1000)}
 SNAP_OF = {"1-9": 0, "10-27": 18, "28-45": 36, "46+": 54}
 RUN = "lean_people_all_m10_ao_nodest_refit"  # the two-mode student as it is now (paths.START, the refitted weights)
@@ -431,6 +512,28 @@ def session_nets(run=RUN, students=8):
                 nets[f"{n} s{s_:02d}"] = f
     return nets
 
+
+ARCHIVE = os.path.join(os.path.dirname(os.path.dirname(paths.ROOT)), "rush-hour-archive", "models", "sessions")
+SPECIFICITY = {  # students that should and shouldn't follow the rules as people do
+    "two-mode, separate (s0)": os.path.join(paths.SESSIONS, "lean_people_all_m10_ao_separate"),
+    "two-mode, separate (s1)": os.path.join(paths.SESSIONS, "lean_people_all_m10_ao_separate_seed1"),
+    "two-mode, shared (s0)": os.path.join(paths.SESSIONS, "lean_people_all_m10_ao_nodest_refit"),
+    "two-mode, shared (s1)": os.path.join(paths.SESSIONS, "lean_people_all_m10_ao_nodest_refit_seed1"),
+    "two-mode, dest head": os.path.join(paths.SESSIONS, "lean_people_all_m10_ao"),
+    "forward student": os.path.join(paths.SESSIONS, "lean_people_all_m10_noao"),
+    "intuition, x10": os.path.join(ARCHIVE, "ao_people_all_m10"),
+    "intuition, x30": os.path.join(ARCHIVE, "ao_people_all_m30"),
+    "intuition, x120": os.path.join(ARCHIVE, "ao_people_all_m120"),
+}
+
+if __name__ == "__main__" and sys.argv[1:2] == ["specificity"]:
+    pd.set_option("display.width", 220)
+    follows = rule_following(SPECIFICITY)
+    follows.to_csv(os.path.join(OUT, "specificity.csv"), index=False)
+    allr = follows[follows.by == "all"].pivot(index="who", columns="stage", values="follows")[list(STAGES)]
+    print(allr.round(3).to_string())
+    print(distance_from_people(follows).round(3).to_string())
+    sys.exit()
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)

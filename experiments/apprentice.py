@@ -58,6 +58,8 @@ def parse_args(argv=None):
                          "data")
     ap.add_argument("--value-weight", type=float, default=0.5,
                     help="the value loss's weight in pretraining (0: no value head training)")
+    ap.add_argument("--blocks", type=int, default=4, help="lane blocks in the network's trunk")
+    ap.add_argument("--hidden", type=int, default=96, help="channels per cell in the trunk")
     ap.add_argument("--policy-weight", type=float, default=1.0,
                     help="the policy loss's weight (0: a value network only)")
     ap.add_argument("--device", default=None, help="default: cuda, mps or cpu, whichever is there")
@@ -94,7 +96,7 @@ def main(argv=None):
     init_seed = args.seed if args.init_seed is None else args.init_seed
     random.seed(init_seed)
     torch.manual_seed(init_seed)
-    agent = student.PolicyAgent(device=device, temperature=args.temperature)
+    agent = student.PolicyAgent(device=device, temperature=args.temperature, hidden=args.hidden, blocks=args.blocks)
     history = student.expert_iteration(agent, [s for _, s in train], [s for _, s in val], rounds=args.rounds,
                                   n_attempts=args.attempts, gamma=args.gamma, max_steps=args.max_steps,
                                   seed=args.seed, checkpoint_dir=run_dir, epochs=args.epochs,
