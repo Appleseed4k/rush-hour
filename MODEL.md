@@ -23,7 +23,8 @@ what changed and what was kept.
 **Later on 2026-11-24 the policy and value heads were split into two networks** of the same shape: a policy network
 trained on the move targets only, and a value network trained on the distances only (`paths.START`). The one-network
 start of that day is `spec.SHARED` / `paths.SHARED_START`; ["The shared-trunk start"](#the-shared-trunk-start) covers
-the change.
+the change. **Each network now has 2 lane blocks, not 4** (giving-up scale 0.40): 2, 4 and 6 fit people alike, and 2
+is the smallest and fastest. The 4-block start is `spec.FOUR_BLOCK` / `paths.FOUR_BLOCK_START`.
 
 **Kind:**
 - **parameter**: a number or switch, in `spec.py`;
@@ -71,13 +72,18 @@ shows also teaches, at a weight called agency (ΔA), the one parameter the teach
 |---|---|---|---|---|
 | Input: 7 binary channels per cell (empty, red, horizontal car, vertical car, car start, car end, truck), plus 2 coordinate channels. No car identity | design | - | chosen | [`StateEncoder`](rushhour/student/network.py:28) |
 | Action space keyed by cell: (a car's top-left cell, direction, 1-5 cells). Each cell's output predicts the moves of the car anchored there, so one network plays every puzzle and a pattern learned in one place applies everywhere | design | 720 actions | chosen | [`PolicyAgent`](rushhour/student/network.py:113), `car_anchor` |
-| Trunk: a 3×3 stem, then 4 residual blocks, each convolving whole rows and whole columns plus a 3×3 window, with BatchNorm | design | 96 channels, 4 blocks | chosen | [`LaneBlock`](rushhour/student/network.py:66), [`PolicyNetwork`](rushhour/student/network.py:81) |
+| Trunk: a 3×3 stem, then residual lane blocks, each convolving whole rows and whole columns plus a 3×3 window, with BatchNorm | design | 96 channels, 2 blocks (592k weights per network) | chosen; 2, 4 and 6 blocks fit people alike (2026-11-24), and 2 is the smallest and fastest | [`LaneBlock`](rushhour/student/network.py:66), [`PolicyNetwork`](rushhour/student/network.py:81) |
 | Two networks of that shape, each read through one head. The **policy network**'s policy head: a score per move, read at its car's anchor cell; a softmax over the legal ones. The **value network**'s value head: moves to go in tens, from the board's mean features. Each network's other head is never trained or read | design | - | chosen (2026-11-24: as good as one shared trunk, and each network learns one thing) | [`PolicyNetwork.heads`](rushhour/student/network.py:81), [`PolicyAgent.value_agent`](rushhour/student/network.py:113) |
 | Only the policy network plays. The value network is trained in every update but read by nothing in this student (phase 2's two-mode student reads it for flat planning) | design | - | chosen | §4, §7 |
 | The policy head also orders AND-OR's options when AND-OR is run with the network (pretraining's later rounds, phase 2's deliberation): a move not legal yet is scored by its slot, which is trained on boards where it is legal | design | - | chosen (2026-11-24; it orders AND-OR as well as the dest head did) | [`PolicyAgent.heuristic`](rushhour/student/network.py:233) |
 
 Notes:
 - **Row and column convolutions:** what blocks a car, or red's path to the exit, is often several cells away (`LaneBlock`).
+- **Two blocks are enough.** After one block a cell has seen its own row and column and its neighbours'; after two,
+  the whole board. More blocks would let one pass follow longer chains of blockers, but 4 and 6 blocks don't change the
+  start, the learning, the skill by distance on people's layouts or how often deep-chain moves are made
+  (`experiments/network_depth.py`; `notebooks/p2.5_value_network.ipynb`, section 6). Two blocks halve the weights and
+  play a session in about 60% of the time.
 - **Start and end channels:** without them, two cars parked end to end look like one longer car.
 - **No dest head.** Until 2026-11-24 a third head, dest, scored every car's every position by how soon a solution
   brings it there (target 0.8^(k-1) at k moves), and ordered AND-OR's options; in pretraining it also learned which
@@ -94,7 +100,7 @@ Notes:
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Starting networks | parameter | `models/apprentice/separate/round1_epoch03.pt`: the policy network `gamma0.07_free_novalue/round1_epoch03.pt` and the value network `gamma0.07_free_valueonly/round1_epoch03.pt` | fitted | `STUDENT["init"]`, `paths.START` |
+| Starting networks | parameter | `models/apprentice/separate_b2/round1_epoch03.pt`: the policy network `gamma0.07_free_novalue_b2/round1_epoch03.pt` and the value network `gamma0.07_free_valueonly_b2/round1_epoch03.pt` (2 lane blocks each) | fitted | `STUDENT["init"]`, `paths.START` |
 | **The expert is the AND-OR model.** It searches backward from the goal: an OR node picks which car to move, an AND node picks how, and each blocking car becomes a new subgoal | design | - | inherited (Olieslagers et al. 2023) | [`and_or.solve`](rushhour/and_or.py:364) |
 | ...with lapses: at each subgoal, with probability γ, it plays one random legal move instead of planning | parameter | γ = 0.07, the paper's | inherited | [`OrNode.solve`](rushhour/and_or.py:178), [`lapse_move`](rushhour/and_or.py:89) |
 | ...and this repo's variant of it. A completed plan is played out to its end and the search restarts from the new board; the paper's model plays one move per search | design | - | chosen | [`solve_and_or`](rushhour/student/solve.py:46), `attempt_puzzle` |
@@ -102,7 +108,7 @@ Notes:
 | What the apprentice learns: plain AND-OR plays 1,000 pool puzzles of 1-30 moves (200 per bin of 1-8, 9-12, 13-16, 17-20 and 21-30), 4 attempts each. Its solved attempts, loops cut, label the boards (policy and value targets as in §6): the policy network learns the moves, the value network the distances, each from the same examples | design | 2,966 solved attempts: 68,039 boards | chosen (phase 1's settings) | [`attempt_puzzle`](rushhour/student/labels.py:233), [`erase_loops`](rushhour/student/labels.py:42), [`experiments/apprentice.py`](experiments/apprentice.py) |
 | Training: Adam at learning rate 1e-3, batches of 256; validated on 100 held-out puzzles | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:113) |
 | **Stopped at epoch 3 of round 1**, the checkpoint that matches people's first 10 trials. That is 3 passes over plain AND-OR's attempts: imitation learning, with no expert-iteration rounds. Round 1's validation would also have kept epoch 3 | parameter | round 1, epoch 3 | fitted | [`surrender.py`](rushhour/surrender.py) |
-| The fit, together with the giving-up scale (§5): every saved epoch of the policy network plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10. The value network is taken at the same epoch | implementation | best: 87.3% and 2.72, misfit 0.1 (next best: epoch 4 at 0.6) | fitted | `python -m rushhour.surrender` |
+| The fit, together with the giving-up scale (§5): every saved epoch of the policy network plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10. The value network is taken at the same epoch | implementation | best: 87.7% and 2.70, misfit 0.14 at scale 0.40 (with 4 blocks: 87.3% and 2.72, misfit 0.06 at 0.35) | fitted | `experiments/network_depth.py startfit` (`rushhour.surrender`'s fit) |
 | The session starts with a fresh Adam state and a learning rate 10× lower than pretraining's | implementation | - | chosen | [`PolicyAgent.load`](rushhour/student/network.py:196) |
 
 So the student's starting knowledge is **a partial copy of the paper's model of human planning**: the AND-OR
@@ -130,7 +136,7 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | A hazard: after each move that doesn't solve the puzzle, it gives up with a probability set by moves made / optimal length. Nothing else matters: not the board, its progress, or its recent success | design | - | people (shape) | [`SurrenderRule`](rushhour/student/solve.py:170), [line 164](rushhour/student/solve.py:164) |
 | People's rates, pooled over lengths and attempts | people | 0.16-0.93% per move over 9 bins (edges 0, 0.5, 1, 1.5, 2, 3, 4, 6, 10) | people | [`human_data.surrender_hazard`](rushhour/human_data.py:213), saved per run as `surrender_table` |
-| Scaled to the student's level | parameter | × 0.35 | fitted (§3) | `surrender_scale` |
+| Scaled to the student's level | parameter | × 0.40 | fitted (§3) | `surrender_scale` |
 | Giving up ends the puzzle unsolved, so the student learns nothing of its own from it (§6) | design | - | chosen | - |
 
 ## 6. What a puzzle teaches
@@ -200,8 +206,8 @@ Notes:
 ## What is fitted to people, and how well
 
 1. **Giving up, by moves / optimal**: people's hazard, used as measured (§5).
-2. **Starting level**: the checkpoint (round 1, epoch 3) and the giving-up scale (0.35), fitted to people's first
-   10 trials. The misfit is 0.2, in squared standard errors over 2 statistics (§3).
+2. **Starting level**: the checkpoint (round 1, epoch 3, 2 lane blocks) and the giving-up scale (0.40), fitted to
+   people's first 10 trials. The misfit is 0.14, in squared standard errors over 2 statistics (§3).
 3. **Learning rate over trials 1-30**: the multiplier and the hindsight, together, fitted with the dest-head start
    (`spec.DEST`) and kept for this one without refitting. The fit uses three statistics, each compared with
    people's:
@@ -287,6 +293,15 @@ The values are end-score differences, paired by student (lower is better), as me
 - **0.9** shows 31-38%. It is clearly worse at ΔA 0 (+0.79 ± 0.11) and 0.3 (+0.32 ± 0.05).
 
 So 0.45 stays the default. At high agency, more help does slightly better, as random 100% does.
+
+## The 4-block start
+
+For the rest of 2026-11-24 the two networks had 4 lane blocks each (`models/apprentice/separate/round1_epoch03.pt`,
+giving-up scale 0.35; `spec.FOUR_BLOCK`, `paths.FOUR_BLOCK_START`; sessions `lean_people_all_m10_ao_separate*`).
+2, 4 and 6 blocks, each pretrained on the same data and fitted to people's start the same way (all at epoch 3), gave
+two-mode sessions alike at two seeds each: the share of optimal moves 7-9 from the goal on people's layouts (33-36%
+for every depth), the total skill misfit (1.9-2.5), the session's gain (0.42-0.62, within seed noise) and how often
+deep-chain rule moves are made (22% → 24-27%). So the smallest was kept.
 
 ## The shared-trunk start
 

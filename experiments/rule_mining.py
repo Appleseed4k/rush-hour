@@ -30,6 +30,8 @@ the list.
     python experiments/rule_mining.py          # writes models/summary/rules/{rules,decision_list,adherence}.csv
     python experiments/rule_mining.py specificity   # the same for other students (the forward student, phase 1's
                                                     # intuition student at x10/x30/x120, ...): specificity.csv
+    python experiments/rule_mining.py optimal       # rule-following against choosing optimal moves, per student,
+                                                    # stage and distance: rules_vs_optimal.csv
 """
 import itertools
 import json
@@ -496,6 +498,79 @@ def distance_from_people(follows):
     return pd.DataFrame(out).T
 
 
+def rules_vs_optimal(runs, trials=(18, 36, 54), students=8):
+    """Is rule-following just choosing optimal moves? On people's boards, per student (`runs`: {name: run folder},
+    snapshot paired with each stage as in rule_following, its students averaged) and people, per stage and distance:
+    P(optimal), P(rule move), and the share of rule moves among optimal choices and among non-optimal choices (people:
+    their moves; networks: policy probabilities)."""
+    moves, extra = _people_cached()
+    ok = (moves["visited rule"] >= 0).values
+    stage = pd.cut(moves.trial, [0, 9, 27, 45, 1000], labels=list(STAGES)).astype(str).values
+    dbin = pd.cut(moves.distance, [1, 3, 9, 99], labels=["2-3", "4-9", "10+"]).astype(str).values
+    dist, opt = {}, []
+    for inst, (b, _, _) in zip(moves.instance, extra):  # optimal flags in move_masks' (neighbors') order
+        if inst not in dist:
+            dist[inst] = board.multi_bfs(hd.puzzle(inst))
+        d = dist[inst]
+        opt.append(np.array([d[nb] < d[b] for _, nb in board.neighbors(b, board.car_orientations(b))]))
+    fired = [e[2]["visited"] for e in extra]
+    rows = []
+
+    def summarise(who, p_opt, p_rule, p_ro, p_rn):
+        for st in STAGES:
+            for db in ["2-3", "4-9", "10+", "all"]:
+                sel = ok & (stage == st) & ((dbin == db) if db != "all" else True)
+                rows.append({"who": who, "stage": st, "distance": db, "optimal": np.nanmean(p_opt[sel]),
+                             "rule": np.nanmean(p_rule[sel]),
+                             "rule among optimal": np.nansum(p_ro[sel]) / np.nansum(p_opt[sel]),
+                             "rule among non-optimal": np.nansum(p_rn[sel]) / np.nansum(1 - p_opt[sel])})
+
+    po = np.array([o[c] for o, c in zip(opt, moves.chosen)], float)
+    pr = np.array([np.nan if f is None else float(f[c]) for f, c in zip(fired, moves.chosen)])
+    summarise("people", po, pr, np.where(po == 1, pr, 0.0), np.where(po == 0, pr, 0.0))
+
+    ref = PolicyAgent.load(paths.START)
+    uniq = {}
+    for b, _, _ in extra:
+        uniq.setdefault(b, len(uniq))
+    enc = torch.from_numpy(np.stack([ref.encoder.encode_numpy(b) for b in uniq])).float()
+    idx = np.array([uniq[b] for b, _, _ in extra])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def split(f):
+        a = PolicyAgent.load(f).to(device)
+        a.net.eval()
+        with torch.no_grad():
+            lg = torch.cat([a.net.heads(enc[k:k + 4096].to(device))[0].cpu()
+                            for k in range(0, len(enc), 4096)]).numpy()
+        out = [np.full(len(extra), np.nan) for _ in range(4)]
+        for r, (_, ids, fb) in enumerate(extra):
+            f_ = fb["visited"]
+            if f_ is None:
+                continue
+            z = lg[idx[r], ids]
+            p = np.exp(z - z.max())
+            p /= p.sum()
+            o = opt[r]
+            out[0][r], out[1][r], out[2][r], out[3][r] = p[o].sum(), p[f_].sum(), p[o & f_].sum(), p[~o & f_].sum()
+        return out
+
+    for who, folder in runs.items():
+        config = json.load(open(os.path.join(folder, "config.json")))
+        m = int(config.get("multiplier", 10))
+        start = os.path.join(folder, "initial.pt")
+        acc = [np.full(len(extra), np.nan) for _ in range(4)]
+        for st, n in SNAP_OF.items():
+            files = ([start if os.path.exists(start) else config["init"]] if n == 0 else
+                     [os.path.join(folder, "no_teacher", f"student{k:02d}_puzzle{m * n:03d}.pt") for k in range(students)])
+            parts = [split(f) for f in files if os.path.exists(f)]
+            sel = stage == st
+            for j in range(4):
+                acc[j][sel] = np.nanmean(np.stack([q[j] for q in parts]), axis=0)[sel]
+        summarise(who, *acc)
+    return pd.DataFrame(rows)
+
+
 STAGES = {"1-9": (1, 9), "10-27": (10, 27), "28-45": (28, 45), "46+": (46, 1000)}
 SNAP_OF = {"1-9": 0, "10-27": 18, "28-45": 36, "46+": 54}
 RUN = "lean_people_all_m10_ao_nodest_refit"  # the two-mode student as it is now (paths.START, the refitted weights)
@@ -525,6 +600,22 @@ SPECIFICITY = {  # students that should and shouldn't follow the rules as people
     "intuition, x30": os.path.join(ARCHIVE, "ao_people_all_m30"),
     "intuition, x120": os.path.join(ARCHIVE, "ao_people_all_m120"),
 }
+
+if __name__ == "__main__" and sys.argv[1:2] == ["optimal"]:
+    pd.set_option("display.width", 230)
+    runs = {k: SPECIFICITY[k] for k in ("two-mode, separate (s0)", "forward student", "intuition, x10",
+                                        "intuition, x120")}
+    df = rules_vs_optimal(runs)
+    df.to_csv(os.path.join(OUT, "rules_vs_optimal.csv"), index=False)
+    for db in ["all", "2-3", "4-9", "10+"]:
+        print(f"== distance {db}")
+        print(df[df.distance == db].pivot(index="who", columns="stage")[
+            ["optimal", "rule", "rule among optimal", "rule among non-optimal"]].round(3).to_string())
+    c = df[df.distance != "all"]
+    print("r(P(rule), P(optimal)) over student x stage x distance:", round(np.corrcoef(c.optimal, c.rule)[0, 1], 3))
+    for db, g in c.groupby("distance"):
+        print(f"  within {db}: {np.corrcoef(g.optimal, g.rule)[0, 1]:.3f}")
+    sys.exit()
 
 if __name__ == "__main__" and sys.argv[1:2] == ["specificity"]:
     pd.set_option("display.width", 220)

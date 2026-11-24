@@ -31,7 +31,7 @@ STUDENT = {
     "max_attempts": 1,  # chosen: one attempt per puzzle, no restarts
     "step_factor": 10.0, "min_steps": 50, "max_steps": None,  # chosen: the move cap, max(50, 10 x optimal)
     "surrender": True,  # people: gives up as people do (the hazard by moves / optimal, saved as surrender_table)...
-    "surrender_scale": 0.35,  # fitted: ...at 0.35 x people's rates, together with init
+    "surrender_scale": 0.40,  # fitted: ...at 0.40 x people's rates, together with init
     # what it learns from
     "labels": "all", "window": -1,  # fitted, with multiplier: full hindsight (shortcut labels through every board
     # seen) - the best of own, W=3, W=10 and full at x5-x20, though W=10 x5 and W=3 x20 come close
@@ -68,6 +68,9 @@ DEST = {"init": os.path.relpath(paths.DEST_START, paths.ROOT).replace(os.sep, "/
 # networks: lean_people_all_m10_ao_nodest*, lean_people_all_m10_ao_nodest_refit*.
 SHARED = {"init": os.path.relpath(paths.SHARED_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.35}
 
+# The two networks with 4 lane blocks each (2026-11-24, before the switch to 2): lean_people_all_m10_ao_separate*.
+FOUR_BLOCK = {"init": os.path.relpath(paths.FOUR_BLOCK_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.35}
+
 # What the older runs (teach_shortcut_agency*, people_*, fitted_teachers) had instead: a network trained on its own
 # solved attempts with a random 10% teacher, and the multiplier calibrated for it with own labels.
 PREVIOUS = {"init": os.path.relpath(paths.PREVIOUS_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.4,
@@ -75,18 +78,20 @@ PREVIOUS = {"init": os.path.relpath(paths.PREVIOUS_START, paths.ROOT).replace(os
 
 
 def _same(key, value):
-    if key == "init" and value is not None:  # compare a checkpoint by its file name: saved runs keep the old path
-        return os.path.basename(value.replace("\\", "/"))
+    if key == "init" and value is not None:  # compare a checkpoint by its folder and file name: saved runs keep the
+        return "/".join(value.replace("\\", "/").split("/")[-2:])  # old absolute path
     return value
 
 
-def differences(config, protocol=True, previous=False, dest=False, shared=False):
+def differences(config, protocol=True, previous=False, dest=False, shared=False, four_blocks=False):
     """{setting: (spec value, the run's value)} where a saved run's config differs from STUDENT (and PROTOCOL; with
     `dest`, the dest-head start's STUDENT | DEST; with `shared`, the one-network start's STUDENT | SHARED; with
-    `previous`, the older start's STUDENT | PREVIOUS); settings a
+    `four_blocks`, the 4-block start's STUDENT | FOUR_BLOCK; with `previous`, the older start's STUDENT | PREVIOUS);
+    settings a
     run saved before they existed count as the code's default then (sessions.ADDED_SETTINGS)."""
     from ..sessions import ADDED_SETTINGS  # sessions imports this package
-    spec = (STUDENT | (DEST if dest else {}) | (SHARED if shared else {}) | (PREVIOUS if previous else {})
+    spec = (STUDENT | (DEST if dest else {}) | (SHARED if shared else {}) | (FOUR_BLOCK if four_blocks else {})
+            | (PREVIOUS if previous else {})
             | (PROTOCOL if protocol else {}))
     out = {}
     for key, want in spec.items():

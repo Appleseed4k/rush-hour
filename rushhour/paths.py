@@ -9,10 +9,13 @@ MODELS = os.path.join(ROOT, "models")
 SESSIONS = os.path.join(MODELS, "sessions")  # session runs (sessions.py), one folder per run
 APPRENTICE = os.path.join(MODELS, "apprentice")  # expert-iteration runs (experiments/apprentice.py)
 # The student every session starts from: AND-OR's apprentice (gamma 0.07, protect_movers off) after 3 epochs of its
-# first round, the epoch that matches people's start (with giving-up scale 0.35; surrender.py), as two networks - a
-# policy network trained on AND-OR's moves only (gamma0.07_free_novalue) and a value network trained on its distances
-# only (gamma0.07_free_valueonly), saved together (PolicyAgent.value_agent; experiments/separate_value.py build).
-START = os.path.join(APPRENTICE, "separate", "round1_epoch03.pt")
+# first round, the epoch that matches people's start (with giving-up scale 0.40; surrender.py), as two networks with 2
+# lane blocks each - a policy network trained on AND-OR's moves only (gamma0.07_free_novalue_b2) and a value network
+# trained on its distances only (gamma0.07_free_valueonly_b2), saved together (PolicyAgent.value_agent;
+# experiments/network_depth.py build).
+START = os.path.join(APPRENTICE, "separate_b2", "round1_epoch03.pt")
+# The same with 4 lane blocks, the start of 2026-11-24 before that (giving-up scale 0.35): experiments/separate_value.py.
+FOUR_BLOCK_START = os.path.join(APPRENTICE, "separate", "round1_epoch03.pt")
 # The start of 2026-11-24 before that: one network with both heads on a shared trunk, trained on both losses, no dest
 # head (giving-up scale 0.35).
 SHARED_START = os.path.join(APPRENTICE, "gamma0.07_free_nodest", "round1_epoch03.pt")
