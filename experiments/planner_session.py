@@ -25,14 +25,19 @@ with sessions.json (one record per puzzle). fit_memory.py `snapshots --run <run>
     python experiments/planner_session.py --fit-flat           # flat (moves considered x tau), with/without a check
     python experiments/planner_session.py --fit-two-mode       # the impasse switch: sharp flat forward + AND-OR plans at impasses
     python experiments/planner_session.py --fit-lean           # forward / two-mode students: intuition + flat + one-move AND-OR
+    python experiments/planner_session.py --fit-lean-start     # ... its refitted weights on the no-dest apprentice's epochs
     python experiments/planner_session.py --fit-shape          # ... with goal in sight and a sharper intuition
     python experiments/planner_session.py --fit-human          # the start (checkpoints, planners) on people's layouts
     python experiments/planner_session.py --fit-strong         # stronger networks x higher temperatures, ditto
     python experiments/planner_session.py --lean --run lean_people_all_m10_ao     # the session played by the two-mode student
+                                                               # (then: the dest-head start, --w-ao 0.1 --flat-start 0.08)
     python experiments/planner_session.py --lean --run lean_people_all_m10_noao --w-ao 0 --flat-start 0.18 \\
         --flat-end 0.28 --no-opening                           # ... and by the forward student (flat set to match the start)
-    python experiments/planner_session.py --lean --run lean_people_all_m10_ao_nodest   # ... from the start without a
-                                                               # dest head (paths.START since 2026-11-24)
+    python experiments/planner_session.py --lean --run lean_people_all_m10_ao_nodest --w-ao 0.1 --flat-start 0.08
+                                                               # ... from the start without a dest head (paths.START
+                                                               # since 2026-11-24), with the dest-ordered weights
+    python experiments/planner_session.py --lean --run lean_people_all_m10_ao_nodest_refit   # ... with the weights
+                                                               # refitted to policy-ordered AND-OR (the defaults)
     python experiments/planner_session.py --gamma 0.5 --run planner_people_all_m10_g0.5
 
 --fit-start calibrates gamma as rushhour/surrender.py calibrated the start network: the planner (start network)
@@ -153,6 +158,15 @@ SHAPE = {f"lean {net}, temperature {t}, sight {d}": {"lean": True, "w_flat": 0.0
                                                        "net": net, "temperature": t, "sight": d}
          for net in NETS for t in (1.0, 0.75, 0.5) for d in (0, 2, 3)}
 
+# the two-mode student's start with its refitted weights (2026-11-24): each early epoch of the no-dest apprentice
+# (paths.START is its epoch 3, fitted by intuition), flat at its mean over trials 1-10 of the ramp
+NETS |= {f"no-dest epoch {e}": os.path.join(paths.APPRENTICE, "gamma0.07_free_nodest", f"round1_epoch{e:02d}.pt")
+         for e in range(1, 6)}
+_REFIT = {"lean": True, "w_flat": round(sum(forward.LeanSolver().flat_at(t) for t in range(1, 11)) / 10, 3),
+          "w_ao": forward.LeanSolver().w_ao, "opening": True}
+LEAN_NODEST = ({f"two-mode, no-dest epoch {e}": {**_REFIT, "net": f"no-dest epoch {e}"} for e in range(1, 6)}
+               | {"two-mode, dest-ordered weights, no-dest epoch 3": {**_LEAN, "net": "no-dest epoch 3"}})
+
 # robust but inefficient: a stronger network sampled at a higher temperature (intuition, hard memory), on people's
 # layouts against their trials and their first attempts
 STRONG = {f"intuition, {net}, temperature {t}": {"k": 1, "net": net, "temperature": t}
@@ -257,16 +271,19 @@ def main():
     ap.add_argument("--fit-two-mode", action="store_true")
     ap.add_argument("--fit-lean", action="store_true")
     ap.add_argument("--fit-shape", action="store_true")
+    ap.add_argument("--fit-lean-start", action="store_true",
+                    help="the two-mode student's refitted weights on the no-dest apprentice's epochs 1-5")
     ap.add_argument("--fit-human", action="store_true", help="the start on people's own 70 layouts")
     ap.add_argument("--fit-strong", action="store_true", help="stronger networks x higher temperatures, ditto")
     ap.add_argument("--lean", action="store_true",
                     help="play the session with the two-mode student (--w-ao 0: the forward student)")
-    ap.add_argument("--w-ao", type=float, default=0.1)
-    ap.add_argument("--flat-start", type=float, default=0.08)
+    ap.add_argument("--w-ao", type=float, default=0.18)
+    ap.add_argument("--flat-start", type=float, default=0.06)
     ap.add_argument("--flat-end", type=float, default=0.18)
     ap.add_argument("--no-opening", action="store_true")
     ap.add_argument("--ao-order", choices=forward.AO_ORDERS, default="policy",
                     help="with --lean: what orders AND-OR's options (forward.solve_lean's ao_order)")
+    ap.add_argument("--seed", type=int, default=None, help="the session's seed (default: the calibrated config's)")
     ap.add_argument("--init", default=paths.START, help="the start network (default paths.START)")
     ap.add_argument("--surrender-scale", type=float, default=spec.STUDENT["surrender_scale"],
                     help="giving up as people's hazard x this (default: the fitted student's, with paths.START)")
@@ -286,6 +303,9 @@ def main():
     if args.fit_lean:
         fit_start(LEAN_START, "lean_start_fit.csv")
         return
+    if args.fit_lean_start:
+        fit_start(LEAN_NODEST, "lean_nodest_start_fit.csv", scale=spec.STUDENT["surrender_scale"])
+        return
     if args.fit_shape:
         fit_start(SHAPE, "shape_start_fit.csv")
         return
@@ -299,6 +319,8 @@ def main():
         config = json.load(f)
     config["init"] = args.init
     config["run"] = args.run
+    if args.seed is not None:
+        config["seed"] = args.seed
     config["surrender_scale"] = args.surrender_scale
     config["planner"] = {**PLANNER, "gamma": args.gamma, "rollout_gamma": args.gamma}
     if args.lean:

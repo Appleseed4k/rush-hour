@@ -542,10 +542,12 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
 class LeanSolver:
     """solve_lean as learning_session's `solver`, with the flat share rising over the session: on the puzzle of human
     trial t (t = puzzles played // multiplier + 1), w_flat = flat_start + (flat_end - flat_start) x min(1, (t - 1) /
-    ramp) - people's flat share rose from about 8% to 18% over their first 30 trials (the mixture fit). One instance
-    per student: it counts the attempts it has played (one per puzzle). The value cache is cleared each attempt."""
+    ramp) - people's flat share rose from about 6% to 18% over their first 30 trials, and 18% of their moves fit a
+    policy-ordered AND-OR pass (the mixture fit, refitted 2026-11-24 without the dest head; with dest-ordered AND-OR it
+    was 8% -> 18% and 10%). One instance per student: it counts the attempts it has played (one per puzzle). The value
+    cache is cleared each attempt."""
 
-    def __init__(self, w_ao=0.1, flat_start=0.08, flat_end=0.18, ramp=30, multiplier=10, opening=True, **kw):
+    def __init__(self, w_ao=0.18, flat_start=0.06, flat_end=0.18, ramp=30, multiplier=10, opening=True, **kw):
         self.w_ao, self.flat_start, self.flat_end, self.ramp = w_ao, flat_start, flat_end, ramp
         self.multiplier, self.opening, self.kw, self.calls = multiplier, opening, kw, 0
 
