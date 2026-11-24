@@ -32,16 +32,16 @@ def _batch(agent, examples):
     return x, distance, legal.to(device), optimal.to(device)
 
 
-def _loss(agent, examples):
+def _loss(agent, examples, value_weight=0.5):
     """Policy loss (probability on the target moves), plus the value loss
-    where there is a distance target."""
+    (times `value_weight`; 0: none) where there is a distance target."""
     x, distance, legal, optimal = _batch(agent, examples)
     policy, value = agent.net.heads(x)
     logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
     loss = -logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
     has_distance = ~torch.isnan(distance)
-    if has_distance.any():
-        loss = loss + 0.5 * F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10)
+    if value_weight and has_distance.any():
+        loss = loss + value_weight * F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10)
     return loss
 
 
@@ -110,7 +110,8 @@ def _kept_epoch(history):
     return kept
 
 
-def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_size=256, on_epoch=None):
+def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_size=256, on_epoch=None,
+                 value_weight=0.5):
     """Supervised training on board Examples: the policy head puts
     probability on any target move, the value head predicts the distance.
 
@@ -122,7 +123,10 @@ def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_siz
     validation scores as dicts.
 
     `on_epoch`, if given, is called as on_epoch(epoch, scores) after each
-    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints."""
+    epoch (from 1), on that epoch's own weights - e.g. to save checkpoints.
+
+    `value_weight`: the value loss's weight (0: the value head isn't trained,
+    and the trunk learns from the policy targets alone)."""
     examples = list(examples)
     agent._scores = {}
     best, best_state, stale, history = -1.0, None, 0, []
@@ -131,7 +135,7 @@ def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_siz
         agent.net.train()
         random.shuffle(examples)
         for i in range(0, len(examples), batch_size):
-            loss = _loss(agent, examples[i:i + batch_size])
+            loss = _loss(agent, examples[i:i + batch_size], value_weight)
             agent.optimizer.zero_grad()
             loss.backward()
             agent.optimizer.step()

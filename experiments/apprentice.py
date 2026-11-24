@@ -15,6 +15,8 @@ Candidate starting points for a session are then fitted to people's start with `
     python apprentice.py gamma0.07_protected --protect-movers on        # as phase 1
     python apprentice.py smoke --per-bin 10 --rounds 1 --epochs 2      # a quick check
     python apprentice.py gamma0.07_free_nodest --rounds 1 --epochs 11 --patience 40   # paths.START's run
+    python apprentice.py gamma0.07_free_novalue --rounds 1 --epochs 11 --patience 40 --value-weight 0
+                                                                       # ... without the value loss too
 
 gamma0.07_free (and its round 1 epoch 2, the start from 2026-11-19 to 2026-11-24) was trained with a dest head as well
 (tag pre-dest-removal); gamma0.07_free_nodest is its round 1 again on the same data, without one.
@@ -45,6 +47,8 @@ def parse_args(argv=None):
     ap.add_argument("--max-steps", type=int, default=200)
     ap.add_argument("--temperature", type=float, default=1.0, help="noise in the network's ordering of options")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--value-weight", type=float, default=0.5,
+                    help="the value loss's weight in pretraining (0: no value head training)")
     ap.add_argument("--device", default=None, help="default: cuda, mps or cpu, whichever is there")
     ap.add_argument("--out", default=os.path.join(ROOT, "models", "apprentice"))
     return ap.parse_args(argv)
@@ -82,7 +86,7 @@ def main(argv=None):
     history = student.expert_iteration(agent, [s for _, s in train], [s for _, s in val], rounds=args.rounds,
                                   n_attempts=args.attempts, gamma=args.gamma, max_steps=args.max_steps,
                                   seed=args.seed, checkpoint_dir=run_dir, epochs=args.epochs,
-                                  patience=args.patience)
+                                  patience=args.patience, value_weight=args.value_weight)
     for r in history:
         print(f"round {r['round']}: {r['solved']}/{r['attempts']} attempts solved, {r['boards']} boards "
               f"learned from; kept epoch {r['best_epoch']} (move agreement "
