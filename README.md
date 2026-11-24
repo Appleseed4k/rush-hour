@@ -46,6 +46,8 @@ notebooks/
                        people's start, people's move times, the mixture of modes, the forward and two-mode students and how their learning compares with people's
   p2.3_human_likeness.ipynb  people against the models move by move: revisits, car roles, slides, timing;
                        the soft memory fitted to people's revisits
+  p2.4_rules.ipynb     interpretable move rules over AND-OR's blocking chain (after Butler et al. 2017): what
+                       the student and people learn, in words (experiments/rule_mining.py)
 web/                   the playable Rush Hour page with teachers, for collecting human play
 visualization/          figures by phase; p2_two_mode/two_mode_moves.html steps through how the two-mode student
                        picks each move of one attempt (experiments/two_mode_animation.py)
@@ -76,6 +78,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | p2.1 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p2.1_deliberation` |
 | p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the two-mode student (intuition, flat planning and single AND-OR moves), which starts where people do and gains as much as they do, and the forward student (without AND-OR), which stalls | `p2.2_forward_planning` |
 | p2.3 | People against the models move by move; the hard 10-board memory replaced by a soft one fitted to people's revisits | `p2.3_human_likeness` |
+| p2.4 | Rules in words: a short list of "clear a car so the blocking chain shrinks" rules is near-sound close to the goal; people and the student come to follow it equally, except people's near-goal "open red's path" | `p2.4_rules` |
 | - | The dest head removed: AND-OR ordered by the policy head plays as well, and an apprentice trained without dest targets starts where people do and learns as the dest-head one did; it is now the start of every session (tag `pre-dest-removal` has the code before) | p2_summary section 7, `MODEL.md` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
