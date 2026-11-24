@@ -384,6 +384,8 @@ if __name__ == "__main__":
             lean = json.load(f)["lean"]
         solver = forward.LeanSolver(**lean)
         nets = snapshot_networks(os.path.join(paths.SESSIONS, run, "no_teacher"))
+        with open(os.path.join(paths.SESSIONS, run, "config.json")) as f:
+            nets["0"] = json.load(f)["init"]  # the run's own start (paths.START for the current one)
         weights = {}
         for name, f in nets.items():
             with open(f, "rb") as fh:

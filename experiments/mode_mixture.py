@@ -112,9 +112,11 @@ def bundle(parents, children):
 
 
 def evaluate(path, bun, device):
-    """Per move: (policy logits of its options, moves to go after each option) from the network at `path`."""
+    """Per move: (policy logits of its options, moves to go after each option) from the network at `path` (its value
+    network's estimates if it has a separate one)."""
     agent = PolicyAgent.load(path)
     net = agent.net.to(device).eval()
+    vnet = (agent.value_agent.net if agent.value_agent is not None else agent.net).to(device).eval()
     uniq, enc, is_parent = bun["uniq"], bun["enc"], bun["is_parent"]
     value = np.zeros(len(enc), np.float32)
     policy = {}
@@ -122,6 +124,8 @@ def evaluate(path, bun, device):
         for i in range(0, len(enc), 4096):
             x = torch.from_numpy(enc[i:i + 4096]).float().to(device)
             p, v = net.heads(x)
+            if vnet is not net:
+                v = vnet.heads(x)[1]
             value[i:i + 4096] = (10 * v).cpu().numpy()
             pc = p.cpu().numpy()
             for j in np.nonzero(is_parent[i:i + 4096])[0]:

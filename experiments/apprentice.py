@@ -17,6 +17,11 @@ Candidate starting points for a session are then fitted to people's start with `
     python apprentice.py gamma0.07_free_nodest --rounds 1 --epochs 11 --patience 40   # paths.START's run
     python apprentice.py gamma0.07_free_novalue --rounds 1 --epochs 11 --patience 40 --value-weight 0
                                                                        # ... without the value loss too
+    python apprentice.py gamma0.07_free_valueonly --rounds 1 --epochs 11 --patience 40 --policy-weight 0
+                                                                       # ... a value network alone (same data)
+    python apprentice.py gamma0.07_free_nodest_i1 --rounds 1 --epochs 11 --patience 40 --init-seed 1
+    python apprentice.py gamma0.07_free_novalue_i1 --rounds 1 --epochs 11 --patience 40 --value-weight 0 --init-seed 1
+                                                                       # ... the same data, other initial weights
 
 gamma0.07_free (and its round 1 epoch 2, the start from 2026-11-19 to 2026-11-24) was trained with a dest head as well
 (tag pre-dest-removal); gamma0.07_free_nodest is its round 1 again on the same data, without one.
@@ -47,8 +52,14 @@ def parse_args(argv=None):
     ap.add_argument("--max-steps", type=int, default=200)
     ap.add_argument("--temperature", type=float, default=1.0, help="noise in the network's ordering of options")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--init-seed", type=int, default=None,
+                    help="seed for the network's initial weights and the batch order (default --seed); the puzzles "
+                         "and AND-OR's attempts still follow --seed, so runs differing only here train on the same "
+                         "data")
     ap.add_argument("--value-weight", type=float, default=0.5,
                     help="the value loss's weight in pretraining (0: no value head training)")
+    ap.add_argument("--policy-weight", type=float, default=1.0,
+                    help="the policy loss's weight (0: a value network only)")
     ap.add_argument("--device", default=None, help="default: cuda, mps or cpu, whichever is there")
     ap.add_argument("--out", default=os.path.join(ROOT, "models", "apprentice"))
     return ap.parse_args(argv)
@@ -80,13 +91,15 @@ def main(argv=None):
     print(f"{len(train)} training and {len(val)} validation puzzles; gamma {args.gamma}, "
           f"protect_movers {args.protect_movers}, device {device}", flush=True)
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    init_seed = args.seed if args.init_seed is None else args.init_seed
+    random.seed(init_seed)
+    torch.manual_seed(init_seed)
     agent = student.PolicyAgent(device=device, temperature=args.temperature)
     history = student.expert_iteration(agent, [s for _, s in train], [s for _, s in val], rounds=args.rounds,
                                   n_attempts=args.attempts, gamma=args.gamma, max_steps=args.max_steps,
                                   seed=args.seed, checkpoint_dir=run_dir, epochs=args.epochs,
-                                  patience=args.patience, value_weight=args.value_weight)
+                                  patience=args.patience, value_weight=args.value_weight,
+                                  policy_weight=args.policy_weight)
     for r in history:
         print(f"round {r['round']}: {r['solved']}/{r['attempts']} attempts solved, {r['boards']} boards "
               f"learned from; kept epoch {r['best_epoch']} (move agreement "

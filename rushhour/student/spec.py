@@ -3,8 +3,9 @@ it assumes, where its value came from, and the code that implements it).
 
 The code's own defaults (sessions.parse_args, learning_session) describe a plain, uncalibrated student. The student
 the project uses is those defaults plus the settings in STUDENT. Since 2026-11-19 it starts from AND-OR's apprentice,
-and since 2026-11-24 from one trained without a dest head (DEST below: the start and giving-up scale of the week's runs
-in between; PREVIOUS: the start, giving-up scale and multiplier the older runs used). Use it as
+since 2026-11-24 from one trained without a dest head, and since later that day as two networks, a policy network and
+a separate value network (SHARED below: the one-network start of that day; DEST: the start and giving-up scale of the
+week's runs before; PREVIOUS: the start, giving-up scale and multiplier the older runs used). Use it as
 
     python -m rushhour.sessions my_run --fitted --teachers none bayes4 --shown-weight 0.1
 
@@ -21,7 +22,8 @@ import os
 from .. import paths
 
 STUDENT = {
-    # starting knowledge: AND-OR's apprentice (policy and value heads), stopped where it matches people's start
+    # starting knowledge: AND-OR's apprentice as a policy network and a value network, stopped where it matches
+    # people's start
     "init": os.path.relpath(paths.START, paths.ROOT).replace(os.sep, "/"),  # fitted, with surrender_scale
     # playing
     "explore": 1.0,  # chosen: its own moves sampled from the policy at temperature 1
@@ -62,6 +64,10 @@ PROTOCOL = {
 # with this start and are kept as they were.
 DEST = {"init": os.path.relpath(paths.DEST_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.3}
 
+# The one-network start of 2026-11-24 (no dest head; policy and value heads on a shared trunk), before the separate
+# networks: lean_people_all_m10_ao_nodest*, lean_people_all_m10_ao_nodest_refit*.
+SHARED = {"init": os.path.relpath(paths.SHARED_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.35}
+
 # What the older runs (teach_shortcut_agency*, people_*, fitted_teachers) had instead: a network trained on its own
 # solved attempts with a random 10% teacher, and the multiplier calibrated for it with own labels.
 PREVIOUS = {"init": os.path.relpath(paths.PREVIOUS_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.4,
@@ -74,12 +80,13 @@ def _same(key, value):
     return value
 
 
-def differences(config, protocol=True, previous=False, dest=False):
+def differences(config, protocol=True, previous=False, dest=False, shared=False):
     """{setting: (spec value, the run's value)} where a saved run's config differs from STUDENT (and PROTOCOL; with
-    `dest`, the dest-head start's STUDENT | DEST; with `previous`, the older start's STUDENT | PREVIOUS); settings a
+    `dest`, the dest-head start's STUDENT | DEST; with `shared`, the one-network start's STUDENT | SHARED; with
+    `previous`, the older start's STUDENT | PREVIOUS); settings a
     run saved before they existed count as the code's default then (sessions.ADDED_SETTINGS)."""
     from ..sessions import ADDED_SETTINGS  # sessions imports this package
-    spec = (STUDENT | (DEST if dest else {}) | (PREVIOUS if previous else {})
+    spec = (STUDENT | (DEST if dest else {}) | (SHARED if shared else {}) | (PREVIOUS if previous else {})
             | (PROTOCOL if protocol else {}))
     out = {}
     for key, want in spec.items():

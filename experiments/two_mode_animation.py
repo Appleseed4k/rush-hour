@@ -14,8 +14,9 @@ the attempt: the board with the move played, the draw, the candidates, and a tim
     python experiments/two_mode_animation.py                        # picks an attempt that shows every mode
     python experiments/two_mode_animation.py --layout prb10166_16 --seed 3
 
-Defaults: the session's start network and the two-mode session's weights at its start (w_flat 0.08, w_ao 0.1, the
-opening), on one of people's layouts, no giving up.
+Defaults: the session's start network (paths.START) and the two-mode student's mode weights at its start
+(forward.LeanSolver: AND-OR and flat planning at their first-trial shares, the opening), on one of people's layouts,
+no giving up.
 """
 import argparse
 import json
@@ -148,8 +149,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--layout")
     ap.add_argument("--seed", type=int)
-    ap.add_argument("--w-flat", type=float, default=0.08)
-    ap.add_argument("--w-ao", type=float, default=0.10)
+    ap.add_argument("--w-flat", type=float, default=forward.LeanSolver().flat_at(1),
+                    help="flat planning's share (default: the two-mode student's at its start)")
+    ap.add_argument("--w-ao", type=float, default=forward.LeanSolver().w_ao,
+                    help="AND-OR's share (default: the two-mode student's)")
     ap.add_argument("--net", default=paths.START)
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()

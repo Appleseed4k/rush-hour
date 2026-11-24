@@ -32,31 +32,35 @@ def _batch(agent, examples):
     return x, distance, legal.to(device), optimal.to(device)
 
 
-def _loss(agent, examples, value_weight=0.5):
-    """Policy loss (probability on the target moves), plus the value loss
-    (times `value_weight`; 0: none) where there is a distance target."""
+def _loss(agent, examples, value_weight=0.5, policy_weight=1.0):
+    """Policy loss (probability on the target moves; times `policy_weight`, 0: none), plus the value loss (times
+    `value_weight`; 0: none) where there is a distance target."""
     x, distance, legal, optimal = _batch(agent, examples)
     policy, value = agent.net.heads(x)
-    logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
-    loss = -logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
+    loss = torch.zeros((), device=x.device)
+    if policy_weight:
+        logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
+        loss = loss - policy_weight * logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
     has_distance = ~torch.isnan(distance)
     if value_weight and has_distance.any():
         loss = loss + value_weight * F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10)
     return loss
 
 
-def _weighted_loss(agent, examples, weights):
+def _weighted_loss(agent, examples, weights, value_weight=0.5, policy_weight=1.0):
     """_loss with a weight per example, scaling its move and distance targets. Each term is still a mean over the
     batch's targets, so weights below 1 mean less learning, not the same learning shared out differently."""
     x, distance, legal, optimal = _batch(agent, examples)
     policy, value = agent.net.heads(x)
     w = torch.tensor(weights, dtype=torch.float32, device=x.device)
-    logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
-    loss = (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1) * w).mean()
+    loss = torch.zeros((), device=x.device)
+    if policy_weight:
+        logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
+        loss = loss + policy_weight * (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1) * w).mean()
     has_distance = ~torch.isnan(distance)
-    if has_distance.any():
+    if value_weight and has_distance.any():
         terms = F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10, reduction="none")
-        loss = loss + 0.5 * (terms * w[has_distance]).mean()
+        loss = loss + value_weight * (terms * w[has_distance]).mean()
     return loss
 
 
@@ -111,7 +115,7 @@ def _kept_epoch(history):
 
 
 def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_size=256, on_epoch=None,
-                 value_weight=0.5):
+                 value_weight=0.5, policy_weight=1.0):
     """Supervised training on board Examples: the policy head puts
     probability on any target move, the value head predicts the distance.
 
@@ -126,7 +130,9 @@ def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_siz
     epoch (from 1), on that epoch's own weights - e.g. to save checkpoints.
 
     `value_weight`: the value loss's weight (0: the value head isn't trained,
-    and the trunk learns from the policy targets alone)."""
+    and the trunk learns from the policy targets alone); `policy_weight`
+    likewise for the policy loss (0: a value network only - its validation
+    agreement then means nothing)."""
     examples = list(examples)
     agent._scores = {}
     best, best_state, stale, history = -1.0, None, 0, []
@@ -135,7 +141,7 @@ def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_siz
         agent.net.train()
         random.shuffle(examples)
         for i in range(0, len(examples), batch_size):
-            loss = _loss(agent, examples[i:i + batch_size], value_weight)
+            loss = _loss(agent, examples[i:i + batch_size], value_weight, policy_weight)
             agent.optimizer.zero_grad()
             loss.backward()
             agent.optimizer.step()
@@ -252,7 +258,7 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
 
 
 def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency_step="off", rng=None,
-                  even_batches=False):
+                  even_batches=False, value_weight=0.5, policy_weight=1.0):
     """Learns from `examples` the way a person learns from one puzzle: `steps`
     passes over just these examples (one gradient step per batch), no replay
     of anything earlier, no validation, nothing to rewind to. `weights`: one
@@ -277,9 +283,18 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     splits each pass into the same number of batches, ceil(n / batch_size), of equal size instead (3 of
     about 172): the same number of steps, none of them on a handful of examples.
 
+    With a separate value network (agent.value_agent), the agent's own network learns the move targets only and the
+    value network, in its own passes over the same examples, the distances only.
+
     Returns {"pool": examples, "batches": batches over all passes, "steps": steps taken}."""
     assert agency_step in ("off", "scale", "skip"), agency_step
     rng = rng or random
+    if getattr(agent, "value_agent", None) is not None:
+        kw = dict(steps=steps, batch_size=batch_size, weights=weights, agency_step=agency_step, rng=rng,
+                  even_batches=even_batches)
+        stats = online_update(_Alone(agent), examples, value_weight=0.0, **kw)
+        online_update(agent.value_agent, examples, policy_weight=0.0, **kw)
+        return stats
     stats = {"pool": len(examples), "batches": 0, "steps": 0}
     examples = list(examples) if weights is None else list(zip(examples, weights))
     costly = agency_step != "off" and weights is not None
@@ -304,9 +319,10 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
                     for g, lr in zip(agent.optimizer.param_groups, base):
                         g["lr"] = lr * (mean if agency_step == "scale" else 1.0)
                 if weights is None:
-                    loss = _loss(agent, batch)
+                    loss = _loss(agent, batch, value_weight, policy_weight)
                 else:
-                    loss = _weighted_loss(agent, [e for e, _ in batch], [w for _, w in batch])
+                    loss = _weighted_loss(agent, [e for e, _ in batch], [w for _, w in batch], value_weight,
+                                          policy_weight)
                     if costly:
                         loss = loss / mean
                 agent.optimizer.zero_grad()
@@ -320,6 +336,17 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
         player.net.load_state_dict({k: v.to(player.device) for k, v in agent.net.state_dict().items()})
     player._scores = {}
     return stats
+
+
+class _Alone:
+    """An agent seen without its value network, so online_update trains just its own network."""
+
+    def __init__(self, agent):
+        self._agent = agent
+        self.value_agent = None
+
+    def __getattr__(self, name):
+        return getattr(self._agent, name)
 
 
 LOSS_SUMS = ("n", "w", "policy", "w_policy", "value", "w_value", "n_value")

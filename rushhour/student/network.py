@@ -125,6 +125,12 @@ class PolicyAgent():
     subgoal-by-subgoal reasoning with learned judgment about which option
     to try first).
 
+    `value_agent`, if set, is a second network of the same shape whose value
+    head estimates moves to go in this agent's place (experiments/forward.py
+    `values`), with its own trunk: online_update then trains this agent's
+    network on the move targets only and the value agent's on the distances
+    only. Saved and loaded with the agent.
+
     `temperature` (default 0) adds Gumbel noise of that scale to every
     heuristic score, so AND-OR tries options in an order sampled in
     proportion to the network's preference instead of always the same one -
@@ -149,6 +155,7 @@ class PolicyAgent():
         self.device = "cpu"
         self.to(device)
         self._scores = {}
+        self.value_agent = None  # a separate value network, if any (see the class docstring)
         self.train_device = None  # see train_on
         self._trainer = None
 
@@ -177,20 +184,26 @@ class PolicyAgent():
         self.device = device
         self.net.to(device)
         self._scores = {}
+        if getattr(self, "value_agent", None) is not None:
+            self.value_agent.to(device)
         return self
 
     def save(self, path):
         """Saves this agent's weights plus the hyperparameters load() needs to
         rebuild a network and action space of the same shape. Optimizer state
-        is not saved."""
-        torch.save({
+        is not saved. A separate value network (`value_agent`) is saved with
+        it, as "value_state_dict"."""
+        checkpoint = {
             "version": 2,
             "size": self.size,
             "max_slide": self.max_slide,
             "hidden": self.hidden,
             "blocks": self.blocks,
             "state_dict": self.net.state_dict(),
-        }, path)
+        }
+        if getattr(self, "value_agent", None) is not None:
+            checkpoint["value_state_dict"] = self.value_agent.net.state_dict()
+        torch.save(checkpoint, path)
 
     @classmethod
     def load(cls, path, lr=1e-3, device="cpu"):
@@ -210,6 +223,10 @@ class PolicyAgent():
                     blocks=checkpoint["blocks"], lr=lr)
         state = {k: v for k, v in checkpoint["state_dict"].items() if not k.startswith("dest_head.")}
         agent.net.load_state_dict(state)
+        if "value_state_dict" in checkpoint:  # a separate value network: see `value_agent`
+            agent.value_agent = cls(size=checkpoint["size"], max_slide=checkpoint["max_slide"],
+                                    hidden=checkpoint["hidden"], blocks=checkpoint["blocks"], lr=lr)
+            agent.value_agent.net.load_state_dict(checkpoint["value_state_dict"])
         return agent.to(device)
 
     def action_id(self, state, car_name, direction, steps):

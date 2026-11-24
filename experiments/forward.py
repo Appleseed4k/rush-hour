@@ -62,15 +62,17 @@ def evaluate_many(agent, states):
 
 
 def values(agent, states):
-    """The value head's moves to go (its output x 10) for each of `states`, batched and cached on the agent."""
+    """The value head's moves to go (its output x 10) for each of `states`, batched and cached on the agent - the
+    head of its separate value network (agent.value_agent) if it has one."""
     cache = agent.__dict__.setdefault("_values", {})
     if len(cache) > 50_000:  # clear before working out what is missing, so every state asked for is filled
         cache.clear()
     missing = list({s for s in states if s not in cache})
     if missing:
-        agent.net.eval()
+        judge = getattr(agent, "value_agent", None) or agent
+        judge.net.eval()
         with torch.no_grad():
-            v = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))[1]
+            v = judge.net.heads(torch.stack([judge.encoder.encode(s) for s in missing]).to(judge.device))[1]
         cache.update(zip(missing, (10 * v.cpu()).tolist()))
     return [cache[s] for s in states]
 

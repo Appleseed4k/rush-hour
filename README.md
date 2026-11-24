@@ -19,8 +19,8 @@ rushhour/              the library
   and_or.py            the AND-OR planner (backward subgoal search with lapses γ), as this repo solves with it
   paper_model.py       the paper's model as published (a move per tree), for fitting γ to people's moves
   student/             the simulated student
-    network.py         PolicyAgent: policy and value heads; the policy's moves are intuition, and its
-                       scores also order AND-OR's options (the heuristic deliberation uses)
+    network.py         PolicyAgent: a policy network (its moves are intuition; its scores also order
+                       AND-OR's options) and a separate value network (moves to go, for flat planning)
     solve.py           solving by intuition, by deliberation, or arbitrating; evaluation over many puzzles
     labels.py          what an attempt teaches: own solved play, hindsight shortcuts, shown moves
     train.py           expert iteration (pretraining) and online learning in a session
@@ -48,6 +48,8 @@ notebooks/
                        the soft memory fitted to people's revisits
   p2.4_rules.ipynb     interpretable move rules over AND-OR's blocking chain (after Butler et al. 2017): what
                        the student and people learn, in words (experiments/rule_mining.py)
+  p2.5_value_network.ipynb  one network or two: the policy and value as separate networks
+                       (experiments/separate_value.py)
 web/                   the playable Rush Hour page with teachers, for collecting human play
 visualization/          figures by phase; p2_two_mode/two_mode_moves.html steps through how the two-mode student
                        picks each move of one attempt (experiments/two_mode_animation.py)
@@ -78,6 +80,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | p2.1 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p2.1_deliberation` |
 | p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the two-mode student (intuition, flat planning and single AND-OR moves), which starts where people do and gains as much as they do, and the forward student (without AND-OR), which stalls | `p2.2_forward_planning` |
 | p2.3 | People against the models move by move; the hard 10-board memory replaced by a soft one fitted to people's revisits | `p2.3_human_likeness` |
+| p2.5 | One network or two: the value loss doesn't help the policy learn, and a separate value network judges as well; the student is now a policy network and a value network, which learn as one network did | `p2.5_value_network` |
 | p2.4 | Rules in words: a short list of "clear a car so the blocking chain shrinks" rules is near-sound close to the goal; people and the student come to follow it equally, except people's near-goal "open red's path" | `p2.4_rules` |
 | - | The dest head removed: AND-OR ordered by the policy head plays as well, and an apprentice trained without dest targets starts where people do and learns as the dest-head one did; it is now the start of every session (tag `pre-dest-removal` has the code before) | p2_summary section 7, `MODEL.md` |
 

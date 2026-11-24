@@ -146,7 +146,7 @@ $("sub").textContent = `One attempt on people's layout ${DATA.layout} (${DATA.op
 $("foot").textContent = `Replayed by experiments/two_mode_animation.py from forward.solve_lean with the same random draws ` +
   `(seed ${DATA.seed}; checked to play the same moves). This attempt was picked to show every mode at least twice, so it ` +
   `has more flat and AND-OR moves than a typical one. No giving up. Distances are the true moves to the goal (breadth-first ` +
-  `search), which the student never sees; "moves to go" is the value head's estimate.`;
+  `search), which the student never sees; "moves to go" is the value network's estimate.`;
 
 // board
 const svg = $("board");
@@ -251,10 +251,10 @@ function panels(i) {
       (f.candidates.length > rows.length ? `<tr><td colspan="5" class="no">+ ${f.candidates.length - rows.length} less likely moves</td></tr>` : "") + `</table>`;
     hoverRows(pick, rows, f, "var(--intuition)");
   } else if (f.mode === "flat") {
-    $("pickhead").textContent = "2 · Flat planning: one move deep, judged by the value head";
-    $("pickexplain").textContent = "The policy's 5 most likely moves are each looked at one move ahead. The value head estimates how many moves to go from each resulting board, and a softmax over (fewer moves to go, minus the memory penalty) picks one. A move that solves is always taken.";
+    $("pickhead").textContent = "2 · Flat planning: one move deep, judged by the value network";
+    $("pickexplain").textContent = "The policy's 5 most likely moves are each looked at one move ahead. The value network estimates how many moves to go from each resulting board, and a softmax over (fewer moves to go, minus the memory penalty) picks one. A move that solves is always taken.";
     const rows = f.candidates;
-    pick.innerHTML = `<table><tr><th>move</th><th>value head: moves to go</th><th>chance picked</th><th></th><th>true distance after</th></tr>` +
+    pick.innerHTML = `<table><tr><th>move</th><th>value network: moves to go</th><th>chance picked</th><th></th><th>true distance after</th></tr>` +
       rows.map((c, k) => `<tr class="cand${c.chosen ? " chosen" : ""}" data-k="${k}" style="--chosen:var(--flat)"><td>${label(c)}${c.chosen ? " ◀ played" : ""}</td>` +
         `<td>${fmt(c.togo, 1)}${c.penalty > 0.01 ? ` <span class="no">(memory −${fmt(c.penalty, 1)})</span>` : ""}</td><td>${bar(c.p, "var(--flat)")}</td><td>${fmt(c.p * 100, 0)}%</td><td>${truth(c, f)}</td></tr>`).join("") + `</table>`;
     hoverRows(pick, rows, f, "var(--flat)");

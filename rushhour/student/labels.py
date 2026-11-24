@@ -335,6 +335,7 @@ def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, wi
         if r["solved"]:
             covered |= {(b, m) for bs, ms, _ in solved_routes(r, labels, window) for b, m in zip(bs, ms)}
     encoder = StateEncoder(size)
+    judge = getattr(judge, "value_agent", None) or judge  # a separate value network, if the judge has one
     judge.net.eval()
     moves = []
     for r in results:
