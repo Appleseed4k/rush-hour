@@ -264,7 +264,7 @@ function panels(i) {
     const firstIdx = f.why === "follow-through" ? 1 : 0;
     $("pickexplain").textContent = (f.why === "follow-through" ?
       "The opening's AND-OR pass is still in mind: its second move is played, then the plan is dropped. " :
-      "One pass of AND-OR from this board: to get red out, which cars block it, what blocks them, and so on, with the network ordering the options. Only the first move is played; the rest of the plan is not kept. ") +
+      "One pass of AND-OR from this board: to get red out, which cars block it, what blocks them, and so on, with the network's policy head ordering the options. Only the first move is played; the rest of the plan is not kept. ") +
       (p.complete ? `This pass reached the goal in ${p.moves.length} moves.` : `This pass lapsed after ${p.moves.length} move${p.moves.length === 1 ? "" : "s"} (a 7% chance at each step).`);
     pick.innerHTML = `<div class="chips">` + p.moves.map((m, k) =>
       `<span class="chip ${k === firstIdx ? "first" : (k < firstIdx ? "later" : "")}" data-k="${k}">${k + 1}. ${label(m)}${k === firstIdx ? " ◀ played" : ""}</span>`).join("") + `</div>` +

@@ -14,6 +14,10 @@ Candidate starting points for a session are then fitted to people's start with `
     python apprentice.py gamma0.01_free --gamma 0.01
     python apprentice.py gamma0.07_protected --protect-movers on        # as phase 1
     python apprentice.py smoke --per-bin 10 --rounds 1 --epochs 2      # a quick check
+    python apprentice.py gamma0.07_free_nodest --rounds 1 --epochs 11 --patience 40   # paths.START's run
+
+gamma0.07_free (and its round 1 epoch 2, the start from 2026-11-19 to 2026-11-24) was trained with a dest head as well
+(tag pre-dest-removal); gamma0.07_free_nodest is its round 1 again on the same data, without one.
 """
 import argparse
 import json
@@ -80,8 +84,8 @@ def main(argv=None):
                                   seed=args.seed, checkpoint_dir=run_dir, epochs=args.epochs,
                                   patience=args.patience)
     for r in history:
-        print(f"round {r['round']}: {r['solved']}/{r['attempts']} attempts solved, {r['boards']} boards and "
-              f"{r['subgoals']} subgoals learned from; kept epoch {r['best_epoch']} (move agreement "
+        print(f"round {r['round']}: {r['solved']}/{r['attempts']} attempts solved, {r['boards']} boards "
+              f"learned from; kept epoch {r['best_epoch']} (move agreement "
               f"{r.get('agreement', float('nan')):.0%})", flush=True)
 
 

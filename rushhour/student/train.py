@@ -26,26 +26,19 @@ def _batch(agent, examples):
     n_actions = len(agent.action_space)
     legal = torch.zeros(n, n_actions, dtype=torch.bool)
     optimal = torch.zeros(n, n_actions, dtype=torch.bool)
-    dest_mask = torch.zeros(n, n_actions, dtype=torch.bool)
-    dest_target = torch.zeros(n, n_actions)
     for r, e in enumerate(examples):
         legal[r, e.legal] = True
         optimal[r, e.optimal] = True
-        idx = torch.from_numpy(e.dest_idx.astype(np.int64))
-        dest_mask[r, idx] = True
-        dest_target[r, idx] = torch.from_numpy(e.dest_target)
-    return x, distance, legal.to(device), optimal.to(device), dest_mask.to(device), dest_target.to(device)
+    return x, distance, legal.to(device), optimal.to(device)
 
 
 def _loss(agent, examples):
-    """Policy loss (probability on the target moves), plus dest and value
-    losses where there are targets."""
-    x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, examples)
-    policy, dest, value = agent.net.heads(x)
+    """Policy loss (probability on the target moves), plus the value loss
+    where there is a distance target."""
+    x, distance, legal, optimal = _batch(agent, examples)
+    policy, value = agent.net.heads(x)
     logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
     loss = -logp.masked_fill(~optimal, float("-inf")).logsumexp(1).mean()
-    if dest_mask.any():
-        loss = loss + F.binary_cross_entropy_with_logits(dest[dest_mask], dest_target[dest_mask])
     has_distance = ~torch.isnan(distance)
     if has_distance.any():
         loss = loss + 0.5 * F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10)
@@ -53,57 +46,18 @@ def _loss(agent, examples):
 
 
 def _weighted_loss(agent, examples, weights):
-    """_loss with a weight per example: a number scales its move, dest and distance targets; a pair (number, array)
-    gives its dest targets their own weights (one per dest_idx entry, in order). Each term is still a mean over the
+    """_loss with a weight per example, scaling its move and distance targets. Each term is still a mean over the
     batch's targets, so weights below 1 mean less learning, not the same learning shared out differently."""
-    x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, examples)
-    policy, dest, value = agent.net.heads(x)
-    w = torch.tensor([a[0] if isinstance(a, tuple) else a for a in weights], dtype=torch.float32, device=x.device)
+    x, distance, legal, optimal = _batch(agent, examples)
+    policy, value = agent.net.heads(x)
+    w = torch.tensor(weights, dtype=torch.float32, device=x.device)
     logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
     loss = (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1) * w).mean()
-    if dest_mask.any():
-        w_dest = torch.zeros(dest.shape)
-        for r, (e, a) in enumerate(zip(examples, weights)):
-            w_dest[r, torch.from_numpy(e.dest_idx.astype(np.int64))] = \
-                torch.from_numpy(a[1]) if isinstance(a, tuple) else float(w[r])
-        terms = F.binary_cross_entropy_with_logits(dest[dest_mask], dest_target[dest_mask], reduction="none")
-        loss = loss + (terms * w_dest.to(x.device)[dest_mask]).mean()
     has_distance = ~torch.isnan(distance)
     if has_distance.any():
         terms = F.smooth_l1_loss(value[has_distance], distance[has_distance] / 10, reduction="none")
         loss = loss + 0.5 * (terms * w[has_distance]).mean()
     return loss
-
-
-def _subgoal_batch(agent, subgoals):
-    device = agent.device
-    width = max(len(s.candidates) for s in subgoals)
-    x = torch.from_numpy(np.stack([s.x for s in subgoals])).float().to(device)
-    idx = torch.zeros(len(subgoals), width, dtype=torch.long)
-    valid = torch.zeros(len(subgoals), width, dtype=torch.bool)
-    target = torch.zeros(len(subgoals), width, dtype=torch.bool)
-    for r, s in enumerate(subgoals):
-        n = len(s.candidates)
-        idx[r, :n] = torch.from_numpy(s.candidates.astype(np.int64))
-        valid[r, :n] = True
-        target[r, :n] = torch.from_numpy(s.targets)
-    return x, idx.to(device), valid.to(device), target.to(device)
-
-
-def _subgoal_logits(agent, subgoals):
-    """Dest-head logits of each subgoal's options (-inf past its last), and
-    the valid/target masks."""
-    x, idx, valid, target = _subgoal_batch(agent, subgoals)
-    _, dest, _ = agent.net.heads(x)
-    return dest.gather(1, idx).masked_fill(~valid, float("-inf")), valid, target
-
-
-def _subgoal_loss(agent, subgoals):
-    """Ranking loss over each subgoal's options: probability (softmax over the
-    options' dest scores) on the target options."""
-    logits, _, target = _subgoal_logits(agent, subgoals)
-    logp = torch.log_softmax(logits, dim=1)
-    return -logp.masked_fill(~target, float("-inf")).logsumexp(1).mean()
 
 
 @torch.no_grad()
@@ -120,8 +74,8 @@ def evaluate_agreement(agent, examples, batch_size=2048):
     hits = chance = err = 0.0
     with_distance = with_target = 0
     for i in range(0, len(examples), batch_size):
-        x, distance, legal, optimal, _, _ = _batch(agent, examples[i:i + batch_size])
-        policy, _, value = agent.net.heads(x)
+        x, distance, legal, optimal = _batch(agent, examples[i:i + batch_size])
+        policy, value = agent.net.heads(x)
         top = policy.masked_fill(~legal, float("-inf")).argmax(1)
         has_target = optimal.any(1)
         hits += optimal.gather(1, top[:, None])[has_target].float().sum().item()
@@ -134,24 +88,6 @@ def evaluate_agreement(agent, examples, batch_size=2048):
     return {"agreement": hits / with_target if with_target else float("nan"),
             "chance": chance / with_target if with_target else float("nan"),
             "distance_error": err / with_distance if with_distance else float("nan")}
-
-
-@torch.no_grad()
-def evaluate_subgoals(agent, subgoals, batch_size=2048):
-    """How well the agent orders AND-OR's options on `subgoals`:
-    - agreement: how often its top-scoring option is a target;
-    - chance: the same for a uniformly random option."""
-    if not subgoals:
-        return {"agreement": float("nan"), "chance": float("nan")}
-    agent.net.eval()
-    hits = chance = 0.0
-    for i in range(0, len(subgoals), batch_size):
-        logits, valid, target = _subgoal_logits(agent, subgoals[i:i + batch_size])
-        hits += target.gather(1, logits.argmax(1)[:, None]).float().sum().item()
-        chance += (target.sum(1).float() / valid.sum(1).float()).sum().item()
-    agent.net.train()
-    n = len(subgoals)
-    return {"agreement": hits / n, "chance": chance / n}
 
 
 def _validation_score(scores):
@@ -174,18 +110,12 @@ def _kept_epoch(history):
     return kept
 
 
-def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), epochs=40, patience=6,
-                 batch_size=256, on_epoch=None):
-    """Supervised training: on board Examples, the policy head puts
-    probability on any target move, the dest head predicts each
-    destination's target and the value head the distance; on
-    SubgoalExamples (`subgoals`), the dest head ranks each subgoal's target
-    options first - the ordering AND-OR uses. Board and subgoal batches are
-    interleaved at random.
+def train_policy(agent, examples, val_examples, epochs=40, patience=6, batch_size=256, on_epoch=None):
+    """Supervised training on board Examples: the policy head puts
+    probability on any target move, the value head predicts the distance.
 
     Keeps the weights with the best validation score - the policy head's
-    agreement on `val_examples`, averaged with the ordering agreement on
-    `val_subgoals` when given (both from puzzles held out of training) - and
+    agreement on `val_examples` (from puzzles held out of training) - and
     stops after `patience` epochs without improvement. With nothing to
     validate on (e.g. no validation attempt solved), it keeps each epoch's
     weights as it goes and doesn't stop early. Returns per-epoch
@@ -193,25 +123,19 @@ def train_policy(agent, examples, val_examples, subgoals=(), val_subgoals=(), ep
 
     `on_epoch`, if given, is called as on_epoch(epoch, scores) after each
     epoch (from 1), on that epoch's own weights - e.g. to save checkpoints."""
-    examples, subgoals = list(examples), list(subgoals)
+    examples = list(examples)
     agent._scores = {}
     best, best_state, stale, history = -1.0, None, 0, []
     bar = tqdm(range(epochs), desc="training epochs")
     for _ in bar:
         agent.net.train()
         random.shuffle(examples)
-        random.shuffle(subgoals)
-        batches = [(False, examples[i:i + batch_size]) for i in range(0, len(examples), batch_size)]
-        batches += [(True, subgoals[i:i + batch_size]) for i in range(0, len(subgoals), batch_size)]
-        random.shuffle(batches)
-        for is_subgoal, batch in batches:
-            loss = _subgoal_loss(agent, batch) if is_subgoal else _loss(agent, batch)
+        for i in range(0, len(examples), batch_size):
+            loss = _loss(agent, examples[i:i + batch_size])
             agent.optimizer.zero_grad()
             loss.backward()
             agent.optimizer.step()
         scores = {"agreement": evaluate_agreement(agent, val_examples)["agreement"]}
-        if val_subgoals:
-            scores["subgoal_agreement"] = evaluate_subgoals(agent, list(val_subgoals))["agreement"]
         history.append(scores)
         if on_epoch is not None:
             on_epoch(len(history), scores)
@@ -242,8 +166,8 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
     starting state.
 
     `student` "and_or": round 1's attempts are plain AND-OR; each later
-    round's come from the human-like solver the agent has become (its
-    heuristic, at its temperature). No breadth-first search is involved.
+    round's come from AND-OR with its options ordered by the agent it has
+    become (its policy head, at its temperature). No breadth-first search is involved.
     `student` "intuition": every round's attempts are the agent's own
     intuition (solve_intuition, sampling at temperature `explore`), with
     `teacher` (see teachers.py) - which knows the optimal moves - free to show
@@ -253,8 +177,7 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
     puzzles, the share and number of their moves the teacher showed
     ("taught", "taught_moves") out of all moves played ("moves"), its
     interventions - the teaching budget ("interventions") - the teacher's own counts
-    ("teacher_counts", see teachers.py), boards and
-    subgoals learned from, the best validation scores (agreement with the
+    ("teacher_counts", see teachers.py), boards learned from, the best validation scores (agreement with the
     round's own attempts) and the epoch they came from.
 
     `checkpoint_dir`, if given, gets the learning trajectory: the agent
@@ -298,21 +221,19 @@ def expert_iteration(agent, puzzles, val_puzzles, rounds=3, n_attempts=4, gamma=
         guide = agent if r > 0 or student == "intuition" else None
         settings = {"size": agent.size, "max_slide": agent.max_slide, "student": student, "teacher": teacher,
                     "explore": explore, "memory": memory}
-        examples, subgoals, info = label_attempts(round_puzzles, n_attempts, gamma, guide, seed + 2 * r, max_steps,
-                                                  **settings)
-        val_examples, val_subgoals, _ = label_attempts(val_puzzles, n_attempts, gamma, guide, seed + 2 * r + 1,
-                                                       max_steps, **settings)
+        examples, info = label_attempts(round_puzzles, n_attempts, gamma, guide, seed + 2 * r, max_steps, **settings)
+        val_examples, _ = label_attempts(val_puzzles, n_attempts, gamma, guide, seed + 2 * r + 1, max_steps,
+                                         **settings)
         on_epoch = ((lambda epoch, s, round_=r + 1: checkpoint(round_, epoch, s))
                     if checkpoint_dir is not None and checkpoint_epochs else None)
-        scores = train_policy(agent, examples, val_examples, subgoals, val_subgoals, on_epoch=on_epoch,
-                              **train_kwargs)
+        scores = train_policy(agent, examples, val_examples, on_epoch=on_epoch, **train_kwargs)
         best_epoch = _kept_epoch(scores)
         best = scores[best_epoch - 1]
         history.append({"round": r + 1, "attempts": info["attempts"], "solved": info["solved"],
                         "taught": info["taught"] / info["moves"] if info["moves"] else float("nan"),
                         "taught_moves": info["taught"], "moves": info["moves"],
                         "interventions": info["interventions"], "teacher_counts": info["teacher_counts"],
-                        "boards": len(examples), "subgoals": len(subgoals), "best_epoch": best_epoch, **best})
+                        "boards": len(examples), "best_epoch": best_epoch, **best})
         if checkpoint_dir is not None:
             if not checkpoint_epochs:
                 checkpoint(r + 1, best_epoch, best)  # train_policy has restored the kept weights
@@ -338,7 +259,7 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     set how examples count against each other, and a batch of shown moves at
     weight 0.1 learns as much as one of the student's own. The other settings
     make the weights also set how much is learned, by the batch's mean move
-    weight m (the number, or a pair's first entry); its loss is divided by m,
+    weight m; its loss is divided by m,
     so only the step depends on it:
     - "scale": the step is scaled by m (a tenth of a step at m = 0.1);
     - "skip": the step is taken with probability m, else skipped (a full step
@@ -373,7 +294,7 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
                 batch = examples[i:j]
                 stats["batches"] += 1
                 if costly:
-                    mean = float(np.mean([w[0] if isinstance(w, tuple) else w for _, w in batch]))
+                    mean = float(np.mean([w for _, w in batch]))
                     if mean <= 0 or agency_step == "skip" and rng.random() >= mean:
                         continue
                     for g, lr in zip(agent.optimizer.param_groups, base):
@@ -397,16 +318,15 @@ def online_update(agent, examples, steps=1, batch_size=256, weights=None, agency
     return stats
 
 
-LOSS_SUMS = ("n", "w", "policy", "w_policy", "dest", "w_dest", "n_dest", "dest_weight", "value", "w_value", "n_value")
+LOSS_SUMS = ("n", "w", "policy", "w_policy", "value", "w_value", "n_value")
 
 
 def example_losses(agent, examples, weights, chunk=512):
     """Each example's loss terms under the network as it is (eval mode, no gradient - so BatchNorm's running
     statistics, the random generators and the next update are untouched), with its loss weight (see
     _weighted_loss; None: all 1). Returns {name: array per example} for LOSS_SUMS but "n": n 1s, w (move weight),
-    policy (-log probability on the target moves) and w * policy, dest (sum of its dest-target BCE terms), w_dest
-    (the same weighted), n_dest (dest targets), dest_weight (their weights' sum), value (smooth-L1 term, 0 without
-    a distance) and w * value, n_value (1 with a distance)."""
+    policy (-log probability on the target moves) and w * policy, value (smooth-L1 term, 0 without a distance) and
+    w * value, n_value (1 with a distance). (Runs before the dest head's removal also logged dest sums.)"""
     weights = weights if weights is not None else [1.0] * len(examples)
     net = agent.net
     was_training = net.training
@@ -416,26 +336,19 @@ def example_losses(agent, examples, weights, chunk=512):
         with torch.no_grad():
             for s in range(0, len(examples), chunk):
                 ex, ws = examples[s:s + chunk], weights[s:s + chunk]
-                x, distance, legal, optimal, dest_mask, dest_target = _batch(agent, ex)
-                policy, dest, value = net.heads(x)
+                x, distance, legal, optimal = _batch(agent, ex)
+                policy, value = net.heads(x)
                 logp = torch.log_softmax(policy.masked_fill(~legal, float("-inf")), dim=1)
                 pol = (-logp.masked_fill(~optimal, float("-inf")).logsumexp(1)).cpu().numpy()
-                terms = F.binary_cross_entropy_with_logits(dest, dest_target, reduction="none").cpu().numpy()
                 has = ~torch.isnan(distance)
                 val = torch.zeros(len(ex))
                 if has.any():
                     val[has.cpu()] = F.smooth_l1_loss(value.reshape(-1)[has], distance[has] / 10,
                                                       reduction="none").cpu()
                 val = val.numpy()
-                for r, (e, a) in enumerate(zip(ex, ws)):
-                    w = a[0] if isinstance(a, tuple) else a
-                    idx = e.dest_idx.astype(np.int64)
-                    wd = a[1] if isinstance(a, tuple) else np.full(len(idx), w, dtype=np.float32)
-                    d = terms[r, idx]
+                for r, w in enumerate(ws):
                     out["n"].append(1.0), out["w"].append(w)
                     out["policy"].append(pol[r]), out["w_policy"].append(w * pol[r])
-                    out["dest"].append(float(d.sum())), out["w_dest"].append(float((wd * d).sum()))
-                    out["n_dest"].append(float(len(idx))), out["dest_weight"].append(float(wd.sum()))
                     hv = bool(has[r])
                     out["value"].append(val[r]), out["w_value"].append(w * val[r]), out["n_value"].append(float(hv))
     finally:
@@ -545,7 +458,7 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
                 ws, mark = pending_w[len(pending_w) - len(examples):], shown_weight
             else:
                 ws, mark = agency_weights(examples, results, 0.0, agent.size, agent.max_slide, window, labels), 0.0
-            pending_kind += ["shown" if not isinstance(a, tuple) and a == mark else "own" for a in ws]
+            pending_kind += ["shown" if a == mark else "own" for a in ws]
         extra, counts = progress_examples(results, judge, recent, progress_tail, agent.size, agent.max_slide,
                                           window, labels) if progress else ([], None)
         if log_loss:

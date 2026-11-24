@@ -1,20 +1,21 @@
 """A prototype forward planner for the student: heuristically guided rollouts, scored by the novelty of the
-features they reach, weighted by the dest head's relevance. Offline only - the session student still plays by
-intuition (solve_intuition); this asks whether rollouts would help it, and whether they help more as the network
-gains experience.
+features they reach. Offline only - the session student still plays by intuition (solve_intuition); this asks
+whether rollouts would help it, and whether they help more as the network gains experience.
 
 Every turn, on board b:
-1. relevance: the dest head on b gives every feature (car, positions) - a car standing somewhere on its axis -
-   r(f) = sigmoid(dest logit), its estimate of how soon an optimal route brings that car there (MODEL.md: target
-   0.8^(k-1));
-2. proposals: K rollouts of up to D moves, each move sampled from the policy head (softmax at `temperature` over
+1. proposals: K rollouts of up to D moves, each move sampled from the policy head (softmax at `temperature` over
    legal moves, never back to one of the last `memory` boards of the attempt or to a board earlier in the rollout,
    unless every move would be);
-3. evaluation: a rollout that solves the puzzle wins (the shortest); otherwise its score is the sum of r(f) over the
-   features it reaches that are new - not on any board the attempt has seen (novelty="attempt"; "board": not on b,
-   so no memory of the attempt), each counted once, discounted by `discount`^(t-1) at the move t it is reached;
-   relevance="none" counts each new feature as 1 (novelty alone);
-4. the first move of the best rollout (the first sampled, on a tie) is played.
+2. evaluation: a rollout that solves the puzzle wins (the shortest); otherwise its score is the number of features -
+   a car standing somewhere on its axis - it reaches that are new: not on any board the attempt has seen
+   (novelty="attempt"; "board": not on b, so no memory of the attempt), each counted once, discounted by
+   `discount`^(t-1) at the move t it is reached;
+3. the first move of the best rollout (the first sampled, on a tie) is played.
+
+Until 2026-11-24 each new feature could also be weighted by its relevance, the network's dest head estimate of how
+soon an optimal route brings that car there (relevance="dest", the default then). p2.2_forward_planning found it
+added nothing, and the dest head was removed; the results that used it are in models/summary (tag pre-dest-removal
+has the code).
 
 K=1 is intuition exactly: one sampled move. Rollout boards are evaluated in batches of K.
 
@@ -26,7 +27,6 @@ K=1 is intuition exactly: one sampled move. Rollout boards are evaluated in batc
     python experiments/forward.py integrate            # forward rollouts and backward AND-OR plans as candidates
 """
 import io
-import math
 import os
 import random
 import sys
@@ -42,14 +42,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from rushhour import board, paths, sessions  # noqa: E402
 from rushhour.and_or import AndNode, _red_steps, solve as and_or_solve  # noqa: E402
 from rushhour.student import PolicyAgent  # noqa: E402
-from rushhour.student.labels import _destinations  # noqa: E402
 
 OUT = os.path.join(paths.MODELS, "summary", "forward.csv")
 SESSION = os.path.join(paths.MODELS, "sessions", "aostart_free_m10_s2_agency1")
 
 
 def evaluate_many(agent, states):
-    """Fills agent._evaluate's cache for every state in `states` not yet in it, in one batch."""
+    """Fills agent.policy_logits's cache for every state in `states` not yet in it, in one batch."""
     missing = list({s for s in states if s not in agent._scores})
     if not missing:
         return
@@ -57,9 +56,9 @@ def evaluate_many(agent, states):
         agent._scores.clear()
     agent.net.eval()
     with torch.no_grad():
-        policy, dest, _ = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))
-    for s, p, d in zip(missing, policy.cpu(), dest.cpu()):
-        agent._scores[s] = (p, d)
+        policy, _ = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))
+    for s, p in zip(missing, policy.cpu()):
+        agent._scores[s] = p
 
 
 def values(agent, states):
@@ -71,19 +70,9 @@ def values(agent, states):
     if missing:
         agent.net.eval()
         with torch.no_grad():
-            v = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))[2]
+            v = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))[1]
         cache.update(zip(missing, (10 * v.cpu()).tolist()))
     return [cache[s] for s in states]
-
-
-def relevance_map(agent, state):
-    """{(car, positions): sigmoid(dest logit)} for every on-board destination of every car on `state`."""
-    dest = agent._evaluate(state)[1]
-    sd = dict(state)
-    out = {}
-    for car, direction, steps, moved in _destinations(state, agent.size, agent.max_slide):
-        out[(car, moved)] = 1 / (1 + math.exp(-dest[agent.action_id(state, car, direction, steps)].item()))
-    return out
 
 
 def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=False, penalty=None):
@@ -93,23 +82,23 @@ def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=Fal
     options = list(board.neighbors(state, orientations))
     if penalty is not None:
         logits = (torch.zeros(len(options)) if uniform else
-                  agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]] / max(temperature, 1e-9))
+                  agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]] / max(temperature, 1e-9))
         logits = logits - torch.tensor([penalty(b) for _, b in options], dtype=logits.dtype)
         return rng.choices(options, torch.softmax(logits, dim=0).tolist())[0]
     fresh = [o for o in options if o[1] not in avoid] or options
     if uniform:
         return rng.choice(fresh)
-    logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in fresh]]
+    logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in fresh]]
     if temperature > 0:
         return rng.choices(fresh, torch.softmax(logits / temperature, dim=0).tolist())[0]
     return fresh[int(logits.argmax())]
 
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
-                  relevance="dest", discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None,
+                  discount=1.0, proposals="policy", evaluation="novelty", lam=1.0, half_life=None, rng=None, trace=None, soft_memory=None, backward=0, gamma=0.07, rollout_gamma=None,
                   candidate_memory=0.0, commit=None, sources=None, surrender=None):
     """One attempt by the forward planner (module docstring). proposals="uniform": rollout moves drawn uniformly
-    from the legal ones (same avoidance), so the network acts only through relevance (or value).
+    from the legal ones (same avoidance), so the network acts only through the value head (if it judges).
 
     evaluation: how unsolved rollouts are ranked - "novelty" (the module docstring's score), "value" (the end board's
     moves to go by the value head, fewest first; no novelty) or "novelty then value" (novelty score first, the value
@@ -129,7 +118,7 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
     boards count too, at their place in it).
 
     backward=N adds N candidates from backward reasoning to the k policy rollouts each turn (k may be 0): one
-    and_or.solve pass each from the current board, ordered by the agent's dest head with Gumbel noise at temperature 1
+    and_or.solve pass each from the current board, ordered by the agent's policy head with Gumbel noise at temperature 1
     and lapse rate `gamma` - a whole plan to the goal (it competes as a solving candidate) or the moves made until a
     lapse. Candidates of both kinds are judged alike by `evaluation`; the first move of the best is played.
 
@@ -188,7 +177,6 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
             move, state = sample_move(agent, state, orientations, recent, temperature, rng, uniform, soft(moves))
         else:
             use_novelty, use_value = evaluation != "value", evaluation != "novelty"
-            rel = relevance_map(agent, state) if relevance == "dest" and use_novelty else None
             old = seen if novelty == "attempt" else set(state)
             paths_ = [[state] for _ in range(k)]
             firsts = [None] * k
@@ -259,7 +247,7 @@ def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=
                         for f in b:
                             if f not in old and f not in got:
                                 got.add(f)
-                                score += (rel[f] if rel is not None else 1.0) * discount ** t
+                                score += discount ** t
                     scores.append(score)
                 ends = [-v for v in values(agent, [path[-1] for path in paths_])] if use_value else [0.0] * n
                 ends = [e - first_penalty(f[1]) for e, f in zip(ends, firsts)]
@@ -313,7 +301,7 @@ def solve_flat(agent, state, max_steps, consider=3, tau=1.0, check=False, rollou
     while moves < max_steps and _red_steps(state) > 0:
         options = list(board.neighbors(state, orientations))
         pen = [penalty(b, moves) for _, b in options]
-        logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]].tolist()
+        logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]].tolist()
         order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
         pool = order if consider is None else order[:consider]
         ends = dict(zip(pool, values(agent, [options[i][1] for i in pool])))
@@ -359,7 +347,7 @@ def solve_flat(agent, state, max_steps, consider=3, tau=1.0, check=False, rollou
 def _flat_pick(agent, state, options, pen, consider, tau, rng):
     """solve_flat's choice: the index (into `options`) of the move picked from the policy's `consider` most likely
     (memory penalties `pen` subtracted), by a softmax over -moves to go / tau - pen; a solving move always."""
-    logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]].tolist()
+    logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]].tolist()
     order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
     pool = order if consider is None else order[:consider]
     win = [i for i in pool if _red_steps(options[i][1]) <= 0]
@@ -383,7 +371,7 @@ def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop",
     the last `window` moves; "stall" - the value head's moves to go haven't beaten the attempt's best for `stall`
     forward moves; "either".
 
-    Backward mode: at an impasse, one AND-OR pass from the current board (the dest head ordering its options with
+    Backward mode: at an impasse, one AND-OR pass from the current board (the policy head ordering its options with
     Gumbel noise; lapse rate `gamma`) - a whole plan to the goal or the moves made until it lapsed. The student follows
     it without deliberating: its first move at once, each later one with probability 1 - gamma. When it ends or lapses,
     back to forward mode (the stall count restarts from the board reached).
@@ -470,19 +458,25 @@ def goal_in_sight(state, orientations, depth):
     return None
 
 
+AO_ORDERS = ("policy", "none")
+
+
 def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
-               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0):
+               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0,
+               ao_order="policy"):
     """The two-mode student (w_ao > 0) or, with w_ao 0, the forward student - named "lean" in the code (solve_lean,
     LeanSolver, --lean, lean_* runs and tables). The generative side of the move-by-move mixture
     (notebooks/p2.2_forward_planning.ipynb, 2c):
     each move is made by one of three modes, drawn independently per move:
-    - with probability w_ao, a deliberation: one AND-OR pass from the board (the dest head ordering its options with
+    - with probability w_ao, a deliberation: one AND-OR pass from the board (the policy head ordering its options with
       Gumbel noise, lapse rate `gamma`), and its first move is played - one move per search, as in the paper's model;
       no plan is kept;
     - with probability w_flat, flat planning (_flat_pick: the policy's `consider` most likely moves, a softmax over
       -moves to go / tau);
     - otherwise intuition: a policy sample.
     The soft board memory (beta x 0.5^(age / half-life)) lowers moves back to recent boards in intuition and flat.
+    ao_order: what orders AND-OR's options (and picks a lapse's move) - "policy" (the policy head,
+    PolicyAgent.heuristic) or "none" (random order, plain AND-OR). (Until 2026-11-24, "dest": the dest head.)
     opening=True: the attempt's first move is always a deliberation, and the move after it is the same pass's second
     move (people's slow first look and its one-move follow-through).
 
@@ -493,6 +487,9 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
     "moves", "backward"} (backward: AND-OR moves)."""
     rng = rng or random
     agent.temperature = 1.0
+    if ao_order not in AO_ORDERS:
+        raise ValueError(f"ao_order: one of {AO_ORDERS}, not {ao_order!r}")
+    heuristic = agent.heuristic if ao_order == "policy" else None
     orientations = board.car_orientations(state)
     last_board = {state: 0}
     beta, half = soft_memory if soft_memory else (0.0, 1.0)
@@ -514,7 +511,7 @@ def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, c
             played = seen_goal
             src = "sight"
         elif (opening and moves == 0) or r < w_ao:
-            att = and_or_solve(state, heuristic=agent.heuristic, gamma=gamma)
+            att = and_or_solve(state, heuristic=heuristic, gamma=gamma)
             steps = (att if type(att) is list else att[1]) or []
             if steps:
                 nxt = AndNode(state, *steps[0]).apply(state)
@@ -602,10 +599,7 @@ def _init_one(weights):
 
 def _load_bytes(b):
     checkpoint = torch.load(io.BytesIO(b), weights_only=False, map_location="cpu")
-    agent = PolicyAgent(size=checkpoint["size"], max_slide=checkpoint["max_slide"], hidden=checkpoint["hidden"],
-                        blocks=checkpoint["blocks"])
-    agent.net.load_state_dict(checkpoint["state_dict"])
-    return agent
+    return PolicyAgent.from_checkpoint(checkpoint)
 
 
 def _job(job):
@@ -636,7 +630,6 @@ def networks(students=8):
 CONDITIONS = [
     {"name": "intuition", "kw": {"k": 1}},
     {"name": "K8 D4", "kw": {"k": 8, "depth": 4}},
-    {"name": "K8 D4 novelty only", "kw": {"k": 8, "depth": 4, "relevance": "none"}},
     {"name": "K8 D4 no attempt memory", "kw": {"k": 8, "depth": 4, "novelty": "board"}},
     {"name": "K16 D8", "kw": {"k": 16, "depth": 8}},
 ]
@@ -644,11 +637,10 @@ CONDITIONS = [
 # the value head as the evaluator: alone, and breaking novelty's ties
 VALUE = [
     {"name": "K8 D4 value", "kw": {"k": 8, "depth": 4, "evaluation": "value"}},
-    {"name": "K8 D4 novelty then value", "kw": {"k": 8, "depth": 4, "evaluation": "novelty then value",
-                                                "relevance": "none"}},
+    {"name": "K8 D4 novelty then value", "kw": {"k": 8, "depth": 4, "evaluation": "novelty then value"}},
     {"name": "K8 D4 uniform value", "kw": {"k": 8, "depth": 4, "evaluation": "value", "proposals": "uniform"}},
     {"name": "K8 D4 uniform novelty then value", "kw": {"k": 8, "depth": 4, "evaluation": "novelty then value",
-                                                        "relevance": "none", "proposals": "uniform"}},
+                                                        "proposals": "uniform"}},
 ]
 
 # one compensatory score, lam x novelty - moves to go: lam swept (never forgetting), then fading memory
@@ -673,10 +665,9 @@ INTEGRATE = [
                                               "soft_memory": SOFT}},
 ]
 
-# the control: rollouts proposed uniformly, judged with and without the dest head (novelty only uses no network)
+# the control: rollouts proposed uniformly, judged by novelty alone (no network)
 UNIFORM = [
     {"name": "K8 D4 uniform", "kw": {"k": 8, "depth": 4, "proposals": "uniform"}},
-    {"name": "K8 D4 uniform novelty only", "kw": {"k": 8, "depth": 4, "proposals": "uniform", "relevance": "none"}},
     {"name": "intuition uniform", "kw": {"k": 1, "proposals": "uniform"}},
 ]
 

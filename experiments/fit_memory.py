@@ -392,7 +392,8 @@ if __name__ == "__main__":
         for n in (0,) + SNAP_TRIALS:
             c = {"name": f"after {n} trials, lean", "snapshot": n, "kind": "lean",
                  "kw": {"lean": True, "w_flat": solver.flat_at(n + 1), "w_ao": lean["w_ao"],
-                        "opening": lean["opening"]}}
+                        "opening": lean["opening"],
+                        **({"ao_order": lean["ao_order"]} if "ao_order" in lean else {})}}
             names = ["0"] if n == 0 else [m for m in nets if m.split()[0] == str(n)]
             for i in instances:
                 for sname in names:

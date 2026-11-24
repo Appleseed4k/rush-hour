@@ -9,40 +9,26 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-from ..and_or import AndNode, OrNode, _red_steps, solve as and_or_solve
-from ..board import DELTAS, car_orientations, neighbors
-from .network import DEST_DECAY, DIRECTIONS, StateEncoder
+from ..and_or import AndNode, _red_steps, solve as and_or_solve
+from ..board import car_orientations, neighbors
+from .network import DIRECTIONS, StateEncoder
 from .solve import _WORKER, _agent_payload, _cap, _init_attempt_worker, solve_intuition
 
 
 # The network learns only what a solver itself could know: its own solved
-# AND-OR attempts, with loops cut out, and which option resolved each
-# subgoal in the plans that worked (see expert_iteration). Exact labels from
-# a breadth-first search of each puzzle's state space (label_puzzles,
-# label_subgoals) are for measuring the network, not for training it.
+# attempts (AND-OR's in pretraining, see expert_iteration), with loops cut
+# out or shortcuts found in hindsight, and the moves a teacher showed.
 
 class Example():
-    """One labelled board: its encoding, distance to the goal, legal and
-    target move indices, and dest-head targets (action indices and values).
-    From attempts (attempt_examples), the distance is the moves the best
-    attempt still took and the target move is the one it played."""
-    __slots__ = ("state", "x", "distance", "legal", "optimal", "dest_idx", "dest_target")
+    """One labelled board: its encoding, distance to the goal (None: no
+    distance target), and legal and target move indices. From attempts
+    (attempt_examples), the distance is the moves the best attempt still
+    took and the target move is the one it played."""
+    __slots__ = ("state", "x", "distance", "legal", "optimal")
 
-    def __init__(self, state, x, distance, legal, optimal, dest_idx, dest_target):
+    def __init__(self, state, x, distance, legal, optimal):
         self.state, self.x, self.distance = state, x, distance
         self.legal, self.optimal = legal, optimal
-        self.dest_idx, self.dest_target = dest_idx, dest_target
-
-
-class SubgoalExample():
-    """One subgoal from an AND-OR search: the board, the action indices of
-    the options AND-OR compares there (the subgoal car's candidate moves),
-    and which of them are targets - the option that resolved it in a plan
-    that worked, or the options an optimal solution prefers."""
-    __slots__ = ("state", "x", "candidates", "targets")
-
-    def __init__(self, state, x, candidates, targets):
-        self.state, self.x, self.candidates, self.targets = state, x, candidates, targets
 
 
 def _move_index(state_dict, car, direction, steps, n_cols, max_slide):
@@ -51,112 +37,6 @@ def _move_index(state_dict, car, direction, steps, n_cols, max_slide):
     r = min(i for i, _ in state_dict[car])
     c = min(j for _, j in state_dict[car])
     return ((r * n_cols + c) * 4 + DIRECTIONS.index(direction)) * max_slide + steps - 1
-
-
-def _dest_labels(board, reached, size, max_slide):
-    """Dest-head (action indices, targets) for `board`: every on-board
-    destination of every car, with target DEST_DECAY ** (k - 1) if
-    reached[(car, positions)] = k, else 0."""
-    sd = dict(board)
-    dest_idx, dest_target = [], []
-    for car, direction, steps, moved in _destinations(board, size, max_slide):
-        k = reached.get((car, moved))
-        dest_idx.append(_move_index(sd, car, direction, steps, size[1], max_slide))
-        dest_target.append(DEST_DECAY ** (k - 1) if k is not None else 0.0)
-    return np.array(dest_idx, dtype=np.int16), np.array(dest_target, dtype=np.float32)
-
-
-def _destinations(board, size, max_slide):
-    """(car, direction, steps, positions moved to) for every on-board destination of every car, in the order of
-    _dest_labels's targets."""
-    n_rows, n_cols = size
-    for car, cells in board:
-        horizontal = cells[0][0] == cells[1][0]
-        for direction in ("lr" if horizontal else "ud"):
-            di, dj = DELTAS[direction]
-            for steps in range(1, max_slide + 1):
-                moved = tuple((i + di * steps, j + dj * steps) for i, j in cells)
-                if not all(0 <= i < n_rows and 0 <= j < n_cols for i, j in moved):
-                    break
-                yield car, direction, steps, moved
-
-
-class SearchRecorder():
-    """While active (a `with` block), records the search tree of every
-    and_or.solve pass: one frame per OrNode.solve call (its attempted
-    actions) and per AndNode.solve call (its subgoals, and whether it
-    succeeded). Call reset() before each pass."""
-
-    def __enter__(self):
-        self._or, self._and = OrNode.solve, AndNode.solve
-        recorder = self
-
-        def or_solve(node):
-            frame = {"node": node, "attempts": [], "ok": False,
-                     "free": (node.car_name, node.collisions) in node.visited}
-            if recorder.stack:
-                recorder.stack[-1]["children"].append(frame)
-            recorder.subgoals.append(frame)
-            recorder.stack.append(frame)
-            try:
-                result = recorder._or(node)
-            finally:
-                recorder.stack.pop()
-            frame["ok"] = result is not None
-            return result
-
-        def and_solve(node):
-            frame = {"node": node, "children": [], "ok": False}
-            (recorder.stack[-1]["attempts"] if recorder.stack else recorder.roots).append(frame)
-            recorder.stack.append(frame)
-            try:
-                result = recorder._and(node)
-            finally:
-                recorder.stack.pop()
-            frame["ok"] = result is not None
-            return result
-
-        OrNode.solve, AndNode.solve = or_solve, and_solve
-        self.reset()
-        return self
-
-    def __exit__(self, *exc):
-        OrNode.solve, AndNode.solve = self._or, self._and
-
-    def reset(self):
-        self.roots, self.stack, self.subgoals = [], [], []
-
-    def plan_choices(self):
-        """[(OrNode, (direction, steps))] - every subgoal on the plan the last
-        pass returned and the option that resolved it; empty if the pass
-        lapsed or found no plan. A successful AndNode's subgoals are its last
-        k OrNode calls (k = its blocker count): it returns right after the
-        blocker order that worked."""
-        root = next((r for r in reversed(self.roots) if r["ok"]), None)
-        choices = []
-
-        def walk(and_frame):
-            k = len(and_frame["node"].blockers())
-            for or_frame in (and_frame["children"][-k:] if k else []):
-                chosen = next(a for a in reversed(or_frame["attempts"]) if a["ok"])
-                choices.append((or_frame["node"], (chosen["node"].direction, chosen["node"].steps)))
-                walk(chosen)
-
-        if root is not None:
-            walk(root)
-        return choices
-
-
-def _subgoal_example(node, targets, size, max_slide):
-    """SubgoalExample for an OrNode; `targets` is the set of its (direction,
-    steps) options to rank first. None if it has fewer than two options."""
-    options = node.directions()
-    if len(options) < 2:
-        return None
-    sd = dict(node.state)
-    candidates = [_move_index(sd, node.car_name, d, s, size[1], max_slide) for d, s in options]
-    return SubgoalExample(node.state, StateEncoder(size).encode_numpy(node.state),
-                          np.array(candidates, dtype=np.int16), np.array([o in targets for o in options]))
 
 
 def erase_loops(boards, moves, window=None):
@@ -264,10 +144,9 @@ def solved_routes(result, labels="own", window=None):
 def attempt_examples(attempts, size=(6, 6), max_slide=5):
     """Examples from solved attempts ((boards, moves) pairs): per board, the
     attempt with the fewest moves left from it supplies the labels - the
-    move it played (moves tied for fewest all count), the moves it still
-    took as the distance, and how many moves later it had each car on each
-    destination as dest targets."""
-    best = {}  # board -> (moves left, set of move indices, {(car, positions): moves until reached})
+    move it played (moves tied for fewest all count) and the moves it still
+    took as the distance."""
+    best = {}  # board -> (moves left, set of move indices)
     for boards, moves in attempts:
         n = len(moves)
         for t in range(n):
@@ -278,33 +157,24 @@ def attempt_examples(attempts, size=(6, 6), max_slide=5):
             if board in best and best[board][0] == left:
                 best[board][1].add(idx)
                 continue
-            reached = {}
-            for k in range(t + 1, n + 1):
-                for entry in boards[k]:
-                    reached.setdefault(entry, k - t)
-            for entry in board:
-                reached.pop(entry, None)
-            best[board] = (left, {idx}, reached)
+            best[board] = (left, {idx})
 
     encoder = StateEncoder(size)
     examples = []
-    for board, (left, targets, reached) in best.items():
+    for board, (left, targets) in best.items():
         sd = dict(board)
         legal = [_move_index(sd, *m, size[1], max_slide) for m, _ in neighbors(board, car_orientations(board))]
-        dest_idx, dest_target = _dest_labels(board, reached, size, max_slide)
-        examples.append(Example(board, encoder.encode_numpy(board), left, legal, sorted(targets), dest_idx,
-                                dest_target))
+        examples.append(Example(board, encoder.encode_numpy(board), left, legal, sorted(targets)))
     return examples
 
 
 def _shown_example(board, moves, size, max_slide):
     """Example from a teacher showing `moves` on `board`: the moves are the
-    targets; there is no distance or destination target."""
+    targets; there is no distance target."""
     sd = dict(board)
     legal = [_move_index(sd, *m, size[1], max_slide) for m, _ in neighbors(board, car_orientations(board))]
     optimal = sorted(_move_index(sd, *m, size[1], max_slide) for m in moves)
-    return Example(board, StateEncoder(size).encode_numpy(board), None, legal, optimal,
-                   np.zeros(0, dtype=np.int16), np.zeros(0, dtype=np.float32))
+    return Example(board, StateEncoder(size).encode_numpy(board), None, legal, optimal)
 
 
 def intuition_examples(results, size=(6, 6), max_slide=5, window=None, encode=1.0, rng=None, labels="own"):
@@ -353,7 +223,7 @@ def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, ag
         if teacher is not None:
             teacher.end_attempt(results[-1])
     examples = intuition_examples(results, size, max_slide)
-    return examples, [], {"solved": sum(r["solved"] for r in results),
+    return examples, {"solved": sum(r["solved"] for r in results),
                           "taught": sum(sum(r["taught"]) for r in results),
                           "moves": sum(len(r["moves"]) for r in results),
                           "interventions": sum(sum(r["taught"]) for r in results),
@@ -361,18 +231,18 @@ def _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, ag
 
 
 def attempt_puzzle(job):
-    """(Examples, SubgoalExamples, info) for one puzzle from `n_attempts`
-    attempts by the student `mode` describes (see label_attempts). info
-    counts solved attempts, moves the teacher showed and moves played.
+    """(Examples, info) for one puzzle from `n_attempts` attempts by the
+    student `mode` describes (see label_attempts). info counts solved
+    attempts, moves the teacher showed and moves played.
 
-    - "and_or" student: AND-OR attempts at lapse probability `gamma`, guided
-      by the worker's agent if it has one. Only solved attempts teach: their
-      boards, loops cut out (attempt_examples), and every subgoal of every
-      plan they completed, with the option that resolved it as the target.
+    - "and_or" student: AND-OR attempts at lapse probability `gamma`, its
+      options ordered by the worker's agent (its policy head) if it has one,
+      else at random (plain AND-OR). Only solved attempts teach: their
+      boards, loops cut out (attempt_examples).
     - "intuition" student: the worker's agent playing by intuition alone
       (solve_intuition), sampling at the mode's "explore" temperature, with
         the mode's "teacher" (see teachers.py) free to show optimal moves.
-      Solved attempts teach as above (no subgoals: there is no search); every
+      Solved attempts teach as above; every
       move the teacher showed teaches too, solved or not - its board with
       that move as the target, unless a solved attempt already labels the
       board."""
@@ -382,43 +252,35 @@ def attempt_puzzle(job):
     if mode["student"] == "intuition":
         return _intuition_attempts(state0, n_attempts, seed, max_steps, size, max_slide, agent, mode)
     heuristic = agent.heuristic if agent is not None else None
-    attempts, subgoals, played = [], [], 0
-    with SearchRecorder() as recorder:
-        for _ in range(n_attempts):
-            state, boards, moves, choices = state0, [state0], [], []
-            while len(moves) < max_steps and _red_steps(state) > 0:
-                recorder.reset()
-                att = and_or_solve(state, heuristic=heuristic, gamma=gamma)
-                step = att if type(att) is list else att[1]
-                if not step:
-                    break
-                choices += recorder.plan_choices()
-                for move in step:
-                    state = AndNode(state, *move).apply(state)
-                    boards.append(state)
-                    moves.append(move)
-            played += len(moves)
-            if _red_steps(state) <= 0:
-                attempts.append(erase_loops(boards, moves))
-                for node, chosen in choices:
-                    example = _subgoal_example(node, {chosen}, size, max_slide)
-                    if example is not None:
-                        subgoals.append(example)
-    return attempt_examples(attempts, size, max_slide), subgoals, {"solved": len(attempts), "taught": 0,
-                                                                   "moves": played}
+    attempts, played = [], 0
+    for _ in range(n_attempts):
+        state, boards, moves = state0, [state0], []
+        while len(moves) < max_steps and _red_steps(state) > 0:
+            att = and_or_solve(state, heuristic=heuristic, gamma=gamma)
+            step = att if type(att) is list else att[1]
+            if not step:
+                break
+            for move in step:
+                state = AndNode(state, *move).apply(state)
+                boards.append(state)
+                moves.append(move)
+        played += len(moves)
+        if _red_steps(state) <= 0:
+            attempts.append(erase_loops(boards, moves))
+    return attempt_examples(attempts, size, max_slide), {"solved": len(attempts), "taught": 0, "moves": played}
 
 
 def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_steps=200, processes=None,
                    size=(6, 6), max_slide=5, student="and_or", teacher=None, explore=1.0, memory=10):
     """Labels from the student's own attempts on every puzzle (in parallel):
-    (Examples, SubgoalExamples, info) - see attempt_puzzle. info sums
+    (Examples, info) - see attempt_puzzle. info sums
     attempts made, attempts solved, moves the teacher showed ("taught"; also
     "interventions", the teaching budget spent), moves played, and the
     teacher's own counts ("teacher_counts", see teachers.py).
 
-    `student` "and_or": with `agent`, attempts are made by the human-like
-    solver it guides (its heuristic, at its temperature); without, by plain
-    AND-OR. `student` "intuition": `agent` (required) plays by intuition
+    `student` "and_or": with `agent`, attempts are made by AND-OR with its
+    options ordered by the agent (its heuristic, at its temperature);
+    without, by plain AND-OR. `student` "intuition": `agent` (required) plays by intuition
     alone, sampling at temperature `explore` with recent-board memory
     `memory`, and `teacher` (see teachers.py), if given, may show optimal moves.
     `size` and `max_slide` (the agent's, when one is given) set the action
@@ -435,53 +297,29 @@ def label_attempts(puzzles, n_attempts=4, gamma=0.07, agent=None, seed=0, max_st
     mode = {"student": student, "teacher": teacher, "explore": explore, "memory": memory}
     jobs = [(state, n_attempts, gamma, hash((seed, i)) & 0xFFFFFFFF, _cap(max_steps, state), (size, max_slide), mode)
             for i, state in enumerate(puzzles)]
-    examples, subgoals = [], []
+    examples = []
     info = {"attempts": len(puzzles) * n_attempts, "solved": 0, "taught": 0, "moves": 0, "interventions": 0,
             "teacher_counts": Counter()}
     with Pool(processes, initializer=_init_attempt_worker, initargs=(weights, config)) as pool:
-        for ex, sg, counts in tqdm(pool.imap(attempt_puzzle, jobs, chunksize=2), total=len(jobs),
-                                   desc="attempts"):
+        for ex, counts in tqdm(pool.imap(attempt_puzzle, jobs, chunksize=2), total=len(jobs), desc="attempts"):
             examples += ex
-            subgoals += sg
             for k, v in counts.items():
                 if k == "teacher_counts":
                     info[k].update(v)
                 else:
                     info[k] += v
     info["teacher_counts"] = dict(info["teacher_counts"])
-    return examples, subgoals, info
+    return examples, info
 
 
 def agency_weights(examples, results, shown_weight, size=(6, 6), max_slide=5, window=None, labels="own"):
     """Loss weights (see _weighted_loss) for intuition_examples(results, ...): what a teacher's shown move taught
     counts `shown_weight`, the student's own play 1 - with `shown_weight` < 1 it learns less from being shown a move
     than from finding one itself (the generation effect), at 0 nothing at all. An example on a board where a move
-    was shown weighs `shown_weight` throughout; on a solved path's other boards, so do the dest targets of
-    destinations a shown move first brought a car to (the rest of the example weighs 1; with several routes from a
-    board, as shortcut labels have, a destination any of them got from a shown move). `size`, `max_slide`, `window`
-    and `labels` as given to intuition_examples."""
+    was shown weighs `shown_weight`, every other example 1. `size`, `max_slide`, `window` and `labels` are those
+    given to intuition_examples (kept for its signature; the weights depend only on where moves were shown)."""
     shown = {b for r in results for b, t in zip(r["boards"], r["taught"]) if t}
-    given = {}  # path board -> destinations a shown move first brought a car to, later on the path
-    for r in results:
-        if r["solved"]:
-            for path, moves, taught in solved_routes(r, labels, window):
-                for i, board in enumerate(path[:-1]):
-                    first = {}
-                    for j in range(i, len(moves)):
-                        car = moves[j][0]
-                        first.setdefault((car, dict(path[j + 1])[car]), taught[j])
-                    given.setdefault(board, set()).update(entry for entry, t in first.items() if t)
-    weights = []
-    for e in examples:
-        if e.state in shown:
-            weights.append(shown_weight)
-        elif given.get(e.state):
-            dest = [shown_weight if (car, moved) in given[e.state] else 1.0
-                    for car, _, _, moved in _destinations(e.state, size, max_slide)]
-            weights.append((1.0, np.array(dest, dtype=np.float32)))
-        else:
-            weights.append(1.0)
-    return weights
+    return [shown_weight if e.state in shown else 1.0 for e in examples]
 
 
 def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, window=None, labels="own"):
@@ -502,7 +340,7 @@ def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, wi
     for r in results:
         with torch.no_grad():
             v = judge.net.heads(torch.from_numpy(np.stack([encoder.encode_numpy(b) for b in r["boards"]])).float()
-                                .to(judge.device))[2].cpu().numpy() * 10
+                                .to(judge.device))[1].cpu().numpy() * 10
         for t, (move, taught) in enumerate(zip(r["moves"], r["taught"])):
             if not taught:
                 recent.append(v[t] - v[t + 1])
@@ -519,7 +357,6 @@ def progress_examples(results, judge, recent, tail, size=(6, 6), max_slide=5, wi
         idx = _move_index(sd, *move, size[1], max_slide)
         targets = [idx] if progress >= hi else [i for i in legal if i != idx]
         if targets:
-            examples.append(Example(board, encoder.encode_numpy(board), None, legal, targets,
-                                    np.zeros(0, dtype=np.int16), np.zeros(0, dtype=np.float32)))
+            examples.append(Example(board, encoder.encode_numpy(board), None, legal, targets))
             counts["forward" if progress >= hi else "back"] += 1
     return examples, counts

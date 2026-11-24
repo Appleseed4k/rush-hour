@@ -18,7 +18,8 @@ averaged) - so that a rising w isn't just people's intuition improving.
     python experiments/mode_mixture.py   # writes models/summary/mode_mixture/{moves.csv.gz, fit.csv, people.csv}
 
 Backward reasoning (`andor`): a third component, the two-mode student's backward mode - one AND-OR pass from the board
-(the network's dest head ordering its options with Gumbel noise, lapse rate 0.07), scored by its first move. That
+(the network ordering its options with Gumbel noise, lapse rate 0.07 - the dest head of the start of the time,
+paths.DEST_START, in the saved fit; the policy head since 2026-11-24), scored by its first move. That
 probability has no closed form, so it is estimated by sampling passes from every board people played on (100 with the
 start network; 25 per student with a stage's 8 snapshots). Each move is scored as the first move of a fresh pass (plan
 following - later steps of a plan made earlier - is not modelled). The three-way weights (intuition, flat, AND-OR) are
@@ -120,7 +121,7 @@ def evaluate(path, bun, device):
     with torch.no_grad():
         for i in range(0, len(enc), 4096):
             x = torch.from_numpy(enc[i:i + 4096]).float().to(device)
-            p, _, v = net.heads(x)
+            p, v = net.heads(x)
             value[i:i + 4096] = (10 * v).cpu().numpy()
             pc = p.cpu().numpy()
             for j in np.nonzero(is_parent[i:i + 4096])[0]:

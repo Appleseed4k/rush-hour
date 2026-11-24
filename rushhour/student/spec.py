@@ -2,8 +2,9 @@
 it assumes, where its value came from, and the code that implements it).
 
 The code's own defaults (sessions.parse_args, learning_session) describe a plain, uncalibrated student. The student
-the project uses is those defaults plus the settings in STUDENT. Since 2026-11-19 it starts from AND-OR's apprentice
-(PREVIOUS below: the start, giving-up scale and multiplier the older runs used). Use it as
+the project uses is those defaults plus the settings in STUDENT. Since 2026-11-19 it starts from AND-OR's apprentice,
+and since 2026-11-24 from one trained without a dest head (DEST below: the start and giving-up scale of the week's runs
+in between; PREVIOUS: the start, giving-up scale and multiplier the older runs used). Use it as
 
     python -m rushhour.sessions my_run --fitted --teachers none bayes4 --shown-weight 0.1
 
@@ -20,7 +21,7 @@ import os
 from .. import paths
 
 STUDENT = {
-    # starting knowledge: AND-OR's apprentice, stopped where it matches people's start
+    # starting knowledge: AND-OR's apprentice (policy and value heads), stopped where it matches people's start
     "init": os.path.relpath(paths.START, paths.ROOT).replace(os.sep, "/"),  # fitted, with surrender_scale
     # playing
     "explore": 1.0,  # chosen: its own moves sampled from the policy at temperature 1
@@ -28,7 +29,7 @@ STUDENT = {
     "max_attempts": 1,  # chosen: one attempt per puzzle, no restarts
     "step_factor": 10.0, "min_steps": 50, "max_steps": None,  # chosen: the move cap, max(50, 10 x optimal)
     "surrender": True,  # people: gives up as people do (the hazard by moves / optimal, saved as surrender_table)...
-    "surrender_scale": 0.3,  # fitted: ...at 0.3 x people's rates, together with init
+    "surrender_scale": 0.35,  # fitted: ...at 0.35 x people's rates, together with init
     # what it learns from
     "labels": "all", "window": -1,  # fitted, with multiplier: full hindsight (shortcut labels through every board
     # seen) - the best of own, W=3, W=10 and full at x5-x20, though W=10 x5 and W=3 x20 come close
@@ -56,6 +57,11 @@ PROTOCOL = {
     "seed": 0,
 }
 
+# What the runs of 2026-11-19 to 2026-11-24 (aostart_*, ao_*, lean_*, planner_*) had instead: the apprentice trained
+# with a dest head too, stopped after 2 epochs, and giving up fitted with it. The multiplier and labels were fitted
+# with this start and are kept as they were.
+DEST = {"init": os.path.relpath(paths.DEST_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.3}
+
 # What the older runs (teach_shortcut_agency*, people_*, fitted_teachers) had instead: a network trained on its own
 # solved attempts with a random 10% teacher, and the multiplier calibrated for it with own labels.
 PREVIOUS = {"init": os.path.relpath(paths.PREVIOUS_START, paths.ROOT).replace(os.sep, "/"), "surrender_scale": 0.4,
@@ -68,12 +74,13 @@ def _same(key, value):
     return value
 
 
-def differences(config, protocol=True, previous=False):
+def differences(config, protocol=True, previous=False, dest=False):
     """{setting: (spec value, the run's value)} where a saved run's config differs from STUDENT (and PROTOCOL; with
-    `previous`, the older start's STUDENT | PREVIOUS); settings a run saved before they existed count as the code's
-    default then (sessions.ADDED_SETTINGS)."""
+    `dest`, the dest-head start's STUDENT | DEST; with `previous`, the older start's STUDENT | PREVIOUS); settings a
+    run saved before they existed count as the code's default then (sessions.ADDED_SETTINGS)."""
     from ..sessions import ADDED_SETTINGS  # sessions imports this package
-    spec = STUDENT | (PREVIOUS if previous else {}) | (PROTOCOL if protocol else {})
+    spec = (STUDENT | (DEST if dest else {}) | (PREVIOUS if previous else {})
+            | (PROTOCOL if protocol else {}))
     out = {}
     for key, want in spec.items():
         have = config.get(key, ADDED_SETTINGS.get(key))

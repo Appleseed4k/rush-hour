@@ -8,9 +8,12 @@ HUMANS = os.path.join(ROOT, "23vrb-osfstorage-archive")  # Olieslagers et al. (2
 MODELS = os.path.join(ROOT, "models")
 SESSIONS = os.path.join(MODELS, "sessions")  # session runs (sessions.py), one folder per run
 APPRENTICE = os.path.join(MODELS, "apprentice")  # expert-iteration runs (experiments/apprentice.py)
-# The student every session starts from: AND-OR's apprentice (gamma 0.07, protect_movers off) after 2 epochs of its
-# first round, the epoch that matches people's start (with giving-up scale 0.30; surrender.py --epochs all).
-START = os.path.join(APPRENTICE, "gamma0.07_free", "round1_epoch02.pt")
+# The student every session starts from: AND-OR's apprentice (gamma 0.07, protect_movers off, no dest head) after 3
+# epochs of its first round, the epoch that matches people's start (with giving-up scale 0.35; surrender.py).
+START = os.path.join(APPRENTICE, "gamma0.07_free_nodest", "round1_epoch03.pt")
+# The start from 2026-11-19 to 2026-11-24, which the runs of that week used (phase 1's aostart_* teaching runs, phase
+# 2's sessions): the same apprentice trained with a dest head as well, after 2 epochs (giving-up scale 0.30).
+DEST_START = os.path.join(APPRENTICE, "gamma0.07_free", "round1_epoch02.pt")
 # The start before 2026-11-19, which every older run in the summary used: a network trained on its own solved attempts
 # with a random 10% teacher (the p1.2 run fresh_p0.1/random_0.1, one checkpoint per round; giving-up scale 0.40).
 STUDENTS = os.path.join(MODELS, "students")

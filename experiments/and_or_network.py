@@ -1,6 +1,7 @@
 """Network-ordered AND-OR (deliberation only) on the humans' 70 layouts, cached for notebooks/p1_summary.ipynb.
 
-The apprentice's dest head orders AND-OR's candidate moves and picks what a lapse plays (PolicyAgent.heuristic, with
+The apprentice orders AND-OR's candidate moves and picks what a lapse plays (PolicyAgent.heuristic - its dest head
+until 2026-11-24, when the cache was made; its policy head since - with
 Gumbel noise at temperature HEURISTIC_TEMPERATURE as during expert iteration); no intuitive moves are played - the
 threshold > 1 end of solve_arbitrated. Each checkpoint plays each layout RUNS times per gamma, exactly as
 and_or_gamma.py plays plain AND-OR (whole plans, protect_movers off, replanning after each pass, a cap

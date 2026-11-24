@@ -85,7 +85,7 @@ def explain(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=True, consi
             else:
                 frame["why"] = "and-or found nothing"
         elif r < w_ao + w_flat:
-            logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]].tolist()
+            logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]].tolist()
             order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
             pool = order[:consider]
             win = [i for i in pool if _red_steps(options[i][1]) <= 0]
@@ -101,7 +101,7 @@ def explain(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=True, consi
                                     "true": dist[options[i][1]], "chosen": i == pick}
                                    for i, e, p in zip(pool, ends, probs)]
         if played is None:
-            logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m, _ in options]]
+            logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]]
             probs = torch.softmax(logits - torch.tensor(pen, dtype=logits.dtype), dim=0).tolist()
             played = rng.choices(options, probs)[0]
             frame["mode"] = "intuition"

@@ -90,7 +90,7 @@ def solve_arbitrated(agent, state, max_steps=200, gamma=0.0, threshold=0.5, memo
     while len(moves) < max_steps and _red_steps(state) > 0:
         options = list(neighbors(state, orientations))
         if threshold <= 1:
-            logits = agent._evaluate(state)[0][[agent.action_id(state, *move) for move, _ in options]]
+            logits = agent.policy_logits(state)[[agent.action_id(state, *move) for move, _ in options]]
             probs = torch.softmax(logits, dim=0)
             best = int(probs.argmax())
             choice = best
@@ -144,7 +144,7 @@ def solve_intuition(agent, state, max_steps=200, memory=10, temperature=0.0, tea
             """The student's own move on this board, chosen once, when first asked."""
             if not proposed:
                 fresh = [m for m, nxt in options.items() if nxt not in recent] or list(options)
-                logits = agent._evaluate(state)[0][[agent.action_id(state, *m) for m in fresh]]
+                logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m in fresh]]
                 if temperature > 0:
                     proposed.append(rng.choices(fresh, torch.softmax(logits / temperature, dim=0).tolist())[0])
                 else:

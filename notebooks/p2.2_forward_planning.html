@@ -7803,6 +7803,7 @@ a.anchor-link {
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
 <h1 id="p2.2:-Forward-planning-for-the-student-(11/21-11/22/26)">p2.2: Forward planning for the student (11/21-11/22/26)<a class="anchor-link" href="#p2.2:-Forward-planning-for-the-student-(11/21-11/22/26)">¶</a></h1><p><em>Part of phase 2: <code>p2_summary.ipynb</code> connects this notebook with p2.1-p2.3.</em></p>
+<p><em>Note (11/24/26): the network has since lost its dest head (here it gave relevance, the start network's AND-OR ordering, and <code>dest_quality.py</code>'s measures; relevance added nothing). This notebook's results were made with it, and its saved outputs stand; to rerun the cells that compute tables here (they use the dest head and the old start), check out tag <code>pre-dest-removal</code>. Since then AND-OR is ordered by the policy head and sessions start from <code>paths.START</code>, an apprentice trained without a dest head (<code>p2_summary.ipynb</code>, section 7).</em></p>
 <p>The fitted student plays by intuition alone: on every board it samples a move from its policy head (MODEL.md). AND-OR's
 backward reasoning is only its teacher in pretraining. The question here is whether a <strong>heuristically guided forward
 planner</strong> - short rollouts, judged by how much new and goal-relevant ground they cover - is a good candidate for what

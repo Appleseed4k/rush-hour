@@ -6,8 +6,10 @@ its snapshots barely lift the planner's mid-puzzle skill and undo more. Here the
 itself, so the network learns from the planner's own experience:
 
 - the calibrated session's settings (ao_people_all_m10, read from the archive's config.json): the same puzzles at
-  people's lengths, the same order per student, x10 multiplier, full hindsight, learning rate, giving up (people's
-  hazard x 0.3), move cap, seed, 8 students, no teacher;
+  people's lengths, the same order per student, x10 multiplier, full hindsight, learning rate, move cap, seed, 8
+  students, no teacher; the start (--init, default paths.START) and giving up (people's hazard x --surrender-scale,
+  default the fitted student's, spec.STUDENT) are the current ones - the runs before 2026-11-24 started from
+  paths.DEST_START at 0.3;
 - each puzzle is played by forward.solve_forward (PlannerSolver): 4 policy rollouts (up to 20 moves) and 4 AND-OR
   passes per turn, judged by the value head; the soft board memory (beta 2, half-life 1) also judging candidates
   (x 4); one shared lapse rate gamma, fixed (so what changes over the session is the network, not depth);
@@ -29,6 +31,8 @@ with sessions.json (one record per puzzle). fit_memory.py `snapshots --run <run>
     python experiments/planner_session.py --lean --run lean_people_all_m10_ao     # the session played by the two-mode student
     python experiments/planner_session.py --lean --run lean_people_all_m10_noao --w-ao 0 --flat-start 0.18 \\
         --flat-end 0.28 --no-opening                           # ... and by the forward student (flat set to match the start)
+    python experiments/planner_session.py --lean --run lean_people_all_m10_ao_nodest   # ... from the start without a
+                                                               # dest head (paths.START since 2026-11-24)
     python experiments/planner_session.py --gamma 0.5 --run planner_people_all_m10_g0.5
 
 --fit-start calibrates gamma as rushhour/surrender.py calibrated the start network: the planner (start network)
@@ -48,6 +52,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from rushhour import paths, sessions as ss, student as st  # noqa: E402
+from rushhour.student import spec  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forward  # noqa: E402
@@ -260,6 +265,11 @@ def main():
     ap.add_argument("--flat-start", type=float, default=0.08)
     ap.add_argument("--flat-end", type=float, default=0.18)
     ap.add_argument("--no-opening", action="store_true")
+    ap.add_argument("--ao-order", choices=forward.AO_ORDERS, default="policy",
+                    help="with --lean: what orders AND-OR's options (forward.solve_lean's ao_order)")
+    ap.add_argument("--init", default=paths.START, help="the start network (default paths.START)")
+    ap.add_argument("--surrender-scale", type=float, default=spec.STUDENT["surrender_scale"],
+                    help="giving up as people's hazard x this (default: the fitted student's, with paths.START)")
     args = ap.parse_args()
     if args.fit_start:
         fit_start(MIXED_START, "planner_start_fit.csv")
@@ -287,12 +297,15 @@ def main():
         return
     with open(CALIBRATED) as f:
         config = json.load(f)
-    config["init"] = paths.START
+    config["init"] = args.init
     config["run"] = args.run
+    config["surrender_scale"] = args.surrender_scale
     config["planner"] = {**PLANNER, "gamma": args.gamma, "rollout_gamma": args.gamma}
     if args.lean:
         config["lean"] = {"w_ao": args.w_ao, "flat_start": args.flat_start, "flat_end": args.flat_end, "ramp": 30,
                           "opening": not args.no_opening}
+        if args.ao_order != "policy":
+            config["lean"]["ao_order"] = args.ao_order
         del config["planner"]
     run_dir = os.path.join(paths.SESSIONS, args.run)
     if not args.smoke:

@@ -15,6 +15,11 @@ from a network trained on its own play with a random teacher, at giving-up scale
 values are `spec.PREVIOUS`; ["The previous start"](#the-previous-start) covers what changed. The phase 1 summary (`notebooks/p1_summary.ipynb`) shows the apprentice's runs, and keeps the
 previous start's teacher comparisons, which have no counterpart on the apprentice, marked as such.
 
+**Since 2026-11-24 the network has no dest head, and the student starts from an apprentice trained without one**
+(round 1 epoch 3, giving-up scale 0.35). The runs of the week between started from the same apprentice trained with
+a dest head as well (round 1 epoch 2, scale 0.3: `spec.DEST`); ["The dest-head start"](#the-dest-head-start) covers
+what changed and what was kept.
+
 **Kind:**
 - **parameter**: a number or switch, in `spec.py`;
 - **design**: a modelling or architectural choice that has no switch;
@@ -59,36 +64,42 @@ shows also teaches, at a weight called agency (ΔA), the one parameter the teach
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Input: 7 binary channels per cell (empty, red, horizontal car, vertical car, car start, car end, truck), plus 2 coordinate channels. No car identity | design | - | chosen | [`StateEncoder`](rushhour/student/network.py:32) |
-| Action space keyed by cell: (a car's top-left cell, direction, 1-5 cells). Each cell's output predicts the moves of the car anchored there, so one network plays every puzzle and a pattern learned in one place applies everywhere | design | 720 actions | chosen | [`PolicyAgent`](rushhour/student/network.py:122), `car_anchor` |
-| Trunk: a 3×3 stem, then 4 residual blocks, each convolving whole rows and whole columns plus a 3×3 window, with BatchNorm | design | 96 channels, 4 blocks | chosen | [`LaneBlock`](rushhour/student/network.py:70), [`PolicyNetwork`](rushhour/student/network.py:85) |
-| Three heads on the shared trunk. **Policy**: a softmax over legal moves. **Dest**: per car and cell, how soon an optimal solution brings the car there. **Value**: moves to go in tens, from the board's mean features | design | - | chosen | [`PolicyNetwork.heads`](rushhour/student/network.py:85) |
-| Only the policy head plays. Dest and value are trained in every update but read by nothing in a session | design | - | chosen | §4, §7 |
+| Input: 7 binary channels per cell (empty, red, horizontal car, vertical car, car start, car end, truck), plus 2 coordinate channels. No car identity | design | - | chosen | [`StateEncoder`](rushhour/student/network.py:28) |
+| Action space keyed by cell: (a car's top-left cell, direction, 1-5 cells). Each cell's output predicts the moves of the car anchored there, so one network plays every puzzle and a pattern learned in one place applies everywhere | design | 720 actions | chosen | [`PolicyAgent`](rushhour/student/network.py:113), `car_anchor` |
+| Trunk: a 3×3 stem, then 4 residual blocks, each convolving whole rows and whole columns plus a 3×3 window, with BatchNorm | design | 96 channels, 4 blocks | chosen | [`LaneBlock`](rushhour/student/network.py:66), [`PolicyNetwork`](rushhour/student/network.py:81) |
+| Two heads on the shared trunk. **Policy**: a score per move, read at its car's anchor cell; a softmax over the legal ones. **Value**: moves to go in tens, from the board's mean features | design | - | chosen | [`PolicyNetwork.heads`](rushhour/student/network.py:81) |
+| Only the policy head plays. The value head is trained in every update but read by nothing in a session | design | - | chosen | §4, §7 |
+| The policy head also orders AND-OR's options when AND-OR is run with the network (pretraining's later rounds, phase 2's deliberation): a move not legal yet is scored by its slot, which is trained on boards where it is legal | design | - | chosen (2026-11-24; it orders AND-OR as well as the dest head did) | [`PolicyAgent.heuristic`](rushhour/student/network.py:233) |
 
 Notes:
 - **Row and column convolutions:** what blocks a car, or red's path to the exit, is often several cells away (`LaneBlock`).
 - **Start and end channels:** without them, two cars parked end to end look like one longer car.
-- **Dest** exists for deliberation: it orders AND-OR's options (p1.1, p2.1). In pretraining it also learns AND-OR's
-  subgoal choices (§3).
-- **Value** was meant for progress labels, which are off. Both heads still shape the trunk the policy reads.
+- **No dest head.** Until 2026-11-24 a third head, dest, scored every car's every position by how soon a solution
+  brings it there (target 0.8^(k-1) at k moves), and ordered AND-OR's options; in pretraining it also learned which
+  option AND-OR took at each subgoal. It was removed for simplicity: ordering AND-OR by the policy head plays as well,
+  and an apprentice trained without dest targets learns at the same pace and, in phase 2's two-mode session, gains
+  as much (`p2_summary.ipynb`, section 7). Old checkpoints load with it dropped.
+- **Value** was meant for progress labels, which are off. It still shapes the trunk the policy reads (and phase 2's
+  two-mode student reads it for flat planning).
 
 ## 3. Starting knowledge: AND-OR's apprentice
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Starting network | parameter | `models/apprentice/gamma0.07_free/round1_epoch02.pt` | fitted | `STUDENT["init"]`, `paths.START` |
+| Starting network | parameter | `models/apprentice/gamma0.07_free_nodest/round1_epoch03.pt` | fitted | `STUDENT["init"]`, `paths.START` |
 | **The expert is the AND-OR model.** It searches backward from the goal: an OR node picks which car to move, an AND node picks how, and each blocking car becomes a new subgoal | design | - | inherited (Olieslagers et al. 2023) | [`and_or.solve`](rushhour/and_or.py:364) |
 | ...with lapses: at each subgoal, with probability γ, it plays one random legal move instead of planning | parameter | γ = 0.07, the paper's | inherited | [`OrNode.solve`](rushhour/and_or.py:178), [`lapse_move`](rushhour/and_or.py:89) |
 | ...and this repo's variant of it. A completed plan is played out to its end and the search restarts from the new board; the paper's model plays one move per search | design | - | chosen | [`solve_and_or`](rushhour/student/solve.py:46), `attempt_puzzle` |
 | ...with `protect_movers` off: a subgoal may move a car higher up the chain, as in the paper's model | parameter | off | chosen (fits people better than on; p1.3) | `and_or.PROTECT_MOVERS` |
-| What the apprentice learns: plain AND-OR plays 1,000 pool puzzles of 1-30 moves (200 per bin of 1-8, 9-12, 13-16, 17-20 and 21-30), 4 attempts each. Its solved attempts, loops cut, label the boards (policy, value and dest targets as in §6). Every subgoal of a completed plan, with the option AND-OR took, trains the dest head's ordering | design | 2,966 solved attempts: 68,039 boards, 8,266 subgoals | chosen (phase 1's settings) | [`attempt_puzzle`](rushhour/student/labels.py:363), [`erase_loops`](rushhour/student/labels.py:162), [`experiments/apprentice.py`](experiments/apprentice.py) |
-| Training: Adam at learning rate 1e-3, batches of 256, board and subgoal batches interleaved; validated on 100 held-out puzzles | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:177) |
-| **Stopped at epoch 2 of round 1**, the checkpoint that matches people's first 10 trials. That is 2 passes over plain AND-OR's attempts: imitation learning, with no expert-iteration rounds. Round 1's validation would have kept epoch 5 | parameter | round 1, epoch 2 | fitted | [`surrender.py`](rushhour/surrender.py) |
-| The fit, together with the giving-up scale (§5): every saved epoch plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10 | implementation | best: 86.7% and 2.82, misfit 0.2 (next best: epoch 3 at 0.7) | fitted | `python -m rushhour.surrender` |
-| The session starts with a fresh Adam state and a learning rate 10× lower than pretraining's | implementation | - | chosen | [`PolicyAgent.load`](rushhour/student/network.py:205) |
+| What the apprentice learns: plain AND-OR plays 1,000 pool puzzles of 1-30 moves (200 per bin of 1-8, 9-12, 13-16, 17-20 and 21-30), 4 attempts each. Its solved attempts, loops cut, label the boards (policy and value targets as in §6) | design | 2,966 solved attempts: 68,039 boards | chosen (phase 1's settings) | [`attempt_puzzle`](rushhour/student/labels.py:233), [`erase_loops`](rushhour/student/labels.py:42), [`experiments/apprentice.py`](experiments/apprentice.py) |
+| Training: Adam at learning rate 1e-3, batches of 256; validated on 100 held-out puzzles | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:113) |
+| **Stopped at epoch 3 of round 1**, the checkpoint that matches people's first 10 trials. That is 3 passes over plain AND-OR's attempts: imitation learning, with no expert-iteration rounds. Round 1's validation would also have kept epoch 3 | parameter | round 1, epoch 3 | fitted | [`surrender.py`](rushhour/surrender.py) |
+| The fit, together with the giving-up scale (§5): every saved epoch plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10 | implementation | best: 87.9% and 2.69, misfit 0.2 (next best: epochs 4 and 6 at 0.7) | fitted | `python -m rushhour.surrender` |
+| The session starts with a fresh Adam state and a learning rate 10× lower than pretraining's | implementation | - | chosen | [`PolicyAgent.load`](rushhour/student/network.py:196) |
 
 So the student's starting knowledge is **a partial copy of the paper's model of human planning**: the AND-OR
-model's moves, learned to the point where it plays like people at the start. In the session, AND-OR is never called.
+model's moves and how far it still had to go, learned to the point where it plays like people at the start - not the
+order AND-OR tried its options in, which in plain AND-OR is random. In the session, AND-OR is never called.
 
 Later rounds (AND-OR ordered by the network itself) and later epochs are better than people. The phase 1 summary's
 apprentice curve shows that round 1 passes people's level within a few epochs.
@@ -99,7 +110,7 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | Intuition only: each move is sampled from the policy's softmax over legal moves | design + parameter | temperature 1 (`explore`) | chosen | [`solve_intuition`](rushhour/student/solve.py:119), [line 149](rushhour/student/solve.py:149) |
 | Short memory: moves back to one of the recent boards are removed from the choice, unless every move would be one | implementation + parameter | 10 boards | chosen | [line 146](rushhour/student/solve.py:146) |
-| One attempt per puzzle, no restarts (people could restart) | parameter | 1 | chosen | `max_attempts`; [`learning_session`](rushhour/student/train.py:457) |
+| One attempt per puzzle, no restarts (people could restart) | parameter | 1 | chosen | `max_attempts`; [`learning_session`](rushhour/student/train.py:370) |
 | Move cap; reaching it ends the attempt unsolved | parameter | max(50, 10 × optimal) | chosen | [`sessions.step_cap`](rushhour/sessions.py:540) |
 | A teacher acts before the student moves: if it shows a move, that move is played instead. The student's own choice is computed only if the teacher asks for it | implementation | - | chosen | `propose` in `solve_intuition` |
 | A shown move is an optimal move, chosen at random when several are | implementation | - | chosen | [`Teacher.optimal_move`](rushhour/teachers.py:86) |
@@ -111,18 +122,18 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | A hazard: after each move that doesn't solve the puzzle, it gives up with a probability set by moves made / optimal length. Nothing else matters: not the board, its progress, or its recent success | design | - | people (shape) | [`SurrenderRule`](rushhour/student/solve.py:170), [line 164](rushhour/student/solve.py:164) |
 | People's rates, pooled over lengths and attempts | people | 0.16-0.93% per move over 9 bins (edges 0, 0.5, 1, 1.5, 2, 3, 4, 6, 10) | people | [`human_data.surrender_hazard`](rushhour/human_data.py:213), saved per run as `surrender_table` |
-| Scaled to the student's level | parameter | × 0.3 | fitted (§3) | `surrender_scale` |
+| Scaled to the student's level | parameter | × 0.35 | fitted (§3) | `surrender_scale` |
 | Giving up ends the puzzle unsolved, so the student learns nothing of its own from it (§6) | design | - | chosen | - |
 
 ## 6. What a puzzle teaches
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Only solved attempts produce labels from the student's own play | design | - | chosen | [`intuition_examples`](rushhour/student/labels.py:310), [line 332](rushhour/student/labels.py:332) |
-| Hindsight over a graph of visited boards: two boards are joined when one legal move connects them (moves are reversible). The shortest route to the goal in that graph is computed by breadth-first search from the goal | implementation | - | chosen | [`shortcut_routes`](rushhour/student/labels.py:186) |
-| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | fitted, with the multiplier: the best of own, W=3, W=10 and full at each multiplier (below), though not by a wide margin | [`solved_routes`](rushhour/student/labels.py:249) |
-| Each labelled board gets, from its shortest route(s): the policy target, every first move tied for shortest; the value target, moves left on the route ÷ 10; and dest targets, 0.8^(k-1) for a car reaching a cell k moves later. A board seen in several routes takes the one with the fewest moves left | implementation | dest decay 0.8 | chosen | [`attempt_examples`](rushhour/student/labels.py:264), [`DEST_DECAY`](rushhour/student/network.py:21) |
-| A shown move teaches that move on that board, solved or not, with no value or dest target. It is skipped if a solved route already labels the board | design | - | chosen | [`_shown_example`](rushhour/student/labels.py:300) |
+| Only solved attempts produce labels from the student's own play | design | - | chosen | [`intuition_examples`](rushhour/student/labels.py:180), [line 202](rushhour/student/labels.py:202) |
+| Hindsight over a graph of visited boards: two boards are joined when one legal move connects them (moves are reversible). The shortest route to the goal in that graph is computed by breadth-first search from the goal | implementation | - | chosen | [`shortcut_routes`](rushhour/student/labels.py:66) |
+| Full hindsight: **every** visited board that can reach the goal is labelled (`labels "all"`), and any two boards are connected however far apart in time (`window -1`) | parameter | `all`, -1 | fitted, with the multiplier: the best of own, W=3, W=10 and full at each multiplier (below), though not by a wide margin | [`solved_routes`](rushhour/student/labels.py:129) |
+| Each labelled board gets, from its shortest route(s): the policy target, every first move tied for shortest, and the value target, moves left on the route ÷ 10. A board seen in several routes takes the one with the fewest moves left | implementation | - | chosen | [`attempt_examples`](rushhour/student/labels.py:144) |
+| A shown move teaches that move on that board, solved or not, with no value target. It is skipped if a solved route already labels the board | design | - | chosen | [`_shown_example`](rushhour/student/labels.py:171) |
 | Everything is remembered (no encoding lapses), and nothing is learned from failed moves (no progress labels) | parameter | `encode 1`, `progress_weight 0` | chosen | `intuition_examples`, `progress_examples` |
 
 Two things follow from these choices:
@@ -137,12 +148,12 @@ Note that pretraining labelled AND-OR's attempts with loops cut, not with full h
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 10 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:457), update at [line 570](rushhour/student/train.py:570) |
-| Each update: 3 passes over the block's examples, reshuffled each pass, one Adam step per batch | parameter + implementation | `steps 3` | chosen | [`online_update`](rushhour/student/train.py:329) |
+| Online, in blocks: the student plays a block of puzzles with fixed weights, then trains on that block's examples only. No replay, no validation, no keeping an earlier, better version | design | block = 10 puzzles (one human trial) | follows §9 | [`learning_session`](rushhour/student/train.py:370), update at [line 483](rushhour/student/train.py:483) |
+| Each update: 3 passes over the block's examples, reshuffled each pass, one Adam step per batch | parameter + implementation | `steps 3` | chosen | [`online_update`](rushhour/student/train.py:250) |
 | Equal batches: each pass is split into ceil(n / 256) batches of equal size, not 256s and a remainder | implementation | `even_batches` | chosen | `online_update` |
-| Adam at a constant learning rate; its state (moment estimates) carries over across the session's updates | parameter + implementation | `lr 1e-4` | chosen | [`PolicyAgent`](rushhour/student/network.py:157) |
-| Loss: policy cross-entropy on the set of target moves + dest binary cross-entropy + 0.5 × value smooth-L1, each a mean over the batch | design | weights 1, 1, 0.5 | chosen | [`_loss`](rushhour/student/train.py:40), [`_weighted_loss`](rushhour/student/train.py:55) |
-| BatchNorm uses each update's batch statistics and moves its running averages. Play uses those running averages | implementation | PyTorch default momentum 0.1 | chosen | `net.train()` in `online_update`, `net.eval()` in [`_evaluate`](rushhour/student/network.py:222) |
+| Adam at a constant learning rate; its state (moment estimates) carries over across the session's updates | parameter + implementation | `lr 1e-4` | chosen | [`PolicyAgent`](rushhour/student/network.py:148) |
+| Loss: policy cross-entropy on the set of target moves + 0.5 × value smooth-L1, each a mean over the batch | design | weights 1, 0.5 | chosen | [`_loss`](rushhour/student/train.py:35), [`_weighted_loss`](rushhour/student/train.py:48) |
+| BatchNorm uses each update's batch statistics and moves its running averages. Play uses those running averages | implementation | PyTorch default momentum 0.1 | chosen | `net.train()` in `online_update`, `net.eval()` in [`policy_logits`](rushhour/student/network.py:220) |
 
 Notes:
 - **The last batch, without equal batches:** Adam steps a batch of 5 leftover examples as far as a full one (`online_update`).
@@ -153,8 +164,8 @@ Notes:
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Examples on a board where a move was shown weigh ΔA, and so do dest targets that a shown move set on earlier boards. The student's own play weighs 1 (the generation effect) | design + parameter | swept 0-1 | **not fitted** | [`agency_weights`](rushhour/student/labels.py:455) |
-| ΔA also sets how much is learned: a batch's update is taken with probability equal to its mean weight, otherwise skipped, and its loss is divided by that mean | implementation | `agency_step "skip"` | chosen | [`online_update`, line 377](rushhour/student/train.py:377) |
+| Examples on a board where a move was shown weigh ΔA. The student's own play weighs 1 (the generation effect). (With the dest head, dest targets a shown move set on earlier boards weighed ΔA too) | design + parameter | swept 0-1 | **not fitted** | [`agency_weights`](rushhour/student/labels.py:315) |
+| ΔA also sets how much is learned: a batch's update is taken with probability equal to its mean weight, otherwise skipped, and its loss is divided by that mean | implementation | `agency_step "skip"` | chosen | [`online_update`, line 298](rushhour/student/train.py:298) |
 
 Notes:
 - **Why skip instead of weighting:** Adam divides each step by the recent size of the gradients, so it cancels a
@@ -181,10 +192,11 @@ Notes:
 ## What is fitted to people, and how well
 
 1. **Giving up, by moves / optimal**: people's hazard, used as measured (§5).
-2. **Starting level**: the checkpoint (round 1, epoch 2) and the giving-up scale (0.3), fitted to people's first
+2. **Starting level**: the checkpoint (round 1, epoch 3) and the giving-up scale (0.35), fitted to people's first
    10 trials. The misfit is 0.2, in squared standard errors over 2 statistics (§3).
-3. **Learning rate over trials 1-30**: the multiplier and the hindsight, together. The fit uses three statistics,
-   each compared with people's:
+3. **Learning rate over trials 1-30**: the multiplier and the hindsight, together, fitted with the dest-head start
+   (`spec.DEST`) and kept for this one without refitting. The fit uses three statistics, each compared with
+   people's:
    - **short:** within-learner change in log moves / optimal per 10 trials, on 6- and 10-move puzzles;
    - **long:** the same on 13- and 15-move puzzles;
    - **start:** moves / optimal in trials 1-10.
@@ -224,7 +236,8 @@ apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 
 ## Which saved runs use this student
 
-`spec.differences` over the session runs in `models/sessions` (2026-11-19):
+`spec.differences(config, dest=True)` over the session runs in `models/sessions` (2026-11-19): every run below
+started from the dest-head start, and no teaching run has used the current one yet.
 
 | Runs | Matches? | How they differ |
 |---|---|---|
@@ -267,6 +280,25 @@ The values are end-score differences, paired by student (lower is better), as me
 
 So 0.45 stays the default. At high agency, more help does slightly better, as random 100% does.
 
+## The dest-head start
+
+From 2026-11-19 to 2026-11-24 every session started from `models/apprentice/gamma0.07_free/round1_epoch02.pt` at
+giving-up scale 0.3 (`spec.DEST`, `paths.DEST_START`; `spec.differences(config, dest=True)` matches the teaching
+sweep `aostart_free_m10_agency*` exactly).
+
+**What it was:** the same apprentice, on the same data, with a third head (dest) trained as well: dest targets on every
+board, and the option AND-OR took at each of its 8,266 subgoals as a ranking target. It matched people's start after
+2 epochs (86.7% solved, 2.82 moves / optimal, misfit 0.2).
+
+**Why it was replaced:** for simplicity and explainability. Phase 2 ordered AND-OR by the dest head in its
+deliberations, but ordering by the policy head plays as well (the two-mode student's AND-OR moves optimal 44.3%
+against 43.4%; AND-OR on every move solves 68% against 58%). Round 1 retrained without dest targets
+(`gamma0.07_free_nodest`, same seed and data) learns at the same pace, matches people's start one epoch later, and
+its two-mode session gains as much as the dest-head one (0.58 against 0.60 moves / optimal; people 0.60).
+
+**What was kept:** the multiplier (×10) and full hindsight (§9 and "What is fitted"), bayes4's θ 0.45 and every saved
+result were fitted or run with the dest-head start, and are kept as they were.
+
 ## The previous start
 
 Until 2026-11-19 every session started from `models/students/round6_epoch01.pt`, at giving-up scale 0.4 and
@@ -286,7 +318,8 @@ against the apprentice's 2.8 at ×10.
 ## What is not part of the student
 
 - **AND-OR and γ** are the student's teacher during pretraining only (§3). In a session it plays by intuition, and
-  AND-OR is never called. Deliberation, AND-OR ordered by the network, is p2.1's comparison, not part of this student.
+  AND-OR is never called. Deliberation, AND-OR ordered by the network (its policy head), is phase 2's, not part of
+  this student.
 - **The teacher's model of the student** (`teachers.Bayesian4`: skill per distance, puzzle difficulty) is the
   teacher's belief, not this network.
 - **The session protocol** (`spec.PROTOCOL`) is the experimental design: 8 students, sessions of 72 trials (18 per
@@ -301,11 +334,11 @@ These are the places where the student is a choice rather than a fit.
    never plans itself. In p2.1, network-ordered AND-OR matches people's efficiency.
 2. **One network for every puzzle, keyed by cell.** What it learns transfers by board pattern. Whether people
    transfer that way is untested.
-3. **Heads trained but unused.** Dest and value shape the shared features without ever acting.
+3. **A head trained but unused.** The value head shapes the shared features without ever acting in this student.
 
 **Where it starts**
 
-4. **An imitation stopped early.** People's starting level is matched by stopping training at epoch 2, not by
+4. **An imitation stopped early.** People's starting level is matched by stopping training at epoch 3, not by
    anything in how the network learns. The expert is this repo's AND-OR variant (plans played out) at the paper's γ.
    Pretraining's learning rate is also 10× the session's.
 

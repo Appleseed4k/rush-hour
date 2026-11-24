@@ -19,8 +19,8 @@ rushhour/              the library
   and_or.py            the AND-OR planner (backward subgoal search with lapses γ), as this repo solves with it
   paper_model.py       the paper's model as published (a move per tree), for fitting γ to people's moves
   student/             the simulated student
-    network.py         PolicyAgent: policy / dest / value heads; its moves are intuition, its ordering
-                       of AND-OR's options is the heuristic deliberation uses
+    network.py         PolicyAgent: policy and value heads; the policy's moves are intuition, and its
+                       scores also order AND-OR's options (the heuristic deliberation uses)
     solve.py           solving by intuition, by deliberation, or arbitrating; evaluation over many puzzles
     labels.py          what an attempt teaches: own solved play, hindsight shortcuts, shown moves
     train.py           expert iteration (pretraining) and online learning in a session
@@ -76,6 +76,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | p2.1 | Deliberation vs people: network-ordered AND-OR matches people's efficiency, solves fewer long puzzles | `p2.1_deliberation` |
 | p2.2 | Forward planning (novelty halves moves / optimal; relevance adds nothing); forward + backward together; no planner that deliberates every move starts where people do; people's moves are mostly intuition, with flat planning growing with practice and AND-OR on slow moves and near the goal; the two-mode student (intuition, flat planning and single AND-OR moves), which starts where people do and gains as much as they do, and the forward student (without AND-OR), which stalls | `p2.2_forward_planning` |
 | p2.3 | People against the models move by move; the hard 10-board memory replaced by a soft one fitted to people's revisits | `p2.3_human_likeness` |
+| - | The dest head removed: AND-OR ordered by the policy head plays as well, and an apprentice trained without dest targets starts where people do and learns as the dest-head one did; it is now the start of every session (tag `pre-dest-removal` has the code before) | p2_summary section 7, `MODEL.md` |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.

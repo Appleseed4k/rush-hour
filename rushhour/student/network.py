@@ -1,5 +1,6 @@
-"""The student's network: board encoding, the policy network (policy, dest and value heads) and PolicyAgent,
-which plays moves (intuition) and orders AND-OR's options (the heuristic deliberation uses)."""
+"""The student's network: board encoding, the policy network (policy and value heads) and PolicyAgent,
+which plays moves (intuition) and, with the same policy head, orders AND-OR's options (the heuristic deliberation
+uses)."""
 import copy
 import random
 from types import SimpleNamespace
@@ -14,11 +15,6 @@ import torch.optim as optim
 
 
 DIRECTIONS = "lrud"
-
-
-# Target for a destination first reached k moves into an optimal solution:
-# DEST_DECAY ** (k - 1), so the destinations of optimal next moves score 1.
-DEST_DECAY = 0.8
 
 
 def car_anchor(state, car_name):
@@ -83,16 +79,15 @@ class LaneBlock(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    """Lane-aware residual trunk with three heads. Move heads are shared
-    across board positions: each cell predicts its car's moves (4 directions
-    x max_slide steps), so a pattern learned in one place applies everywhere.
+    """Lane-aware residual trunk with two heads:
 
-    - policy: which legal move to play now (masked softmax);
-    - dest: for every car and destination, legal now or not, how soon an
-      optimal solution brings that car there - what orders AND-OR's
-      candidate resolutions (PolicyAgent.heuristic);
+    - policy: a score for each move, read at its car's anchor cell (4
+      directions x max_slide steps per cell, so a pattern learned in one place
+      applies everywhere) - which legal move to play now (masked softmax), and
+      the order in which AND-OR tries its options (PolicyAgent.heuristic);
     - value: distance to the goal, in tens of moves.
 
+    (Networks before 2026-11-24 also had a dest head; load() drops it.)
     forward() returns just the policy logits."""
     def __init__(self, in_channels, n_rows, n_cols, moves_per_cell, hidden=96, blocks=4):
         super().__init__()
@@ -102,18 +97,14 @@ class PolicyNetwork(nn.Module):
         self.stem = nn.Conv2d(in_channels + 2, hidden, 3, padding=1)
         self.blocks = nn.Sequential(*[LaneBlock(hidden, n_rows, n_cols) for _ in range(blocks)])
         self.policy_head = nn.Conv2d(hidden, moves_per_cell, 1)
-        self.dest_head = nn.Conv2d(hidden, moves_per_cell, 1)
         self.value_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
 
     def heads(self, x):
-        """(policy logits, dest logits, value) for a batch of encoded states."""
+        """(policy logits, value) for a batch of encoded states."""
         x = torch.cat([x, self.coords.expand(x.shape[0], -1, -1, -1)], dim=1)
         h = self.blocks(F.relu(self.stem(x)))
-
-        def per_action(head):
-            return head(h).permute(0, 2, 3, 1).reshape(x.shape[0], -1)
-
-        return per_action(self.policy_head), per_action(self.dest_head), self.value_head(h.mean((2, 3))).squeeze(1)
+        policy = self.policy_head(h).permute(0, 2, 3, 1).reshape(x.shape[0], -1)
+        return policy, self.value_head(h.mean((2, 3))).squeeze(1)
 
     def forward(self, x):
         return self.heads(x)[0]
@@ -127,10 +118,10 @@ class PolicyAgent():
     cars it has or what they're named.
 
     Trained on the solver's own solved attempts by expert iteration (see
-    expert_iteration and train_policy). Used two ways, which
-    solve_arbitrated combines: playing the policy head's moves (intuition;
-    policy_avoiding_cycles, solve_intuition), and as the `heuristic` that orders
-    and_or.solve's candidate moves (deliberation: AND-OR's lapsing,
+    expert_iteration and train_policy). Its policy head is used two ways,
+    which solve_arbitrated combines: playing its moves (intuition;
+    policy_avoiding_cycles, solve_intuition), and as the `heuristic` that
+    orders and_or.solve's candidate moves (deliberation: AND-OR's lapsing,
     subgoal-by-subgoal reasoning with learned judgment about which option
     to try first).
 
@@ -205,13 +196,20 @@ class PolicyAgent():
     def load(cls, path, lr=1e-3, device="cpu"):
         """Rebuilds a PolicyAgent from a save() checkpoint, with a fresh Adam
         optimizer."""
-        checkpoint = torch.load(path, weights_only=False, map_location="cpu")
+        return cls.from_checkpoint(torch.load(path, weights_only=False, map_location="cpu"), lr, device, path)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint, lr=1e-3, device="cpu", name="checkpoint"):
+        """load() from an already-loaded checkpoint dict. A checkpoint saved
+        before the dest head was removed (2026-11-24) loads with its dest head
+        dropped: the trunk and the other two heads are unchanged."""
         if checkpoint.get("version") != 2:
-            raise ValueError(f"{path} was saved by the previous network (no car-boundary channels, no "
-                             f"dest/value heads); retrain and save a new agent")
+            raise ValueError(f"{name} was saved by the previous network (no car-boundary channels, no "
+                             f"value head); retrain and save a new agent")
         agent = cls(size=checkpoint["size"], max_slide=checkpoint["max_slide"], hidden=checkpoint["hidden"],
                     blocks=checkpoint["blocks"], lr=lr)
-        agent.net.load_state_dict(checkpoint["state_dict"])
+        state = {k: v for k, v in checkpoint["state_dict"].items() if not k.startswith("dest_head.")}
+        agent.net.load_state_dict(state)
         return agent.to(device)
 
     def action_id(self, state, car_name, direction, steps):
@@ -219,31 +217,33 @@ class PolicyAgent():
         if it's outside the action space."""
         return self.action_index.get((car_anchor(state, car_name), direction, steps))
 
-    def _evaluate(self, state):
-        """(policy logits, dest logits) for one state, on the CPU. Cached,
-        since AND-OR asks about the same boards over and over."""
+    def policy_logits(self, state):
+        """The policy head's logits (every action, legal or not) for one
+        state, on the CPU. Cached, since AND-OR asks about the same boards
+        over and over."""
         if state not in self._scores:
             if len(self._scores) > 50_000:
                 self._scores.clear()
             self.net.eval()
             with torch.no_grad():
-                policy, dest, _ = self.net.heads(self.encoder.encode(state).unsqueeze(0).to(self.device))
-            self._scores[state] = (policy[0].cpu(), dest[0].cpu())
+                policy, _ = self.net.heads(self.encoder.encode(state).unsqueeze(0).to(self.device))
+            self._scores[state] = policy[0].cpu()
         return self._scores[state]
 
     def heuristic(self, state, actions):
-        """Dest-head scores for `actions` (full (car_name, direction, steps)
-        tuples, legal now or not) from `state`: how soon an optimal solution
-        brings that car to that destination, as the network estimates it. This
-        is and_or.solve's `heuristic` - it orders AND-OR's candidate moves
-        best-first, and picks the move a lapse plays (and_or.lapse_move).
-        Returns a dict mapping each action to its score (-inf if outside this
-        agent's action space)."""
-        dest = self._evaluate(state)[1]
+        """Policy-head scores for `actions` (full (car_name, direction, steps)
+        tuples, legal now or not) from `state`. A move that isn't legal yet -
+        one AND-OR wants once its blockers are cleared - is scored by its slot
+        (its car's anchor cell, direction, steps), which is trained on boards
+        where that move is legal. This is and_or.solve's `heuristic`: it orders
+        AND-OR's candidate moves best-first, and picks the move a lapse plays
+        (and_or.lapse_move). Returns a dict mapping each action to its score
+        (-inf if outside this agent's action space)."""
+        policy = self.policy_logits(state)
         scores = {}
         for action in actions:
             idx = self.action_id(state, *action)
-            scores[action] = dest[idx].item() if idx is not None else float("-inf")
+            scores[action] = policy[idx].item() if idx is not None else float("-inf")
             if self.temperature > 0:
                 scores[action] -= self.temperature * np.log(-np.log(random.random() or 1e-12))
         return scores
