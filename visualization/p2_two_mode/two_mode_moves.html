@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two-mode move choice</title>
+<style>
+:root {
+  --bg: #fbfbf9; --panel: #ffffff; --ink: #1f1f1d; --muted: #5f5e5a; --rule: #d9d8d2; --grid: #e6e5e0;
+  --board: #efeee9; --cell: #f7f6f2; --car: #c4c2ba; --car-ink: #2b2b29; --red: #cf3f2c;
+  --intuition: #8a8a85; --flat: #e6a00d; --ao: #1d9e75; --good: #1d9e75; --bad: #b5523b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171716; --panel: #201f1e; --ink: #ecebe6; --muted: #a8a69f; --rule: #3a3936; --grid: #2c2b29;
+    --board: #2a2927; --cell: #23221f; --car: #5d5b55; --car-ink: #f1f0eb; --red: #e5604c;
+    --intuition: #9d9b94; --flat: #f0b232; --ao: #36b88d; --good: #36b88d; --bad: #e07a62;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171716; --panel: #201f1e; --ink: #ecebe6; --muted: #a8a69f; --rule: #3a3936; --grid: #2c2b29;
+  --board: #2a2927; --cell: #23221f; --car: #5d5b55; --car-ink: #f1f0eb; --red: #e5604c;
+  --intuition: #9d9b94; --flat: #f0b232; --ao: #36b88d; --good: #36b88d; --bad: #e07a62;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--muted); margin: 0 0 16px; max-width: 820px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+button { font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 5px 11px; cursor: pointer; min-width: 38px; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); min-width: 74px; }
+input[type=range] { flex: 1; min-width: 140px; accent-color: var(--ink); }
+.count { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
+.grid { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; }
+.card + .card { margin-top: 12px; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+#board { width: 100%; height: auto; display: block; }
+.car { transition: transform .45s cubic-bezier(.4, .1, .2, 1); }
+.status { margin-top: 10px; display: flex; justify-content: space-between; color: var(--muted); font-variant-numeric: tabular-nums; }
+.status b { color: var(--ink); font-weight: 600; }
+.modebar { position: relative; height: 26px; border-radius: 6px; overflow: hidden; display: flex; margin: 6px 0 4px; }
+.modebar div { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; }
+.marker { position: absolute; top: -3px; bottom: -3px; width: 3px; background: var(--ink); border-radius: 2px; transition: left .35s; box-shadow: 0 0 0 2px var(--panel); }
+.scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.verdict { margin-top: 8px; font-size: 15px; }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 999px; color: #fff; font-weight: 600; font-size: 13px; }
+.explain { color: var(--muted); margin: 6px 0 10px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 3px 6px; border-bottom: 1px solid var(--rule); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+tr.cand { cursor: default; }
+tr.cand:hover td { background: var(--cell); }
+tr.chosen td { font-weight: 650; }
+tr.chosen td:first-child { box-shadow: inset 3px 0 0 var(--chosen, var(--ink)); }
+.bar { height: 10px; border-radius: 3px; background: var(--grid); position: relative; min-width: 80px; }
+.bar span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.ok { color: var(--good); } .no { color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--rule); border-radius: 6px; padding: 2px 8px; font-variant-numeric: tabular-nums; }
+.chip.first { border-color: var(--ao); background: color-mix(in srgb, var(--ao) 16%, transparent); font-weight: 650; }
+.chip.later { color: var(--muted); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+#timeline { width: 100%; height: auto; display: block; cursor: pointer; }
+.foot { color: var(--muted); font-size: 12px; margin-top: 14px; max-width: 860px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>How the two-mode student picks its moves</h1>
+  <p class="sub" id="sub"></p>
+  <div class="controls">
+    <button id="first" title="first move (Home)">⏮</button>
+    <button id="prev" title="previous move (←)">◀</button>
+    <button id="play" class="primary" title="play / pause (space)">Play</button>
+    <button id="next" title="next move (→)">▶</button>
+    <button id="last" title="last move (End)">⏭</button>
+    <input type="range" id="slider" min="0" value="0" aria-label="move">
+    <span class="count" id="count"></span>
+  </div>
+  <div class="grid">
+    <div>
+      <div class="card">
+        <svg id="board" viewBox="0 0 400 380" role="img" aria-label="Rush Hour board"></svg>
+        <div class="status"><span id="dist"></span><span id="moveline"></span></div>
+      </div>
+      <div class="card">
+        <h2>The attempt</h2>
+        <svg id="timeline" viewBox="0 0 400 120" role="img" aria-label="modes and distance to the goal over the attempt"></svg>
+        <div class="legend">
+          <span><i style="background:var(--intuition)"></i>intuition</span>
+          <span><i style="background:var(--flat)"></i>flat planning</span>
+          <span><i style="background:var(--ao)"></i>AND-OR</span>
+          <span>line: true moves to the goal</span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>1 · Which mode plays this move?</h2>
+        <div id="modeexplain" class="explain"></div>
+        <div class="modebar" id="modebar"></div>
+        <div class="scale"><span>0</span><span>random draw</span><span>1</span></div>
+        <div class="verdict" id="verdict"></div>
+      </div>
+      <div class="card">
+        <h2 id="pickhead">2 · How the mode picks</h2>
+        <div id="pickexplain" class="explain"></div>
+        <div id="pick"></div>
+      </div>
+    </div>
+  </div>
+  <p class="foot" id="foot"></p>
+</main>
+<script>
+const DATA = {"layout":"prb12715_11","seed":4,"optimal":10,"network":"round1_epoch03.pt","w_flat":0.06,"w_ao":0.18,"frames":[{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,2],[5,3]]],["6",[[4,4],[5,4]]],["7",[[3,0],[3,1]]]],"distance":10,"draw":0.23604808973743452,"w_ao":0.18,"w_flat":0.06,"plan":{"moves":[{"car":"6","dir":"u","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,2],[5,3]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"5","dir":"r","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"1","dir":"u","steps":1,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"2","dir":"r","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"4","dir":"d","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"4","dir":"u","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"2","dir":"l","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"1","dir":"d","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[4,3],[5,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]}],"complete":false},"candidates":[],"why":"opening","mode":"and-or","move":{"car":"6","dir":"u","steps":2},"after":10,"optimal":false},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,2],[5,3]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]],"distance":10,"draw":0.1031660342307158,"w_ao":0.18,"w_flat":0.06,"plan":{"moves":[{"car":"6","dir":"u","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,2],[5,3]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"5","dir":"r","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"1","dir":"u","steps":1,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"2","dir":"r","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"4","dir":"d","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"4","dir":"u","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"2","dir":"l","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]},{"car":"1","dir":"d","steps":2,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[4,3],[5,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]}],"complete":false},"candidates":[],"why":"follow-through","mode":"and-or","move":{"car":"5","dir":"r","steps":2},"after":10,"optimal":false},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[3,3],[4,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]],"distance":10,"draw":0.396058242610681,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"6","dir":"u","steps":2,"p":0.13275004923343658,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.10836103558540344,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":4,"p":0.10302301496267319,"penalty":0.0,"true":9,"chosen":false},{"car":"1","dir":"u","steps":3,"p":0.09393325448036194,"penalty":0.0,"true":9,"chosen":false},{"car":"1","dir":"u","steps":1,"p":0.08863833546638489,"penalty":0.0,"true":10,"chosen":true},{"car":"5","dir":"l","steps":3,"p":0.07134076952934265,"penalty":0.0,"true":10,"chosen":false},{"car":"1","dir":"u","steps":2,"p":0.07001222670078278,"penalty":0.0,"true":10,"chosen":false},{"car":"6","dir":"d","steps":1,"p":0.06964264065027237,"penalty":0.0,"true":10,"chosen":false},{"car":"5","dir":"l","steps":2,"p":0.060780107975006104,"penalty":0.5,"true":10,"chosen":false},{"car":"1","dir":"d","steps":1,"p":0.056737273931503296,"penalty":0.0,"true":10,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.05468888208270073,"penalty":0.0,"true":10,"chosen":false},{"car":"4","dir":"d","steps":1,"p":0.03827446699142456,"penalty":0.0,"true":10,"chosen":false},{"car":"0","dir":"d","steps":1,"p":0.029234040528535843,"penalty":0.0,"true":11,"chosen":false},{"car":"6","dir":"u","steps":1,"p":0.01587178185582161,"penalty":0.0,"true":10,"chosen":false},{"car":"7","dir":"r","steps":1,"p":0.006712228059768677,"penalty":0.0,"true":11,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"1","dir":"u","steps":1},"after":10,"optimal":false},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]],"distance":10,"draw":0.06651509567958991,"w_ao":0.18,"w_flat":0.06,"plan":{"moves":[{"car":"2","dir":"r","steps":3,"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]]}],"complete":false},"candidates":[],"why":"draw","mode":"and-or","move":{"car":"2","dir":"r","steps":3},"after":9,"optimal":true},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[2,4],[3,4]]],["7",[[3,0],[3,1]]]],"distance":9,"draw":0.40159101448507484,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"4","dir":"d","steps":3,"p":0.4699684679508209,"penalty":0.0,"true":8,"chosen":false},{"car":"6","dir":"u","steps":2,"p":0.13878490030765533,"penalty":0.0,"true":8,"chosen":true},{"car":"1","dir":"u","steps":2,"p":0.07777117192745209,"penalty":0.0,"true":8,"chosen":false},{"car":"4","dir":"d","steps":2,"p":0.07410456240177155,"penalty":0.0,"true":9,"chosen":false},{"car":"2","dir":"l","steps":3,"p":0.03415628895163536,"penalty":0.5,"true":10,"chosen":false},{"car":"5","dir":"l","steps":4,"p":0.028667371720075607,"penalty":0.0,"true":8,"chosen":false},{"car":"2","dir":"l","steps":2,"p":0.026601597666740417,"penalty":0.0,"true":10,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.02406175620853901,"penalty":0.0,"true":9,"chosen":false},{"car":"1","dir":"u","steps":1,"p":0.021194662898778915,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":3,"p":0.020727133378386497,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":2,"p":0.019555678591132164,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.016835404559969902,"penalty":0.0,"true":8,"chosen":false},{"car":"4","dir":"d","steps":1,"p":0.015942296013236046,"penalty":0.0,"true":9,"chosen":false},{"car":"2","dir":"l","steps":1,"p":0.013968792743980885,"penalty":0.0,"true":10,"chosen":false},{"car":"6","dir":"u","steps":1,"p":0.012309304438531399,"penalty":0.0,"true":9,"chosen":false},{"car":"7","dir":"r","steps":1,"p":0.005350695922970772,"penalty":0.0,"true":10,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"6","dir":"u","steps":2},"after":8,"optimal":true},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,4],[5,5]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":8,"draw":0.8004523514958085,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"4","dir":"d","steps":3,"p":0.5708662867546082,"penalty":0.0,"true":7,"chosen":true},{"car":"1","dir":"u","steps":2,"p":0.08151373267173767,"penalty":0.0,"true":7,"chosen":false},{"car":"2","dir":"l","steps":3,"p":0.06692148000001907,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":4,"p":0.03852840140461922,"penalty":0.0,"true":7,"chosen":false},{"car":"4","dir":"d","steps":2,"p":0.03645695373415947,"penalty":0.0,"true":8,"chosen":false},{"car":"1","dir":"u","steps":1,"p":0.03554096817970276,"penalty":0.0,"true":8,"chosen":false},{"car":"5","dir":"l","steps":3,"p":0.02825670875608921,"penalty":0.0,"true":8,"chosen":false},{"car":"2","dir":"l","steps":2,"p":0.027618778869509697,"penalty":0.0,"true":9,"chosen":false},{"car":"5","dir":"l","steps":2,"p":0.026080558076500893,"penalty":0.0,"true":8,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.02315528504550457,"penalty":0.0,"true":7,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.018445124849677086,"penalty":0.0,"true":8,"chosen":false},{"car":"2","dir":"l","steps":1,"p":0.014370300807058811,"penalty":0.0,"true":9,"chosen":false},{"car":"4","dir":"d","steps":1,"p":0.01109970360994339,"penalty":0.0,"true":8,"chosen":false},{"car":"6","dir":"d","steps":1,"p":0.010174612514674664,"penalty":0.0,"true":9,"chosen":false},{"car":"6","dir":"d","steps":2,"p":0.005905043333768845,"penalty":0.5,"true":9,"chosen":false},{"car":"7","dir":"r","steps":1,"p":0.005066131707280874,"penalty":0.0,"true":9,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"4","dir":"d","steps":3},"after":7,"optimal":true},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[2,3],[3,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,4],[5,5]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":7,"draw":0.22192817569031764,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"1","dir":"u","steps":2,"togo":11.013798713684082,"p":0.996342122554779,"penalty":0.0,"true":6,"chosen":true},{"car":"4","dir":"u","steps":2,"togo":20.53872299194336,"p":7.274220115505159e-05,"penalty":0.0,"true":8,"chosen":false},{"car":"4","dir":"u","steps":3,"togo":18.685680389404297,"p":0.0002814526669681072,"penalty":0.5,"true":8,"chosen":false},{"car":"5","dir":"l","steps":1,"togo":16.76496124267578,"p":0.0031674541532993317,"penalty":0.0,"true":6,"chosen":false},{"car":"0","dir":"u","steps":1,"togo":19.911230087280273,"p":0.00013623952690977603,"penalty":0.0,"true":7,"chosen":false}],"why":"draw","mode":"flat","move":{"car":"1","dir":"u","steps":2},"after":6,"optimal":true},{"board":[["red",[[2,0],[2,1]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,4],[5,5]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":6,"draw":0.2766826434414502,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"red","dir":"r","steps":3,"p":0.5798835754394531,"penalty":0.0,"true":5,"chosen":true},{"car":"red","dir":"r","steps":2,"p":0.13111814856529236,"penalty":0.0,"true":6,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.07493165880441666,"penalty":0.0,"true":5,"chosen":false},{"car":"4","dir":"u","steps":3,"p":0.06628496199846268,"penalty":0.0,"true":7,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.04711858183145523,"penalty":0.0,"true":6,"chosen":false},{"car":"4","dir":"u","steps":2,"p":0.035958245396614075,"penalty":0.0,"true":7,"chosen":false},{"car":"red","dir":"r","steps":1,"p":0.02823825180530548,"penalty":0.0,"true":6,"chosen":false},{"car":"6","dir":"d","steps":2,"p":0.008781595155596733,"penalty":0.0,"true":7,"chosen":false},{"car":"4","dir":"u","steps":1,"p":0.00703393341973424,"penalty":0.0,"true":7,"chosen":false},{"car":"6","dir":"d","steps":1,"p":0.006703712046146393,"penalty":0.0,"true":7,"chosen":false},{"car":"3","dir":"r","steps":1,"p":0.0052412995137274265,"penalty":0.0,"true":7,"chosen":false},{"car":"1","dir":"d","steps":1,"p":0.005049771163612604,"penalty":0.0,"true":7,"chosen":false},{"car":"1","dir":"d","steps":2,"p":0.0036562893074005842,"penalty":0.5,"true":7,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"red","dir":"r","steps":3},"after":5,"optimal":true},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,4],[5,5]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":5,"draw":0.10618329243153013,"w_ao":0.18,"w_flat":0.06,"plan":{"moves":[{"car":"5","dir":"l","steps":1,"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]]},{"car":"4","dir":"u","steps":3,"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]]},{"car":"2","dir":"l","steps":3,"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]]},{"car":"0","dir":"d","steps":2,"board":[["red",[[2,3],[2,4]]],["0",[[3,5],[4,5],[5,5]]],["1",[[0,3],[1,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]]},{"car":"red","dir":"r","steps":1,"board":[["red",[[2,4],[2,5]]],["0",[[3,5],[4,5],[5,5]]],["1",[[0,3],[1,3]]],["2",[[4,0],[4,1],[4,2]]],["3",[[1,0],[1,1]]],["4",[[0,2],[1,2],[2,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]]}],"complete":true},"candidates":[],"why":"draw","mode":"and-or","move":{"car":"5","dir":"l","steps":1},"after":4,"optimal":true},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[3,2],[4,2],[5,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":4,"draw":0.2144004325789165,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"4","dir":"u","steps":2,"togo":7.804831504821777,"p":0.17395755648612976,"penalty":0.0,"true":3,"chosen":false},{"car":"4","dir":"u","steps":3,"togo":6.377724647521973,"p":0.7248162627220154,"penalty":0.0,"true":3,"chosen":false},{"car":"4","dir":"u","steps":1,"togo":8.493303298950195,"p":0.08738639205694199,"penalty":0.0,"true":4,"chosen":true},{"car":"red","dir":"l","steps":2,"togo":10.920089721679688,"p":0.007717983331531286,"penalty":0.0,"true":5,"chosen":false},{"car":"0","dir":"u","steps":1,"togo":11.151786804199219,"p":0.006121799349784851,"penalty":0.0,"true":4,"chosen":false}],"why":"draw","mode":"flat","move":{"car":"4","dir":"u","steps":1},"after":4,"optimal":false},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[2,2],[3,2],[4,2]]],["5",[[5,3],[5,4]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":4,"draw":0.8289200487784194,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"4","dir":"u","steps":2,"p":0.33413416147232056,"penalty":0.0,"true":3,"chosen":false},{"car":"5","dir":"l","steps":2,"p":0.14140300452709198,"penalty":0.0,"true":4,"chosen":true},{"car":"4","dir":"d","steps":1,"p":0.12899033725261688,"penalty":0.5,"true":4,"chosen":false},{"car":"4","dir":"u","steps":1,"p":0.1221708208322525,"penalty":0.0,"true":3,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.07658722996711731,"penalty":0.0,"true":4,"chosen":false},{"car":"5","dir":"l","steps":3,"p":0.07537999749183655,"penalty":0.0,"true":4,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.04349067807197571,"penalty":0.0,"true":4,"chosen":false},{"car":"5","dir":"r","steps":1,"p":0.038922037929296494,"penalty":0.0,"true":5,"chosen":false},{"car":"3","dir":"r","steps":1,"p":0.03892168402671814,"penalty":0.0,"true":5,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"5","dir":"l","steps":2},"after":4,"optimal":false},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[2,2],[3,2],[4,2]]],["5",[[5,1],[5,2]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":4,"draw":0.8004478385429662,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"4","dir":"u","steps":2,"p":0.42535409331321716,"penalty":0.0,"true":3,"chosen":false},{"car":"4","dir":"u","steps":1,"p":0.14809301495552063,"penalty":0.0,"true":3,"chosen":true},{"car":"5","dir":"r","steps":3,"p":0.11880870163440704,"penalty":0.0,"true":5,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.09792979806661606,"penalty":0.0,"true":4,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.08001164346933365,"penalty":0.0,"true":4,"chosen":false},{"car":"5","dir":"r","steps":2,"p":0.06488917768001556,"penalty":0.5,"true":4,"chosen":false},{"car":"3","dir":"r","steps":1,"p":0.03966804966330528,"penalty":0.0,"true":5,"chosen":false},{"car":"5","dir":"r","steps":1,"p":0.02524550072848797,"penalty":0.0,"true":4,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"4","dir":"u","steps":1},"after":3,"optimal":true},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,3],[4,4],[4,5]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,1],[5,2]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":3,"draw":0.30984995729953557,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"2","dir":"l","steps":1,"p":0.3937125504016876,"penalty":0.0,"true":2,"chosen":false},{"car":"2","dir":"l","steps":2,"p":0.23374122381210327,"penalty":0.0,"true":2,"chosen":true},{"car":"2","dir":"l","steps":3,"p":0.22085513174533844,"penalty":0.0,"true":2,"chosen":false},{"car":"4","dir":"u","steps":1,"p":0.033457428216934204,"penalty":0.0,"true":3,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.031058872118592262,"penalty":0.0,"true":3,"chosen":false},{"car":"5","dir":"r","steps":2,"p":0.02611374296247959,"penalty":0.0,"true":3,"chosen":false},{"car":"5","dir":"r","steps":3,"p":0.025464948266744614,"penalty":0.0,"true":4,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.021295826882123947,"penalty":0.0,"true":3,"chosen":false},{"car":"4","dir":"d","steps":1,"p":0.008121181279420853,"penalty":0.5,"true":4,"chosen":false},{"car":"5","dir":"r","steps":1,"p":0.006179052405059338,"penalty":0.0,"true":3,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"2","dir":"l","steps":2},"after":2,"optimal":true},{"board":[["red",[[2,3],[2,4]]],["0",[[1,5],[2,5],[3,5]]],["1",[[0,3],[1,3]]],["2",[[4,1],[4,2],[4,3]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,1],[5,2]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":2,"draw":0.731894708878718,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"0","dir":"d","steps":2,"p":0.9280720949172974,"penalty":0.0,"true":1,"chosen":true},{"car":"2","dir":"r","steps":2,"p":0.016604937613010406,"penalty":0.5,"true":3,"chosen":false},{"car":"5","dir":"r","steps":2,"p":0.01212029904127121,"penalty":0.0,"true":2,"chosen":false},{"car":"4","dir":"u","steps":1,"p":0.010378981940448284,"penalty":0.0,"true":2,"chosen":false},{"car":"5","dir":"r","steps":3,"p":0.010206782259047031,"penalty":0.0,"true":3,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.009632841683924198,"penalty":0.0,"true":2,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.005035483278334141,"penalty":0.0,"true":2,"chosen":false},{"car":"2","dir":"l","steps":1,"p":0.0049308668822050095,"penalty":0.0,"true":2,"chosen":false},{"car":"5","dir":"r","steps":1,"p":0.0011439963709563017,"penalty":0.0,"true":2,"chosen":false},{"car":"2","dir":"r","steps":1,"p":0.0009720009402371943,"penalty":0.0,"true":2,"chosen":false},{"car":"0","dir":"d","steps":1,"p":0.0009015140822157264,"penalty":0.0,"true":2,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"0","dir":"d","steps":2},"after":1,"optimal":true},{"board":[["red",[[2,3],[2,4]]],["0",[[3,5],[4,5],[5,5]]],["1",[[0,3],[1,3]]],["2",[[4,1],[4,2],[4,3]]],["3",[[1,0],[1,1]]],["4",[[1,2],[2,2],[3,2]]],["5",[[5,1],[5,2]]],["6",[[0,4],[1,4]]],["7",[[3,0],[3,1]]]],"distance":1,"draw":0.8800507513611994,"w_ao":0.18,"w_flat":0.06,"plan":null,"candidates":[{"car":"red","dir":"r","steps":1,"p":0.9554600715637207,"penalty":0.0,"true":0,"chosen":true},{"car":"4","dir":"u","steps":1,"p":0.012886390089988708,"penalty":0.0,"true":1,"chosen":false},{"car":"5","dir":"r","steps":2,"p":0.009721078909933567,"penalty":0.0,"true":1,"chosen":false},{"car":"5","dir":"l","steps":1,"p":0.006942801643162966,"penalty":0.0,"true":1,"chosen":false},{"car":"2","dir":"l","steps":1,"p":0.006444910075515509,"penalty":0.0,"true":1,"chosen":false},{"car":"0","dir":"u","steps":3,"p":0.0031808915082365274,"penalty":0.0,"true":2,"chosen":false},{"car":"5","dir":"r","steps":1,"p":0.001736193778924644,"penalty":0.0,"true":1,"chosen":false},{"car":"2","dir":"r","steps":1,"p":0.0015951889799907804,"penalty":0.0,"true":1,"chosen":false},{"car":"0","dir":"u","steps":2,"p":0.0013261105632409453,"penalty":0.5,"true":2,"chosen":false},{"car":"0","dir":"u","steps":1,"p":0.0007064883830025792,"penalty":0.0,"true":2,"chosen":false}],"why":"draw","mode":"intuition","move":{"car":"red","dir":"r","steps":1},"after":0,"optimal":true}]};
+const F = DATA.frames, N = F.length;
+const ARROW = {l: "←", r: "→", u: "↑", d: "↓"};
+const DELTA = {l: [0, -1], r: [0, 1], u: [-1, 0], d: [1, 0]};
+const COLOR = {intuition: "var(--intuition)", flat: "var(--flat)", "and-or": "var(--ao)"};
+const NAME = {intuition: "intuition", flat: "flat planning", "and-or": "AND-OR"};
+const CELL = 56, PAD = 22, OX = PAD, OY = PAD;
+const $ = id => document.getElementById(id);
+const ns = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(ns, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const carName = c => c === "red" ? "red" : "car " + c;
+const label = m => `${carName(m.car)} ${ARROW[m.dir]}${m.steps}`;
+const fmt = (x, d = 2) => x.toFixed(d);
+
+function applyMove(boardList, m) {
+  return boardList.map(([n, cells]) => n !== m.car ? [n, cells] :
+    [n, cells.map(([r, c]) => [r + DELTA[m.dir][0] * m.steps, c + DELTA[m.dir][1] * m.steps])]);
+}
+const boards = F.map(f => f.board).concat([applyMove(F[N - 1].board, F[N - 1].move)]);
+
+$("sub").textContent = `One attempt on people's layout ${DATA.layout} (${DATA.optimal} moves at best), by the session's start ` +
+  `network (${DATA.network}) with the two-mode session's weights at its start: AND-OR on ${Math.round(DATA.w_ao * 100)}% ` +
+  `of moves, flat planning on ${Math.round(DATA.w_flat * 100)}%, intuition on the rest; the first move is always a ` +
+  `deliberation. Each step shows the board before the move, the draw that picked the mode, and what that mode weighed.`;
+$("foot").textContent = `Replayed by experiments/two_mode_animation.py from forward.solve_lean with the same random draws ` +
+  `(seed ${DATA.seed}; checked to play the same moves). This attempt was picked to show every mode at least twice, so it ` +
+  `has more flat and AND-OR moves than a typical one. No giving up. Distances are the true moves to the goal (breadth-first ` +
+  `search), which the student never sees; "moves to go" is the value network's estimate.`;
+
+// board
+const svg = $("board");
+el("rect", {x: OX - 6, y: OY - 6, width: 6 * CELL + 12, height: 6 * CELL + 12, rx: 10, fill: "var(--board)"}, svg);
+for (let r = 0; r < 6; r++) for (let c = 0; c < 6; c++)
+  el("rect", {x: OX + c * CELL + 2, y: OY + r * CELL + 2, width: CELL - 4, height: CELL - 4, rx: 5, fill: "var(--cell)"}, svg);
+el("path", {d: `M ${OX + 6 * CELL + 8} ${OY + 2 * CELL + 10} l 12 ${CELL / 2 - 10} l -12 ${CELL / 2 - 10}`, fill: "none",
+  stroke: "var(--red)", "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round"}, svg);
+const ghostLayer = el("g", {}, svg), carLayer = el("g", {}, svg), arrowLayer = el("g", {}, svg);
+const cars = {};
+function carBox(cells) {
+  const rs = cells.map(x => x[0]), cs = cells.map(x => x[1]);
+  return {x: Math.min(...cs) * CELL, y: Math.min(...rs) * CELL,
+          w: (Math.max(...cs) - Math.min(...cs) + 1) * CELL, h: (Math.max(...rs) - Math.min(...rs) + 1) * CELL};
+}
+for (const [n, cells] of boards[0]) {
+  const b = carBox(cells), g = el("g", {class: "car"}, carLayer);
+  const rect = el("rect", {x: OX + 5, y: OY + 5, width: b.w - 10, height: b.h - 10, rx: 9,
+    fill: n === "red" ? "var(--red)" : "var(--car)", "stroke-width": 3.5, stroke: "none"}, g);
+  const t = el("text", {x: OX + b.w / 2, y: OY + b.h / 2 + 4, "text-anchor": "middle", "font-size": 12, "font-weight": 600,
+    fill: n === "red" ? "#fff" : "var(--car-ink)"}, g);
+  t.textContent = n === "red" ? "red" : n;
+  cars[n] = {g, rect};
+}
+function placeCars(boardList) {
+  for (const [n, cells] of boardList) { const b = carBox(cells); cars[n].g.setAttribute("transform", `translate(${b.x},${b.y})`); }
+}
+function ghost(boardList, m, color, dashed) {
+  const cells = boardList.find(x => x[0] === m.car)[1];
+  const from = carBox(cells), to = carBox(applyMove([[m.car, cells]], m)[0][1]);
+  const g = el("g", {}, ghostLayer);
+  el("rect", {x: OX + to.x + 5, y: OY + to.y + 5, width: to.w - 10, height: to.h - 10, rx: 9, fill: color,
+    "fill-opacity": dashed ? 0.08 : 0.16, stroke: color, "stroke-width": 2.5, "stroke-dasharray": dashed ? "5 4" : "none"}, g);
+  const x1 = OX + from.x + from.w / 2, y1 = OY + from.y + from.h / 2, x2 = OX + to.x + to.w / 2, y2 = OY + to.y + to.h / 2;
+  const a = el("g", {}, dashed ? g : arrowLayer);
+  el("line", {x1, y1, x2, y2, stroke: color, "stroke-width": 3, "stroke-linecap": "round", opacity: dashed ? 0.7 : 1}, a);
+  const ang = Math.atan2(y2 - y1, x2 - x1), s = 9;
+  el("path", {d: `M ${x2} ${y2} L ${x2 - s * Math.cos(ang - 0.5)} ${y2 - s * Math.sin(ang - 0.5)} L ${x2 - s * Math.cos(ang + 0.5)} ${y2 - s * Math.sin(ang + 0.5)} Z`,
+    fill: color, opacity: dashed ? 0.7 : 1}, a);
+  return g;
+}
+
+// timeline
+const tl = $("timeline"), TW = 400, TH = 120, TB = 16, TOP = 8, BOT = 92;
+const maxD = Math.max(...F.map(f => f.distance), DATA.optimal);
+const xw = TW / N;
+for (let i = 0; i < N; i++) {
+  const r = el("rect", {x: i * xw + 0.5, y: BOT + 6, width: Math.max(xw - 1, 1), height: TB, rx: 1.5, fill: COLOR[F[i].mode]}, tl);
+  r.addEventListener("click", () => go(i));
+}
+for (const d of [0, maxD]) {
+  const y = TOP + (1 - d / maxD) * (BOT - TOP);
+  el("line", {x1: 0, x2: TW, y1: y, y2: y, stroke: "var(--grid)"}, tl);
+  const t = el("text", {x: d === 0 ? 2 : TW - 2, y: d === 0 ? y - 3 : y + 10, "text-anchor": d === 0 ? "start" : "end", "font-size": 9,
+    fill: "var(--muted)"}, tl); t.textContent = d === 0 ? "goal" : d + " moves to go";
+}
+const pts = F.map((f, i) => [i * xw + xw / 2, TOP + (1 - f.distance / maxD) * (BOT - TOP)]);
+pts.push([N * xw, TOP + (1 - F[N - 1].after / maxD) * (BOT - TOP)]);
+el("polyline", {points: pts.map(p => p.join(",")).join(" "), fill: "none", stroke: "var(--ink)", "stroke-width": 1.5,
+  "stroke-linejoin": "round"}, tl);
+const cursor = el("rect", {y: TOP - 4, height: BOT - TOP + TB + 14, width: Math.max(xw, 2), fill: "var(--ink)", opacity: 0.12, rx: 2}, tl);
+tl.addEventListener("click", e => { const p = tl.getBoundingClientRect(); go(Math.min(N - 1, Math.floor((e.clientX - p.left) / p.width * N))); });
+
+// panels
+function modeBar(f) {
+  const bar = $("modebar"); bar.innerHTML = "";
+  const parts = [["and-or", f.w_ao], ["flat", f.w_flat], ["intuition", 1 - f.w_ao - f.w_flat]];
+  for (const [m, w] of parts) {
+    const d = document.createElement("div"); d.style.width = (w * 100) + "%"; d.style.background = COLOR[m];
+    d.textContent = w >= 0.15 ? NAME[m] : (w >= 0.07 ? (m === "flat" ? "flat" : NAME[m]) : ""); d.title = `${NAME[m]}: ${Math.round(w * 100)}%`; bar.appendChild(d);
+  }
+  const mk = document.createElement("div"); mk.className = "marker"; mk.style.left = `calc(${f.draw * 100}% - 1.5px)`;
+  mk.style.display = f.why === "draw" ? "block" : "none"; bar.appendChild(mk);
+  bar.style.opacity = f.why === "draw" ? 1 : 0.35;
+}
+const pill = m => `<span class="pill" style="background:${COLOR[m]}">${NAME[m]}</span>`;
+function bar(p, color) { return `<div class="bar"><span style="width:${Math.max(p * 100, 0.5)}%;background:${color}"></span></div>`; }
+const truth = (c, f) => c.true < f.distance ? `<span class="ok">${c.true} ✓</span>` : `<span class="no">${c.true}</span>`;
+
+function panels(i) {
+  const f = F[i];
+  modeBar(f);
+  if (f.why === "opening") {
+    $("modeexplain").textContent = "The first move of an attempt is always a deliberation: people's slow first look at a puzzle.";
+    $("verdict").innerHTML = `No draw: ${pill("and-or")} (the opening)`;
+  } else if (f.why === "follow-through") {
+    $("modeexplain").textContent = "The move after the opening plays the same pass's second move: people's one-move follow-through.";
+    $("verdict").innerHTML = `No draw: ${pill("and-or")} (the opening's second move)`;
+  } else {
+    $("modeexplain").textContent = "Each move draws a number between 0 and 1; where it lands picks the mode. Draws are independent: nothing on the board decides the mode.";
+    $("verdict").innerHTML = `Draw ${fmt(f.draw)} → ${pill(f.mode)}`;
+  }
+  const pick = $("pick");
+  if (f.mode === "intuition") {
+    $("pickhead").textContent = "2 · Intuition: a sample from the policy";
+    $("pickexplain").textContent = "The policy head's probabilities over every legal move, with moves back to recently seen boards made less likely (the soft memory). One move is sampled; the student doesn't look ahead.";
+    const rows = f.candidates.slice(0, 7);
+    if (!rows.some(c => c.chosen)) rows.push(f.candidates.find(c => c.chosen));
+    pick.innerHTML = `<table><tr><th>move</th><th>probability</th><th></th><th>memory</th><th>true distance after</th></tr>` +
+      rows.map((c, k) => `<tr class="cand${c.chosen ? " chosen" : ""}" data-k="${k}" style="--chosen:var(--intuition)"><td>${label(c)}${c.chosen ? " ◀ played" : ""}</td>` +
+        `<td>${bar(c.p, "var(--intuition)")}</td><td>${fmt(c.p * 100, 0)}%</td><td>${c.penalty > 0.01 ? "−" + fmt(c.penalty, 1) : ""}</td><td>${truth(c, f)}</td></tr>`).join("") +
+      (f.candidates.length > rows.length ? `<tr><td colspan="5" class="no">+ ${f.candidates.length - rows.length} less likely moves</td></tr>` : "") + `</table>`;
+    hoverRows(pick, rows, f, "var(--intuition)");
+  } else if (f.mode === "flat") {
+    $("pickhead").textContent = "2 · Flat planning: one move deep, judged by the value network";
+    $("pickexplain").textContent = "The policy's 5 most likely moves are each looked at one move ahead. The value network estimates how many moves to go from each resulting board, and a softmax over (fewer moves to go, minus the memory penalty) picks one. A move that solves is always taken.";
+    const rows = f.candidates;
+    pick.innerHTML = `<table><tr><th>move</th><th>value network: moves to go</th><th>chance picked</th><th></th><th>true distance after</th></tr>` +
+      rows.map((c, k) => `<tr class="cand${c.chosen ? " chosen" : ""}" data-k="${k}" style="--chosen:var(--flat)"><td>${label(c)}${c.chosen ? " ◀ played" : ""}</td>` +
+        `<td>${fmt(c.togo, 1)}${c.penalty > 0.01 ? ` <span class="no">(memory −${fmt(c.penalty, 1)})</span>` : ""}</td><td>${bar(c.p, "var(--flat)")}</td><td>${fmt(c.p * 100, 0)}%</td><td>${truth(c, f)}</td></tr>`).join("") + `</table>`;
+    hoverRows(pick, rows, f, "var(--flat)");
+  } else {
+    $("pickhead").textContent = "2 · AND-OR: reasoning backward from the goal";
+    const p = f.plan;
+    const firstIdx = f.why === "follow-through" ? 1 : 0;
+    $("pickexplain").textContent = (f.why === "follow-through" ?
+      "The opening's AND-OR pass is still in mind: its second move is played, then the plan is dropped. " :
+      "One pass of AND-OR from this board: to get red out, which cars block it, what blocks them, and so on, with the network's policy head ordering the options. Only the first move is played; the rest of the plan is not kept. ") +
+      (p.complete ? `This pass reached the goal in ${p.moves.length} moves.` : `This pass lapsed after ${p.moves.length} move${p.moves.length === 1 ? "" : "s"} (a 7% chance at each step).`);
+    pick.innerHTML = `<div class="chips">` + p.moves.map((m, k) =>
+      `<span class="chip ${k === firstIdx ? "first" : (k < firstIdx ? "later" : "")}" data-k="${k}">${k + 1}. ${label(m)}${k === firstIdx ? " ◀ played" : ""}</span>`).join("") + `</div>` +
+      `<p class="explain" style="margin-top:10px">Hover a step to see the plan's board after it. True distance after the move played: ${f.after < f.distance ? `<span class="ok">${f.after} ✓</span>` : f.after}.</p>`;
+    pick.querySelectorAll(".chip").forEach(ch => {
+      ch.addEventListener("mouseenter", () => { if (playing) return; placeCars(p.moves[+ch.dataset.k].board); ghostLayer.innerHTML = ""; arrowLayer.style.opacity = 0; });
+      ch.addEventListener("mouseleave", () => { if (playing) return; draw(cur, false); });
+    });
+  }
+}
+function hoverRows(container, rows, f, color) {
+  container.querySelectorAll("tr.cand").forEach(tr => {
+    let g = null;
+    tr.addEventListener("mouseenter", () => { const c = rows[+tr.dataset.k]; if (!c.chosen) g = ghost(f.board, c, color, true); });
+    tr.addEventListener("mouseleave", () => { if (g) g.remove(); g = null; });
+  });
+}
+
+let cur = 0, playing = false, timer = null;
+function draw(i, slide = true) {
+  const f = F[i];
+  if (!slide) carLayer.querySelectorAll(".car").forEach(g => g.style.transition = "none");
+  placeCars(boards[i]);
+  if (!slide) requestAnimationFrame(() => carLayer.querySelectorAll(".car").forEach(g => g.style.transition = ""));
+  ghostLayer.innerHTML = ""; arrowLayer.innerHTML = ""; arrowLayer.style.opacity = 1;
+  for (const n in cars) cars[n].rect.setAttribute("stroke", "none");
+  cars[f.move.car].rect.setAttribute("stroke", COLOR[f.mode]);
+  ghost(f.board, f.move, COLOR[f.mode], false);
+  $("dist").innerHTML = `true distance to goal <b>${f.distance}</b>`;
+  $("moveline").innerHTML = `plays <b>${label(f.move)}</b> → ${f.after}${f.after === 0 ? " · solved" : ""}`;
+  $("count").textContent = `move ${i + 1} of ${N}`;
+  $("slider").value = i;
+  cursor.setAttribute("x", i * xw);
+  panels(i);
+}
+function go(i) { cur = Math.max(0, Math.min(N - 1, i)); draw(cur); }
+function step() {
+  if (cur >= N - 1) { placeCars(boards[N]); ghostLayer.innerHTML = ""; arrowLayer.innerHTML = ""; stop(); return; }
+  go(cur + 1);
+}
+function stop() { playing = false; clearInterval(timer); $("play").textContent = "Play"; }
+function play() {
+  if (cur >= N - 1) go(0);
+  playing = true; $("play").textContent = "Pause"; timer = setInterval(step, 1900);
+}
+$("slider").max = N - 1;
+$("slider").addEventListener("input", e => { stop(); go(+e.target.value); });
+$("play").onclick = () => playing ? stop() : play();
+$("prev").onclick = () => { stop(); go(cur - 1); };
+$("next").onclick = () => { stop(); go(cur + 1); };
+$("first").onclick = () => { stop(); go(0); };
+$("last").onclick = () => { stop(); go(N - 1); };
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { stop(); go(cur + 1); } else if (e.key === "ArrowLeft") { stop(); go(cur - 1); }
+  else if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
+  else if (e.key === "Home") { stop(); go(0); } else if (e.key === "End") { stop(); go(N - 1); }
+});
+cur = Math.max(0, Math.min(N - 1, (+(location.hash.match(/move=(\d+)/) || [0, 1])[1]) - 1));
+draw(cur, false);
+</script>
+</body>
+</html>
