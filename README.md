@@ -51,6 +51,8 @@ notebooks/
                        the student and people learn, in words (experiments/rule_mining.py)
   p2.5_value_network.ipynb  one network or two: the policy and value as separate networks
                        (experiments/separate_value.py)
+  p2.6_teaching_replication.ipynb  phase 1's teaching result played again with the two-mode student
+                       (experiments/replication_queue.py, replication_analysis.py)
 web/                   the playable Rush Hour page with teachers, for collecting human play
 visualization/          figures by phase; p2_two_mode/two_mode_moves.html steps through how the two-mode student
                        picks each move of one attempt (experiments/two_mode_animation.py)
@@ -85,6 +87,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | p2.4 | Rules in words: a short list of "clear a car so the blocking chain shrinks" rules is near-sound close to the goal. Every student trained on optimal moves comes to follow it as much as people do; by distance they differ, and people start out knowing the near-goal rules the students lack. The student's network doesn't represent the rules' concepts beyond its input; networks trained by expert iteration do | `p2.4_rules` |
 | - | The dest head removed: AND-OR ordered by the policy head plays as well, and an apprentice trained without dest targets starts where people do and learns as the dest-head one did; it is now the start of every session (tag `pre-dest-removal` has the code before) | p2_summary section 7, `MODEL.md` |
 | - | The student consolidated: the two-mode student (two networks of 2 lane blocks) is now the fitted student (`spec.STUDENT`) and plays in `rushhour.sessions`, taught or not; phase 1's intuition student is `--student intuition`. Its known gaps (mid-puzzle skill, near-goal start knowledge, giving up, individual differences) are written down as premises | `MODEL.md`, p2_summary section 9 |
+| p2.6 | Phase 1's teaching result on the two-mode student: bayes4 still helps at every agency and showing every move still goes from harmful to the best help, but it stops hurting sooner (it already helps at ΔA 0.3). Phase 1's intuition student on the new start lies between. Untaught, the two-mode student solves fewer of the tests' long puzzles and its solve rate doesn't rise | `p2.6_teaching_replication`, p2_summary section 10 |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.

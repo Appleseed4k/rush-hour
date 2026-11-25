@@ -88,14 +88,15 @@ def versus(run, teacher, none):
     return np.mean(list(end.values())), [end[s] - none[s] for s in end if s in none], an.spend(e)
 
 
-def agency_seeds():
+def agency_seeds(seeds=SEEDS):
+    """seeds: {seed: run name pattern with {} for the agency} (default: phase 1's x10 sweep)."""
     rows = []
     for a in spec.AGENCIES:
         tag = f"{a:g}"
         for teacher in TEACHERS:
             pooled, ends_, shown = [], [], []
             row = {"agency": a, "teacher": teacher}
-            for seed, pattern in SEEDS.items():
+            for seed, pattern in seeds.items():
                 none = ends(pattern.format(NONE_AT), "none")
                 v = versus(pattern.format(tag), teacher, none)
                 if v is None:
@@ -114,7 +115,7 @@ def agency_seeds():
                     "end": np.mean(ends_), "shown": np.mean(shown)}
             rows.append(row)
     none_rows = []
-    for seed, pattern in SEEDS.items():
+    for seed, pattern in seeds.items():
         none = ends(pattern.format(NONE_AT), "none")
         none_rows.append({"seed": seed, "none end": np.mean(list(none.values())) if none else np.nan})
     return pd.DataFrame(rows), pd.DataFrame(none_rows)

@@ -293,7 +293,10 @@ apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 
 ## Which saved runs use this student
 
-**No teaching run has used this student yet.** Its sessions so far have no teacher and were run by
+**The teaching runs:** `twomode_m10[_s1|_s2]_agency{0,0.1,0.3,0.5,0.7,0.9,1}` (2026-11-25,
+`experiments/replication_queue.py`): phase 1's ×10 agency sweep with this student, seeds 0-2 (p2.6). Beside them,
+`intuition_m10[_s1|_s2]_agency*` are the same sweep with phase 1's intuition student on this start
+(`spec.differences(config, intuition=True)`). Its sessions before these have no teacher and were run by
 `experiments/planner_session.py --lean` at people's lengths (config key `lean`, not `student`): at this start
 `lean_people_all_m10_ao_b2` and `_b2_seed1`; at the earlier starts the runs named in the sections below.
 
