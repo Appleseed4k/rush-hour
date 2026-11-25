@@ -448,7 +448,9 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
     the number of puzzles played so far - e.g. to snapshot the student.
 
     `solver`, if given, plays each attempt instead of solve_intuition: solver(agent, state, cap, rng, gives_up)
-    returning solve_intuition's dict (e.g. a planner; experiments/planner_session.py). No teacher with a solver.
+    returning solve_intuition's dict - the two-mode student (two_mode.TwoModeSolver), or a planner
+    (experiments/planner_session.py). With a teacher, the solver is also passed teacher=... and must take it
+    (TwoModeSolver does).
 
     `log_loss` also records, per puzzle, what its examples gave the update: "loss" = {kind: sums of
     example_losses over its examples, measured just before the update that learns from them}, kind "own" or
@@ -472,8 +474,8 @@ def learning_session(agent, puzzles, teacher=None, max_attempts=1, max_steps=200
                 teacher.start(state, rng)
             gives_up = surrender.for_puzzle(state, sum(len(r["moves"]) for r in results)) if surrender else None
             if solver is not None:
-                assert teacher is None, "a solver plays without a teacher"
-                results.append(solver(agent, state, _cap(max_steps, state), rng, gives_up))
+                results.append(solver(agent, state, _cap(max_steps, state), rng, gives_up,
+                                      **({"teacher": teacher} if teacher is not None else {})))
             else:
                 results.append(solve_intuition(agent, state, _cap(max_steps, state), memory, explore, teacher, rng,
                                                gives_up))

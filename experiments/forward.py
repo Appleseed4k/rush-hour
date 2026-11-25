@@ -42,6 +42,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from rushhour import board, paths, sessions  # noqa: E402
 from rushhour.and_or import AndNode, _red_steps, solve as and_or_solve  # noqa: E402
 from rushhour.student import PolicyAgent  # noqa: E402
+# The two-mode student moved to the library (rushhour/student/two_mode.py); its old names here still work.
+from rushhour.student.two_mode import (AO_ORDERS, TwoModeSolver as LeanSolver, flat_pick as _flat_pick,  # noqa: E402
+                                       goal_in_sight, sample_move, solve_two_mode as solve_lean, values)
 
 OUT = os.path.join(paths.MODELS, "summary", "forward.csv")
 SESSION = os.path.join(paths.MODELS, "sessions", "aostart_free_m10_s2_agency1")
@@ -59,41 +62,6 @@ def evaluate_many(agent, states):
         policy, _ = agent.net.heads(torch.stack([agent.encoder.encode(s) for s in missing]).to(agent.device))
     for s, p in zip(missing, policy.cpu()):
         agent._scores[s] = p
-
-
-def values(agent, states):
-    """The value head's moves to go (its output x 10) for each of `states`, batched and cached on the agent - the
-    head of its separate value network (agent.value_agent) if it has one."""
-    cache = agent.__dict__.setdefault("_values", {})
-    if len(cache) > 50_000:  # clear before working out what is missing, so every state asked for is filled
-        cache.clear()
-    missing = list({s for s in states if s not in cache})
-    if missing:
-        judge = getattr(agent, "value_agent", None) or agent
-        judge.net.eval()
-        with torch.no_grad():
-            v = judge.net.heads(torch.stack([judge.encoder.encode(s) for s in missing]).to(judge.device))[1]
-        cache.update(zip(missing, (10 * v.cpu()).tolist()))
-    return [cache[s] for s in states]
-
-
-def sample_move(agent, state, orientations, avoid, temperature, rng, uniform=False, penalty=None):
-    """A (move, next board) sampled from the policy head (`uniform`: uniformly, the network unused), avoiding
-    boards in `avoid` if it can. With `penalty` (board -> a number), nothing is avoided: each move's logit is
-    lowered by the penalty of the board it leads to (a soft memory)."""
-    options = list(board.neighbors(state, orientations))
-    if penalty is not None:
-        logits = (torch.zeros(len(options)) if uniform else
-                  agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]] / max(temperature, 1e-9))
-        logits = logits - torch.tensor([penalty(b) for _, b in options], dtype=logits.dtype)
-        return rng.choices(options, torch.softmax(logits, dim=0).tolist())[0]
-    fresh = [o for o in options if o[1] not in avoid] or options
-    if uniform:
-        return rng.choice(fresh)
-    logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in fresh]]
-    if temperature > 0:
-        return rng.choices(fresh, torch.softmax(logits / temperature, dim=0).tolist())[0]
-    return fresh[int(logits.argmax())]
 
 
 def solve_forward(agent, state, max_steps, k=8, depth=4, memory=10, temperature=1.0, novelty="attempt",
@@ -346,21 +314,7 @@ def solve_flat(agent, state, max_steps, consider=3, tau=1.0, check=False, rollou
     return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "checks": checks}
 
 
-def _flat_pick(agent, state, options, pen, consider, tau, rng):
-    """solve_flat's choice: the index (into `options`) of the move picked from the policy's `consider` most likely
-    (memory penalties `pen` subtracted), by a softmax over -moves to go / tau - pen; a solving move always."""
-    logits = agent.policy_logits(state)[[agent.action_id(state, *m) for m, _ in options]].tolist()
-    order = sorted(range(len(options)), key=lambda i: logits[i] - pen[i], reverse=True)
-    pool = order if consider is None else order[:consider]
-    win = [i for i in pool if _red_steps(options[i][1]) <= 0]
-    if win:
-        return win[0]
-    ends = values(agent, [options[i][1] for i in pool])
-    score = torch.tensor([-e / tau - pen[i] for e, i in zip(ends, pool)])
-    return pool[rng.choices(range(len(pool)), torch.softmax(score, 0).tolist())[0]]
-
-
-def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop", stall=4, window=10, gamma=0.07,
+def solve_impasse_switch(agent, state, max_steps, consider=3, tau=0.5, trigger="loop", stall=4, window=10, gamma=0.07,
                    soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None):
     """The impasse switch: forward by default, backward at an impasse. (Called "two modes" before the two-mode
     student, solve_lean, took that name.)
@@ -440,133 +394,6 @@ def solve_two_mode(agent, state, max_steps, consider=3, tau=0.5, trigger="loop",
                     "backward": from_plan}
     return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "impasses": impasses,
             "backward": from_plan}
-
-
-def goal_in_sight(state, orientations, depth):
-    """(first move, board after it) of a shortest sequence of at most `depth` moves that gets red out, or None."""
-    frontier, seen = [(state, None)], {state}
-    for _ in range(depth):
-        nxt = []
-        for b, first in frontier:
-            for m, c in board.neighbors(b, orientations):
-                if c in seen:
-                    continue
-                seen.add(c)
-                f = first or (m, c)
-                if _red_steps(c) <= 0:
-                    return f
-                nxt.append((c, f))
-        frontier = nxt
-    return None
-
-
-AO_ORDERS = ("policy", "none")
-
-
-def solve_lean(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
-               soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0,
-               ao_order="policy"):
-    """The two-mode student (w_ao > 0) or, with w_ao 0, the forward student - named "lean" in the code (solve_lean,
-    LeanSolver, --lean, lean_* runs and tables). The generative side of the move-by-move mixture
-    (notebooks/p2.2_forward_planning.ipynb, 2c):
-    each move is made by one of three modes, drawn independently per move:
-    - with probability w_ao, a deliberation: one AND-OR pass from the board (the policy head ordering its options with
-      Gumbel noise, lapse rate `gamma`), and its first move is played - one move per search, as in the paper's model;
-      no plan is kept;
-    - with probability w_flat, flat planning (_flat_pick: the policy's `consider` most likely moves, a softmax over
-      -moves to go / tau);
-    - otherwise intuition: a policy sample.
-    The soft board memory (beta x 0.5^(age / half-life)) lowers moves back to recent boards in intuition and flat.
-    ao_order: what orders AND-OR's options (and picks a lapse's move) - "policy" (the policy head,
-    PolicyAgent.heuristic) or "none" (random order, plain AND-OR). (Until 2026-11-24, "dest": the dest head.)
-    opening=True: the attempt's first move is always a deliberation, and the move after it is the same pass's second
-    move (people's slow first look and its one-move follow-through).
-
-    sight=D ("goal in sight"): before anything else, a search of every sequence of up to D moves; if one gets red
-    out, its first move is played. temperature: intuition's sampling temperature (1: as the session student).
-
-    `sources`, if a list, gets "intuition", "flat", "and-or" or "sight" per move. Returns {"solved", "surrendered",
-    "moves", "backward"} (backward: AND-OR moves)."""
-    rng = rng or random
-    agent.temperature = 1.0
-    if ao_order not in AO_ORDERS:
-        raise ValueError(f"ao_order: one of {AO_ORDERS}, not {ao_order!r}")
-    heuristic = agent.heuristic if ao_order == "policy" else None
-    orientations = board.car_orientations(state)
-    last_board = {state: 0}
-    beta, half = soft_memory if soft_memory else (0.0, 1.0)
-    moves, from_ao, pending = 0, 0, []
-
-    def penalty(b):
-        when = last_board.get(b)
-        return 0.0 if when is None else beta * 0.5 ** ((moves + 1 - when) / half)
-
-    while moves < max_steps and _red_steps(state) > 0:
-        r = rng.random()
-        src = "intuition"
-        played = None
-        seen_goal = goal_in_sight(state, orientations, sight) if sight and not pending else None
-        if pending:
-            played = pending.pop(0)
-            src = "and-or"
-        elif seen_goal is not None:
-            played = seen_goal
-            src = "sight"
-        elif (opening and moves == 0) or r < w_ao:
-            att = and_or_solve(state, heuristic=heuristic, gamma=gamma)
-            steps = (att if type(att) is list else att[1]) or []
-            if steps:
-                nxt = AndNode(state, *steps[0]).apply(state)
-                played = (steps[0], nxt)
-                src = "and-or"
-                if opening and moves == 0 and len(steps) > 1 and _red_steps(nxt) > 0:
-                    pending = [(steps[1], AndNode(nxt, *steps[1]).apply(nxt))]
-        elif r < w_ao + w_flat:
-            options = list(board.neighbors(state, orientations))
-            played = options[_flat_pick(agent, state, options, [penalty(b) for _, b in options], consider, tau, rng)]
-            src = "flat"
-        if played is None:
-            played = sample_move(agent, state, orientations, set(), temperature, rng, penalty=penalty)
-            src = "intuition"
-        move, state = played
-        moves += 1
-        from_ao += src == "and-or"
-        last_board[state] = moves
-        if trace is not None:
-            trace.append((move, state))
-        if sources is not None:
-            sources.append(src)
-        if surrender is not None and _red_steps(state) > 0 and rng.random() < surrender(moves):
-            return {"solved": False, "surrendered": True, "moves": moves, "backward": from_ao}
-    return {"solved": _red_steps(state) <= 0, "surrendered": False, "moves": moves, "backward": from_ao}
-
-
-class LeanSolver:
-    """solve_lean as learning_session's `solver`, with the flat share rising over the session: on the puzzle of human
-    trial t (t = puzzles played // multiplier + 1), w_flat = flat_start + (flat_end - flat_start) x min(1, (t - 1) /
-    ramp) - people's flat share rose from about 6% to 18% over their first 30 trials, and 18% of their moves fit a
-    policy-ordered AND-OR pass (the mixture fit, refitted 2026-11-24 without the dest head; with dest-ordered AND-OR it
-    was 8% -> 18% and 10%). One instance per student: it counts the attempts it has played (one per puzzle). The value
-    cache is cleared each attempt."""
-
-    def __init__(self, w_ao=0.18, flat_start=0.06, flat_end=0.18, ramp=30, multiplier=10, opening=True, **kw):
-        self.w_ao, self.flat_start, self.flat_end, self.ramp = w_ao, flat_start, flat_end, ramp
-        self.multiplier, self.opening, self.kw, self.calls = multiplier, opening, kw, 0
-
-    def flat_at(self, trial):
-        return self.flat_start + (self.flat_end - self.flat_start) * min(1.0, (trial - 1) / self.ramp)
-
-    def __call__(self, agent, state, cap, rng, gives_up):
-        trial = self.calls // self.multiplier + 1
-        self.calls += 1
-        agent.__dict__.pop("_values", None)
-        random.seed(rng.random())
-        trace = []
-        out = solve_lean(agent, state, cap, w_flat=self.flat_at(trial), w_ao=self.w_ao, opening=self.opening,
-                         rng=rng, trace=trace, surrender=gives_up, **self.kw)
-        return {"solved": out["solved"], "surrendered": out["surrendered"],
-                "boards": [state] + [b for _, b in trace], "moves": [m for m, _ in trace],
-                "taught": [False] * len(trace), "backward": out["backward"]}
 
 
 class PlannerSolver:

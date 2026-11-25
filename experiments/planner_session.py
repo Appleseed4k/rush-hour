@@ -123,7 +123,7 @@ FLAT_START = ({f"flat m{m} tau {t}": {"flat": True, "consider": m, "tau": t}
                  for m in FLAT_CONSIDER for t in FLAT_TAU})
 
 
-# the impasse switch: sharp flat forward choice, an AND-OR plan at an impasse (forward.solve_two_mode)
+# the impasse switch: sharp flat forward choice, an AND-OR plan at an impasse (forward.solve_impasse_switch)
 TWO_CONSIDER, TWO_TAU, TWO_TRIGGER, TWO_GAMMA = (3, 5), (0.25, 0.5, 1), ("loop", "stall", "either"), (0.07, 0.3)
 TWO_START = {f"two-mode m{m} tau {t} {tr} gamma {g}": {"two_mode": True, "consider": m, "tau": t, "trigger": tr,
                                                          "gamma": g}
@@ -183,7 +183,7 @@ def _start_job(args):
     kw = dict(kw)
     forward._W["agent"] = forward._W["agents"][kw.pop("net", "start")]
     solve = (forward.solve_flat if kw.pop("flat", False) else
-             forward.solve_two_mode if kw.pop("two_mode", False) else
+             forward.solve_impasse_switch if kw.pop("two_mode", False) else
              forward.solve_lean if kw.pop("lean", False) else forward.solve_forward)
     out = solve(forward._W["agent"], state, max(50, round(10 * distance)), rng=rng, trace=trace, **kw)
     return {"config": name, "puzzle": puzzle, "distance": distance, "run": run,

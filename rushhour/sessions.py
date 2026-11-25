@@ -13,6 +13,11 @@ last --window moves. All students of a run start from the same network
 (--init: a saved checkpoint, e.g. one pretrained to human starting
 performance; default: untrained).
 
+--student says how a student plays: intuition (default; phase 1's student: a move sampled from the policy, avoiding
+the last --memory boards) or two-mode (the fitted student, student.TwoModeSolver: intuition, flat planning and
+single AND-OR deliberations, drawn per move, with a soft memory; --two-mode its settings). Either plays with the
+teacher, and its tests play the same way, untaught.
+
 --surrender lets the students give up on a puzzle as people do: after each
 move, with a probability fitted to the human data by how many moves they
 have made relative to the optimal length (human_data.surrender_hazard; the
@@ -45,6 +50,7 @@ standard errors across students.
 
 Examples (from the repository root):
     python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4   # the fitted student
+    python -m rushhour.sessions my_run --fitted --student intuition ...   # phase 1's student, today's start
     python -m rushhour.sessions base --init models/students/round6_epoch01.pt
     python -m rushhour.sessions lapses --init ... --encode 0.3 --teachers none random:0.1
     python -m rushhour.sessions base --test-only --test-runs 5
@@ -84,14 +90,15 @@ from .student import spec as student_spec
 
 OUT = paths.SESSIONS
 TEST_SETTINGS = ("test_runs", "test_temperature", "memory", "step_factor", "min_steps", "max_steps", "seed",
-                 "test_surrender", "surrender_scale")
+                 "test_surrender", "surrender_scale", "student", "two_mode")
 # Settings a saved run may be re-run with: it then adds the teachers it doesn't have yet (and finishes any
 # that stopped early), skipping the ones already played. (flag_penalty: retired with the flag teacher; runs
 # saved before still have it.)
 SAME_RUN_IGNORES = {"teachers", "processes", "out", "test_only", "overwrite", "surrender_table", "flag_penalty"}
 # Settings added after runs were saved, and what those runs did: a saved run without one counts as having its default.
 ADDED_SETTINGS = {"shown_weight": 1.0, "progress_weight": 0.0, "progress_tail": 0.2, "labels": "own",
-                  "agency_step": "off", "train_device": "cpu", "even_batches": False, "log_loss": False}
+                  "agency_step": "off", "train_device": "cpu", "even_batches": False, "log_loss": False,
+                  "student": "intuition", "two_mode": None}
 
 
 # --- configuration -----------------------------------------------------------------------------
@@ -108,6 +115,13 @@ def parse_args(argv=None):
                          "puzzles' lengths, counted as this repo does - see human_data.distance)")
     ap.add_argument("--per-bin", type=int, default=18, help="session puzzles per bin")
     ap.add_argument("--max-attempts", type=int, default=1, help="attempts per puzzle (restarts), until solved")
+    ap.add_argument("--student", choices=["intuition", "two-mode"], default="intuition",
+                    help="how the student plays: intuition = a move sampled from the policy, avoiding --memory recent "
+                         "boards (phase 1's student); two-mode = intuition, flat planning and AND-OR deliberations, "
+                         "with a soft memory (student.TwoModeSolver; --explore and --memory then unused)")
+    ap.add_argument("--two-mode", type=json.loads, default=None,
+                    help="with --student two-mode: TwoModeSolver's settings as JSON, e.g. '{\"w_ao\": 0.1}' (default: "
+                         "the fitted ones; with --fitted, spec.STUDENT's)")
     ap.add_argument("--explore", type=float, default=1.0, help="the student's sampling temperature")
     ap.add_argument("--memory", type=int, default=10, help="recent boards the student avoids returning to")
     ap.add_argument("--window", type=int, default=10,
@@ -180,6 +194,10 @@ def parse_args(argv=None):
                            for k, v in (student_spec.STUDENT | student_spec.PROTOCOL).items()})
     args = ap.parse_args(argv)
     del args.fitted  # a preset, not a setting: the run's config records every value it set
+    if args.student == "two-mode":
+        args.two_mode = {**student_spec.TWO_MODE, **(args.two_mode or {})}  # every value recorded in the config
+    else:
+        args.two_mode = None  # (--fitted's two-mode settings don't apply to the intuition student)
     args.test_bins = args.test_bins or args.session_bins
     args.block = args.block or args.multiplier
     if args.init is not None and not args.test_only:
@@ -187,6 +205,13 @@ def parse_args(argv=None):
         if not os.path.exists(args.init):
             ap.error(f"--init: no checkpoint at {args.init}")
     return args
+
+
+def two_mode_solver(config):
+    """The run's two-mode student (student.TwoModeSolver), or None for the intuition student."""
+    if config.get("student", "intuition") != "two-mode":
+        return None
+    return st.TwoModeSolver(multiplier=multiplier(config), **config["two_mode"])
 
 
 def make_teacher(spec):
@@ -369,7 +394,8 @@ def _student(job):
         on_puzzle=snapshot, shown_weight=config.get("shown_weight", 1.0), judge=judge,
         progress_weight=progress_weight, progress_tail=config.get("progress_tail", 0.2),
         labels=config.get("labels", "own"), agency_step=config.get("agency_step", "off"),
-        even_batches=config.get("even_batches", False), log_loss=config.get("log_loss", False))
+        even_batches=config.get("even_batches", False), log_loss=config.get("log_loss", False),
+        solver=two_mode_solver(config))
     m = multiplier(config)
     for entry, (i, d, _) in zip(record, puzzles):  # trial: the human trial this puzzle counts toward
         entry.update(step=entry["puzzle"] + 1, trial=entry["puzzle"] // m + 1, puzzle=i, distance=d)
@@ -411,10 +437,16 @@ def test(spec, config, test_puzzles, caps, run_dir, n_puzzles):
             if str(n) not in results["students"].get(str(s), {})]
     files = sorted({_snapshot(run_dir, spec, s, n) for s, n in todo})
     n_runs = config["test_runs"]
-    # The same attempts as st.evaluate_intuition, for every snapshot in one pool.
+    # The same attempts as st.evaluate_intuition, for every snapshot in one pool. The two-mode student plays with
+    # its flat share at the snapshot's trial (the human trial after its puzzles played).
     rule = surrender_rule(config, test_puzzles) if config.get("test_surrender") else None
+    solver = two_mode_solver(config)
+    played = {_snapshot(run_dir, spec, s, n): n for s, n in todo}
+    play = {file: None if solver is None else
+            {**{k: v for k, v in config["two_mode"].items() if k not in ("flat_start", "flat_end", "ramp")},
+             "w_flat": solver.flat_at(played[file] // multiplier(config) + 1)} for file in files}
     jobs = [(file, state, d, config["memory"], caps[state], config["test_temperature"],
-             hash((config["seed"], i, r)) & 0xFFFFFFFF, rule)
+             hash((config["seed"], i, r)) & 0xFFFFFFFF, rule, play[file])
             for file in files for i, (d, state) in enumerate(test_puzzles) for r in range(n_runs)]
     per_file = len(test_puzzles) * n_runs
     write_progress(run_dir, f"{folder(spec)}_tests", done=0, total=len(jobs))
@@ -446,15 +478,24 @@ _AGENT = {}
 
 def _test_job(job):
     """One untaught test attempt by a snapshot (loaded once per worker while
-    consecutive jobs share it) - as student.evaluate_intuition's attempts."""
+    consecutive jobs share it) - as student.evaluate_intuition's attempts; with `two_mode` (solve_two_mode's
+    settings), by the two-mode student."""
     file, state, distance, memory, cap, temperature, seed, *rest = job
     rule = rest[0] if rest else None
+    two_mode = rest[1] if len(rest) > 1 else None
     if file not in _AGENT:
         torch.set_num_threads(1)
         _AGENT.clear()
         _AGENT[file] = st.PolicyAgent.load(file)
+    surrender = rule.for_puzzle(state) if rule is not None else None
+    if two_mode is not None:
+        random.seed(seed)  # AND-OR draws its lapses from the random module
+        result = st.solve_two_mode(_AGENT[file], state, cap, rng=random.Random(seed), surrender=surrender,
+                                   temperature=temperature, **two_mode)
+        return {"solved": result["solved"], "moves": result["moves"] if result["solved"] else None,
+                "distance": distance}
     result = st.solve_intuition(_AGENT[file], state, cap, memory, temperature, rng=random.Random(seed),
-                                surrender=rule.for_puzzle(state) if rule is not None else None)
+                                surrender=surrender)
     return {"solved": result["solved"], "moves": len(result["moves"]) if result["solved"] else None,
             "distance": distance}
 

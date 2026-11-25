@@ -6,7 +6,8 @@ the value, where the value came from, and the code that implements it. The setti
 [`rushhour/student/spec.py`](rushhour/student/spec.py) (`STUDENT`, `AGENCY`, `PROTOCOL`).
 
 - To run this student, use `python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4`.
-- `spec.differences(config)` checks a saved run against the spec.
+  Add `--student intuition` for phase 1's student on the same start.
+- `spec.differences(config)` checks a saved run against the spec (`intuition=True`: against phase 1's student).
 
 Without `--fitted`, the command line's defaults describe a plain, uncalibrated student.
 
@@ -25,6 +26,10 @@ trained on the move targets only, and a value network trained on the distances o
 start of that day is `spec.SHARED` / `paths.SHARED_START`; ["The shared-trunk start"](#the-shared-trunk-start) covers
 the change. **Each network now has 2 lane blocks, not 4** (giving-up scale 0.40): 2, 4 and 6 fit people alike, and 2
 is the smallest and fastest. The 4-block start is `spec.FOUR_BLOCK` / `paths.FOUR_BLOCK_START`.
+
+**Since then the student plays as the two-mode student** (`spec.TWO_MODE`): each move is a single AND-OR
+deliberation, flat planning or intuition, with weights fitted to people's moves (§4). Phase 1's student played by
+intuition alone (`spec.INTUITION`, `--student intuition`), and every teaching result so far is from it.
 
 **Kind:**
 - **parameter**: a number or switch, in `spec.py`;
@@ -45,15 +50,20 @@ the red car's exit), 60 minutes each.
 
 ## In one paragraph
 
-The student is a neural network that plays Rush Hour by **intuition only**: on every board it samples a move from
-its policy, with no search. Before a session it imitates the AND-OR planning model, which the paper fitted to
-people's moves. That imitation is stopped at the point where the network solves puzzles as well and as efficiently
-as people do in their first trials.
+The student is two neural networks: a **policy network** that proposes moves and a **value network** that judges
+how far a board is from the goal. They play Rush Hour in the modes a move-by-move fit found in people's play. Most
+moves are **intuition**: a move sampled from the policy, with no search. Some are planned, either by **flat
+planning** (the policy's five likeliest moves, each judged one move ahead by the value network) or by a single
+**AND-OR deliberation** (one pass of the paper's model of people's planning, its first move played). Before a
+session both networks imitate the AND-OR model. That imitation is stopped at the point where the student solves
+puzzles as well and as efficiently as people do in their first trials.
 
 During a session it plays one puzzle at a time, and may give up as people do. After every 10 puzzles, which stand
 for one human trial, it learns from those puzzles alone, with no replay. It learns only from **solved** attempts:
 every board it visited is labelled with the shortest route to the goal through the boards it saw. A move a teacher
-shows also teaches, at a weight called agency (ΔA), the one parameter the teaching results sweep.
+shows also teaches, at a weight called agency (ΔA), the one parameter the teaching results sweep. Planning gets
+better only as the two networks do; how often it plans is fixed (AND-OR 18% of moves) or scheduled (flat planning
+6% → 18% over the first 30 trials, as people's rose).
 
 ## 1. Board, moves and the oracle
 
@@ -74,8 +84,8 @@ shows also teaches, at a weight called agency (ΔA), the one parameter the teach
 | Action space keyed by cell: (a car's top-left cell, direction, 1-5 cells). Each cell's output predicts the moves of the car anchored there, so one network plays every puzzle and a pattern learned in one place applies everywhere | design | 720 actions | chosen | [`PolicyAgent`](rushhour/student/network.py:113), `car_anchor` |
 | Trunk: a 3×3 stem, then residual lane blocks, each convolving whole rows and whole columns plus a 3×3 window, with BatchNorm | design | 96 channels, 2 blocks (592k weights per network) | chosen; 2, 4 and 6 blocks fit people alike (2026-11-24), and 2 is the smallest and fastest | [`LaneBlock`](rushhour/student/network.py:66), [`PolicyNetwork`](rushhour/student/network.py:81) |
 | Two networks of that shape, each read through one head. The **policy network**'s policy head: a score per move, read at its car's anchor cell; a softmax over the legal ones. The **value network**'s value head: moves to go in tens, from the board's mean features. Each network's other head is never trained or read | design | - | chosen (2026-11-24: as good as one shared trunk, and each network learns one thing) | [`PolicyNetwork.heads`](rushhour/student/network.py:81), [`PolicyAgent.value_agent`](rushhour/student/network.py:113) |
-| Only the policy network plays. The value network is trained in every update but read by nothing in this student (phase 2's two-mode student reads it for flat planning) | design | - | chosen | §4, §7 |
-| The policy head also orders AND-OR's options when AND-OR is run with the network (pretraining's later rounds, phase 2's deliberation): a move not legal yet is scored by its slot, which is trained on boards where it is legal | design | - | chosen (2026-11-24; it orders AND-OR as well as the dest head did) | [`PolicyAgent.heuristic`](rushhour/student/network.py:233) |
+| Both networks play: the policy network proposes every move (intuition's sample, flat planning's candidates, AND-OR's order); the value network judges flat planning's candidates. Phase 1's intuition student read only the policy network | design | - | chosen | §4 |
+| The policy head also orders AND-OR's options when AND-OR is run with the network (the two-mode student's deliberations; pretraining's later rounds): a move not legal yet is scored by its slot, which is trained on boards where it is legal | design | - | chosen (2026-11-24; it orders AND-OR as well as the dest head did) | [`PolicyAgent.heuristic`](rushhour/student/network.py:233) |
 
 Notes:
 - **Row and column convolutions:** what blocks a car, or red's path to the exit, is often several cells away (`LaneBlock`).
@@ -88,13 +98,14 @@ Notes:
 - **No dest head.** Until 2026-11-24 a third head, dest, scored every car's every position by how soon a solution
   brings it there (target 0.8^(k-1) at k moves), and ordered AND-OR's options; in pretraining it also learned which
   option AND-OR took at each subgoal. It was removed for simplicity: ordering AND-OR by the policy head plays as well,
-  and an apprentice trained without dest targets learns at the same pace and, in phase 2's two-mode session, gains
+  and an apprentice trained without dest targets learns at the same pace and, in the two-mode session, gains
   as much (`p2_summary.ipynb`, section 7). Old checkpoints load with it dropped.
 - **Two networks, not one trunk.** Until later on 2026-11-24 both heads shared one trunk, trained on the sum of the
   move and distance losses. Training the policy without the distance loss learns as fast, and gives a policy that
   fits people as well; the value network alone estimates distance as well as the shared head did. Two networks make
   each learn one thing: the policy network *choosing*, the value network *judging*.
-- **Value** was meant for progress labels, which are off. Phase 2's two-mode student reads it for flat planning.
+- **Value** was meant for progress labels, which are off. The two-mode student reads it for flat planning, which is
+  why it is kept.
 
 ## 3. Starting knowledge: AND-OR's apprentice
 
@@ -108,12 +119,17 @@ Notes:
 | What the apprentice learns: plain AND-OR plays 1,000 pool puzzles of 1-30 moves (200 per bin of 1-8, 9-12, 13-16, 17-20 and 21-30), 4 attempts each. Its solved attempts, loops cut, label the boards (policy and value targets as in §6): the policy network learns the moves, the value network the distances, each from the same examples | design | 2,966 solved attempts: 68,039 boards | chosen (phase 1's settings) | [`attempt_puzzle`](rushhour/student/labels.py:233), [`erase_loops`](rushhour/student/labels.py:42), [`experiments/apprentice.py`](experiments/apprentice.py) |
 | Training: Adam at learning rate 1e-3, batches of 256; validated on 100 held-out puzzles | implementation | - | chosen | [`train_policy`](rushhour/student/train.py:113) |
 | **Stopped at epoch 3 of round 1**, the checkpoint that matches people's first 10 trials. That is 3 passes over plain AND-OR's attempts: imitation learning, with no expert-iteration rounds. Round 1's validation would also have kept epoch 3 | parameter | round 1, epoch 3 | fitted | [`surrender.py`](rushhour/surrender.py) |
-| The fit, together with the giving-up scale (§5): every saved epoch of the policy network plays pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10. The value network is taken at the same epoch | implementation | best: 87.7% and 2.70, misfit 0.14 at scale 0.40 (with 4 blocks: 87.3% and 2.72, misfit 0.06 at 0.35) | fitted | `experiments/network_depth.py startfit` (`rushhour.surrender`'s fit) |
+| The fit, together with the giving-up scale (§5): every saved epoch of the policy network plays, by intuition, pool puzzles at people's lengths (20 each of 6, 10, 13, 15 moves; 10 runs each), and people's giving up is applied at each scale. The fit is to people's solve rate (87.4% ± 2.7%) and moves / optimal (2.76 ± 0.17) in trials 1-10. The value network is taken at the same epoch | implementation | best: 87.7% and 2.70, misfit 0.14 at scale 0.40 (with 4 blocks: 87.3% and 2.72, misfit 0.06 at 0.35) | fitted | `experiments/network_depth.py startfit` (`rushhour.surrender`'s fit) |
 | The session starts with a fresh Adam state and a learning rate 10× lower than pretraining's | implementation | - | chosen | [`PolicyAgent.load`](rushhour/student/network.py:196) |
 
 So the student's starting knowledge is **a partial copy of the paper's model of human planning**: the AND-OR
 model's moves and how far it still had to go, learned to the point where it plays like people at the start - not the
-order AND-OR tried its options in, which in plain AND-OR is random. In the session, AND-OR is never called.
+order AND-OR tried its options in, which in plain AND-OR is random. In the session AND-OR returns as one of the
+student's modes, ordered by the student's own policy network (§4).
+
+The start was fitted by intuition, not by the two-mode student, and was not refitted for it: played by the
+two-mode student, it makes 2.81 and 2.74 moves / optimal in a session's trials 1-9 (two seeds), against people's
+2.77 (`lean_people_all_m10_ao_b2*`; `models/summary/network_depth/summary.csv`).
 
 Later rounds (AND-OR ordered by the network itself) and later epochs are better than people. The phase 1 summary's
 apprentice curve shows that round 1 passes people's level within a few epochs.
@@ -122,13 +138,34 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 
 | Choice | Kind | Value | Origin | Code |
 |---|---|---|---|---|
-| Intuition only: each move is sampled from the policy's softmax over legal moves | design + parameter | temperature 1 (`explore`) | chosen | [`solve_intuition`](rushhour/student/solve.py:119), [line 149](rushhour/student/solve.py:149) |
-| Short memory: moves back to one of the recent boards are removed from the choice, unless every move would be one | implementation + parameter | 10 boards | chosen | [line 146](rushhour/student/solve.py:146) |
+| Each move is made by one of three modes, drawn independently per move: nothing on the board or in the attempt so far triggers planning | design | - | fitted: people's moves fit a mixture of the three better than any one (below) | [`solve_two_mode`](rushhour/student/two_mode.py:99) |
+| **Deliberation**: one AND-OR pass from the board, its options ordered by the policy network (with Gumbel noise), lapsing at γ. Its first move is played and no plan is kept: one move per search, as in the paper's model | design + parameter | 18% of moves; γ 0.07 | fitted (the share); inherited (γ) | `w_ao`; [`and_or.solve`](rushhour/and_or.py:364), `PolicyAgent.heuristic` |
+| **Flat planning**: the policy's 5 likeliest moves, each judged one move ahead by the value network, one picked by a softmax over −(moves to go) at τ 1; a move that solves the puzzle is always picked | design + parameter | 6% of moves in trial 1, rising linearly to 18% by trial 30; 5 moves, τ 1 | fitted | `flat_start`, `flat_end`, `ramp`; [`flat_pick`](rushhour/student/two_mode.py:64), [`TwoModeSolver.flat_at`](rushhour/student/two_mode.py:209) |
+| **Intuition**, otherwise: a move sampled from the policy's softmax over legal moves | design + parameter | temperature 1 | chosen | [`sample_move`](rushhour/student/two_mode.py:45) |
+| The opening: an attempt's first move is always a deliberation, and its second is the same pass's second move | design | - | fitted: people's slow first look (2.9 s) and the move after it fit AND-OR | `opening` |
+| Soft memory: in intuition and flat planning, a move back to a board the attempt was on `age` moves ago loses β × 0.5^(age / half-life) in its logit | implementation + parameter | β 2, half-life 1 move | fitted to people's revisits and undos | `soft_memory`; `penalty` in `solve_two_mode` |
 | One attempt per puzzle, no restarts (people could restart) | parameter | 1 | chosen | `max_attempts`; [`learning_session`](rushhour/student/train.py:370) |
 | Move cap; reaching it ends the attempt unsolved | parameter | max(50, 10 × optimal) | chosen | [`sessions.step_cap`](rushhour/sessions.py:540) |
-| A teacher acts before the student moves: if it shows a move, that move is played instead. The student's own choice is computed only if the teacher asks for it | implementation | - | chosen | `propose` in `solve_intuition` |
+| A teacher acts before the student moves: if it shows a move, that move is played instead (it also ends the opening's second move). The student's own choice is computed only if the teacher asks for it, and untaught play draws the same random numbers as without a teacher | implementation | - | chosen | `propose` in `solve_two_mode` |
 | A shown move is an optimal move, chosen at random when several are | implementation | - | chosen | [`Teacher.optimal_move`](rushhour/teachers.py:86) |
 | Each student gets its own random order of the session's puzzles | implementation | - | chosen | [`sessions.order`](rushhour/sessions.py:225) |
+
+The fits (`notebooks/p2.2_forward_planning.ipynb`; `p2_summary.ipynb`, section 7):
+- **The mode weights** come from a move-by-move mixture over every move people made 2+ moves from the goal
+  (`experiments/mode_mixture.py` → `models/summary/mode_mixture/`). Each move's probability is a mix of intuition's,
+  flat planning's and AND-OR's (sampled: 100 passes per board) under the same network, and the weights are fitted per
+  stage of the session. AND-OR's share is 18%, pooled (in the first fit it didn't grow with practice); flat planning's grows from 6% to 18% when
+  each stage is scored with a network that has learned as long. Refitted 2026-11-24 with AND-OR ordered by the policy
+  (before, by the dest head: 10%, and flat 8% → 18%; `models/summary/mode_mixture_dest/`).
+- **What the AND-OR share means.** Policy-ordered AND-OR's likeliest first move is the policy's own top move 67% of
+  the time, so part of "deliberation" is a sharper version of intuition. AND-OR fits best near the goal (26-34% of
+  moves 2-3 from it) and on slow moves; the student uses one share everywhere.
+- **The soft memory** is the best of the memories tried on people's revisits and undos (`experiments/fit_memory.py`
+  → `models/summary/memory_fit.csv`). With it the student revisits boards about as often as people do.
+
+Phase 1's student (`--student intuition`, [`solve_intuition`](rushhour/student/solve.py:119)) made every move by
+intuition, at temperature `explore` 1, with a hard memory: moves back to one of the last 10 boards (`memory`) were
+removed from the choice, unless every move would be one. That memory fits people's revisits worst of those tried.
 
 ## 5. Giving up
 
@@ -202,6 +239,7 @@ Notes:
 | Each student's play, labels and teacher share one random stream, seeded by the student. So once a teacher draws a random number (random p, or a tie between optimal moves), the student's later draws differ from the no-teacher run. Comparisons between teachers pair students by seed and puzzle order, not by identical randomness | implementation | [`sessions._student`](rushhour/sessions.py:340) (`seed + 7919 × (student + 1)`), `teacher.start(state, rng)` |
 | With `agency_step` on, the update's shuffling and skipping have their own stream, apart from play | implementation | `update_rng` in `learning_session` |
 | Python's hash seed is fixed (`PYTHONHASHSEED=0`, set by the command line). Set and dict order of boards decides the order of examples, and so the batches | implementation | [`sessions.py`](rushhour/sessions.py:71) |
+| AND-OR draws its lapses and Gumbel noise from Python's `random` module, which the two-mode student seeds from its own stream at each attempt (and each test attempt from its seed) | implementation | [`TwoModeSolver.__call__`](rushhour/student/two_mode.py:212), `sessions._test_job` |
 
 ## What is fitted to people, and how well
 
@@ -209,7 +247,9 @@ Notes:
 2. **Starting level**: the checkpoint (round 1, epoch 3, 2 lane blocks) and the giving-up scale (0.40), fitted to
    people's first 10 trials. The misfit is 0.14, in squared standard errors over 2 statistics (§3).
 3. **Learning rate over trials 1-30**: the multiplier and the hindsight, together, fitted with the dest-head start
-   (`spec.DEST`) and kept for this one without refitting. The fit uses three statistics, each compared with
+   (`spec.DEST`), by the intuition student, and kept for this one without refitting. The two-mode student at this
+   start, at ×10 with full hindsight, gains 0.51 and 0.50 moves / optimal from trials 1-9 to 46+ (two seeds; people
+   0.60, from 2.77 to 2.17; `lean_people_all_m10_ao_b2*`). The fit uses three statistics, each compared with
    people's:
    - **short:** within-learner change in log moves / optimal per 10 trials, on 6- and 10-move puzzles;
    - **long:** the same on 13- and 15-move puzzles;
@@ -237,11 +277,14 @@ Notes:
    - **Full hindsight is the best fit, not the only one.** W=10 × 5 (4.3) and W=3 × 20 (4.6) are within what 8
      students can tell apart. The grid's noise is visible in its rows: misfit is not monotone in the multiplier
      (W=10: 4.3, 10.9, 5.5).
+4. **How it plays**: the mode weights (AND-OR 18%, flat planning 6% → 18% over 30 trials), flat planning's 5 moves
+   and τ, and the soft memory, fitted to people's moves and revisits (§4).
 
 **Everything else is chosen, not fitted:**
 - the architecture;
 - the expert's variant (plans played out, `protect_movers` off) and pretraining's settings;
-- temperature, memory, the move cap, single attempts;
+- intuition's temperature, the move cap, single attempts;
+- that modes are drawn independently per move, and that flat planning's share follows a schedule;
 - learning only from success, the loss, the optimizer and its settings;
 - agency.
 
@@ -250,8 +293,12 @@ apprentices trained at 0.01 and 0.07 showed no difference on pool puzzles.
 
 ## Which saved runs use this student
 
+**No teaching run has used this student yet.** Its sessions so far have no teacher and were run by
+`experiments/planner_session.py --lean` at people's lengths (config key `lean`, not `student`): at this start
+`lean_people_all_m10_ao_b2` and `_b2_seed1`; at the earlier starts the runs named in the sections below.
+
 `spec.differences(config, dest=True)` over the session runs in `models/sessions` (2026-11-19): every run below
-started from the dest-head start, and no teaching run has used the current one yet.
+started from the dest-head start and played by intuition.
 
 | Runs | Matches? | How they differ |
 |---|---|---|
@@ -352,9 +399,9 @@ against the apprentice's 2.8 at ×10.
 
 ## What is not part of the student
 
-- **AND-OR and γ** are the student's teacher during pretraining only (§3). In a session it plays by intuition, and
-  AND-OR is never called. Deliberation, AND-OR ordered by the network (its policy head), is phase 2's, not part of
-  this student.
+- **AND-OR's whole-puzzle plans.** Pretraining's AND-OR plays each plan to its end (§3); the student deliberates
+  one move at a time and keeps no plan. Plan following was looked for in people's moves after a slow move and not
+  found, beyond the opening's second move.
 - **The teacher's model of the student** (`teachers.Bayesian4`: skill per distance, puzzle difficulty) is the
   teacher's belief, not this network.
 - **The session protocol** (`spec.PROTOCOL`) is the experimental design: 8 students, sessions of 72 trials (18 per
@@ -365,34 +412,54 @@ against the apprentice's 2.8 at ×10.
 These are the places where the student is a choice rather than a fit.
 
 **How it thinks**
-1. **No deliberation.** People plan, and AND-OR fits their moves. The student starts as a copy of AND-OR's moves but
-   never plans itself. In p2.1, network-ordered AND-OR matches people's efficiency.
-2. **One network for every puzzle, keyed by cell.** What it learns transfers by board pattern. Whether people
+1. **Modes drawn, not chosen.** Which mode makes a move is a draw with fitted weights. Nothing on the board, in the
+   attempt or in a failure makes the student plan (people's moves after a loop are, if anything, less AND-OR-like).
+   Flat planning's rising share is a schedule, not something the student learns.
+2. **Planning learns nothing of its own.** Deliberation and flat planning improve only as the two networks do. Nothing
+   learns which mode to use, and the networks learn from a solved attempt's hindsight labels whichever mode made its
+   moves.
+3. **One network for every puzzle, keyed by cell.** What it learns transfers by board pattern. Whether people
    transfer that way is untested.
-3. **A network trained but unused.** In this student the value network learns in every update and never acts.
 
 **Where it starts**
 
 4. **An imitation stopped early.** People's starting level is matched by stopping training at epoch 3, not by
-   anything in how the network learns. The expert is this repo's AND-OR variant (plans played out) at the paper's γ.
-   Pretraining's learning rate is also 10× the session's.
+   anything in how the network learns, and the stop was fitted by intuition rather than by the two-mode student
+   (§3). The expert is this repo's AND-OR variant (plans played out) at the paper's γ. Pretraining's learning rate is
+   also 10× the session's.
+5. **Without people's near-goal knowledge.** People make 82-85% optimal moves 2-3 from the goal from their first
+   trials; the student starts at 69-73% and doesn't catch up. Networks trained further by expert iteration have that
+   knowledge (and represent the rules' concepts); this imitation doesn't (`notebooks/p2.4_rules.ipynb`, sections 3
+   and 6).
 
 **What it learns from**
 
-5. **Learning only from success.** Unsolved and abandoned attempts teach nothing of the student's own.
-6. **Labels from perfect hindsight:** exact shortest routes through every board seen. This is also what makes
+6. **Learning only from success.** Unsolved and abandoned attempts teach nothing of the student's own.
+7. **Labels from perfect hindsight:** exact shortest routes through every board seen. This is also what makes
    wandering pay (§6, §8). It fits people best, but W=10 and W=3 come close at other multipliers. Only own labels
    are ruled out.
 
 **How it learns**
 
-7. **The multiplier.** 10 network puzzles for each human trial still patches the network's data hunger, though it now
-   fits people's learning rate (§9).
-8. **Online learning by Adam with BatchNorm.** Its forgetting and drift are those of the optimizer, not anything
+8. **The multiplier.** 10 network puzzles for each human trial still patches the network's data hunger, though it now
+   fits people's learning rate (§9). It was fitted with the intuition student.
+9. **Online learning by Adam with BatchNorm.** Its forgetting and drift are those of the optimizer, not anything
    fitted (§7).
-9. **Agency as a weight on shown moves, implemented by skipping updates.** It is unfitted, and the dilemma depends
-   on it together with the exploration cost (§8).
+10. **Agency as a weight on shown moves, implemented by skipping updates.** It is unfitted, and the dilemma depends
+    on it together with the exploration cost (§8).
 
 **What it is tested on**
 
-10. **The puzzle source.** Pool puzzles of 9-26 moves for teaching, against people's 70 layouts of 6-15.
+11. **The puzzle source.** Pool puzzles of 9-26 moves for teaching, against people's 70 layouts of 6-15.
+
+**What it doesn't reproduce.** These are known, and accepted for the teaching work rather than fixed:
+
+12. **Mid-puzzle skill.** People's share of optimal moves 7-9 from the goal rises from 48% to 59% over the session;
+    the student's stays at 33-36%, with 2, 4 or 6 lane blocks alike, and even expert iteration's rounds 2-3 reach only
+    37%. The gap is lookahead, not the network's capacity (`notebooks/p2.5_value_network.ipynb`, section 6).
+13. **Its level on people's own layouts.** Trained and fitted on pool puzzles of people's lengths, it finds people's
+    70 layouts harder than people do (3.4-3.5 moves / optimal in trials 1-9, against people's 2.3).
+14. **Giving up and restarting.** Giving up is people's hazard scaled to fit (§5), not a decision; the student never
+    restarts a puzzle, where people could.
+15. **Individual differences.** Students differ only by seed and puzzle order: the spread of their session gains is a
+    tenth of people's (SD 0.07-0.17 against 0.6-1.4).

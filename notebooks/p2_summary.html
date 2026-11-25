@@ -7873,6 +7873,14 @@ People plan, and how they plan is what a teacher's help would have to fit into. 
 <td><code>p2.3_human_likeness.ipynb</code></td>
 <td>People against the models move by move: optimal moves by distance, revisits, car roles, slides, timing; fitting a soft memory to people's revisits</td>
 </tr>
+<tr>
+<td><code>p2.4_rules.ipynb</code></td>
+<td>Rules in words: interpretable move rules over AND-OR's concepts, who follows them, and whether the network represents their concepts</td>
+</tr>
+<tr>
+<td><code>p2.5_value_network.ipynb</code></td>
+<td>One network or two (a separate value network), and how many lane blocks</td>
+</tr>
 </tbody>
 </table>
 <p>This notebook is the through-line: each section states the question, the answer, and where the evidence is. Its
@@ -9457,6 +9465,76 @@ schedule.</li>
 lands differently on a student that sometimes plans: does bayes4 still help, and does agency (ΔA) still decide
 when help pays?</li>
 </ol>
+</div>
+</div>
+</div>
+</div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=0abdcf1a">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
+<h2 id="9.-The-student-for-teaching">9. The student for teaching<a class="anchor-link" href="#9.-The-student-for-teaching">¶</a></h2><p><em>(<code>MODEL.md</code>; <code>rushhour/student/spec.py</code>)</em> Phase 2 set out to give the teachers a student that plans. Each open question
+of section 8 could take a phase of its own. Instead the student is now written down as it stands and handed back to
+the teachers, with its known gaps listed as premises rather than fixed.</p>
+<p><strong>The student</strong> (<code>spec.STUDENT</code>; <code>python -m rushhour.sessions my_run --fitted ...</code>):</p>
+<ul>
+<li><strong>Starting knowledge:</strong> two networks of 2 lane blocks each, a policy network and a value network: AND-OR's apprentice
+stopped at round 1, epoch 3 (<code>paths.START</code>), with people's giving up at × 0.40.</li>
+<li><strong>Play:</strong> the two-mode student (<code>rushhour/student/two_mode.py</code>). An AND-OR deliberation makes 18% of moves and the
+opening; flat planning makes 6% → 18% over the first 30 trials; intuition makes the rest. A soft memory penalizes
+returns to recent boards.</li>
+<li><strong>Learning:</strong> as in phase 1. Full hindsight labels come from solved attempts, at × 10, with one update per human trial.
+Agency (ΔA) is the parameter the teaching runs sweep.</li>
+<li><strong>Phase 1's student</strong> is one flag away (<code>--student intuition</code>, <code>spec.INTUITION</code>), on the same start.</li>
+</ul>
+<p><strong>What it doesn't reproduce</strong>, and is accepted as is (<code>MODEL.md</code>, "Premises worth challenging"):</p>
+<ul>
+<li><strong>Mid-puzzle skill.</strong> People go from 48% to 59% optimal 7-9 moves from the goal; the student stays at 33-36%. The
+cause isn't the network's size: 2, 4 and 6 lane blocks play alike (p2.5, section 6), and expert iteration reaches
+only 37%.</li>
+<li><strong>People's near-goal knowledge at the start</strong> (82-85% optimal 2-3 moves out, against the student's 69-73%). The
+rules study (p2.4) found that the rules mostly restate optimality, and that the student's network represents their
+concepts no better than its input does. Networks trained further by expert iteration do represent them, so the gap
+lies in how the start was trained.</li>
+<li><strong>Giving up as a decision, restarts, and individual differences</strong> (section 7).</li>
+<li><strong>When it plans.</strong> The modes are drawn at fixed odds, and the flat share follows a schedule rather than anything the
+student learns.</li>
+</ul>
+<p><strong>What a teacher now meets.</strong> A shown move replaces whichever mode would have played, the opening included. Untaught,
+play is unchanged, draw for draw. bayes4 still sees the student only through its moves.
+<strong>Does bayes4 still track the student?</strong> A bayes4 that never helps (θ 0) recorded, for each puzzle, the solve chance
+it gave the student untaught. The check covered 6 students × 360 puzzles at the teaching runs' lengths (9-26 moves),
+for each kind of student (scratch runs, not saved).</p>
+<ul>
+<li><strong>Ranking:</strong> bayes4 ranks the two-mode student's puzzles as well as the intuition student's (AUC 0.74-0.79 by
+quarter of the session, against 0.65-0.77).</li>
+<li><strong>Level:</strong> it is off for both in the same way. It expects about 80% solved at every length, while both students
+solve over 90% of 9-11-move puzzles and only 13-37% of 24-26-move ones. Overall the two-mode student solves 51% and
+the intuition student 60%.</li>
+<li><strong>Giving up</strong> explains part of the gap, since bayes4 doesn't model it, but not all of it: on puzzles not given up
+it still expects 80% against 66%.</li>
+</ul>
+<p>So the two-mode student doesn't fit bayes4's model of a student any worse than phase 1's does. For both, though, its
+solve chance is too flat across this protocol's lengths, and that chance decides when it steps in (θ 0.45). The
+replication should watch for this. One side finding: untaught, the two-mode student solves fewer of the long puzzles
+than the intuition student on the same start (19-26 moves: 25% against 38%).</p>
+<p><strong>Next: phase 1's teaching result on this student.</strong> That means no teacher, bayes4, and random 30% and 100%, at ΔA
+0-1, × 10, seeds 0-2. In phase 1, bayes4 beat no teacher by 0.20-0.30 moves / optimal at every ΔA, and showing every
+move went from harmful at ΔA 0.1 (+0.75) to the best help at ΔA 1 (−0.61), overtaking bayes4 between 0.5 and 0.7. If
+both patterns hold, phase 1's conclusions carry over to a student that plans. If they don't, the difference is the
+finding. The intuition student on the same start would tell the change of start apart from the change of play.</p>
+</div>
+</div>
+</div>
+</div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=44715fcf">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
 <p><strong>Papers this phase drew on</strong>: Olieslagers et al. 2023 (AND-OR; people's data); van Opheusden et al. 2023 (expertise
 as deeper search); Collins et al. 2026 (novices plan flat and fast); Zhang et al. 2025 (the network decides what is
 considered); Lipovetzky &amp; Geffner (width-based novelty); Daw, Niv &amp; Dayan 2005, Lee et al. 2014, Keramati et al.

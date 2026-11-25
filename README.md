@@ -21,7 +21,8 @@ rushhour/              the library
   student/             the simulated student
     network.py         PolicyAgent: a policy network (its moves are intuition; its scores also order
                        AND-OR's options) and a separate value network (moves to go, for flat planning)
-    solve.py           solving by intuition, by deliberation, or arbitrating; evaluation over many puzzles
+    solve.py           solving by intuition (phase 1's student), by deliberation, or arbitrating; evaluation
+    two_mode.py        the two-mode student (the fitted student's play): intuition, flat planning, AND-OR moves
     labels.py          what an attempt teaches: own solved play, hindsight shortcuts, shown moves
     train.py           expert iteration (pretraining) and online learning in a session
     spec.py            the fitted student's settings (MODEL.md), and a check of a saved run against them
@@ -83,6 +84,7 @@ Phase 2: how the student plans, and how human-like it is (`p2_summary`).
 | p2.5 | One network or two: the value loss doesn't help the policy learn, and a separate value network judges as well; the student is now a policy network and a value network, which learn as one network did. And how deep: 2, 4 and 6 lane blocks fit people alike, so each network now has 2 | `p2.5_value_network` |
 | p2.4 | Rules in words: a short list of "clear a car so the blocking chain shrinks" rules is near-sound close to the goal. Every student trained on optimal moves comes to follow it as much as people do; by distance they differ, and people start out knowing the near-goal rules the students lack. The student's network doesn't represent the rules' concepts beyond its input; networks trained by expert iteration do | `p2.4_rules` |
 | - | The dest head removed: AND-OR ordered by the policy head plays as well, and an apprentice trained without dest targets starts where people do and learns as the dest-head one did; it is now the start of every session (tag `pre-dest-removal` has the code before) | p2_summary section 7, `MODEL.md` |
+| - | The student consolidated: the two-mode student (two networks of 2 lane blocks) is now the fitted student (`spec.STUDENT`) and plays in `rushhour.sessions`, taught or not; phase 1's intuition student is `--student intuition`. Its known gaps (mid-puzzle skill, near-goal start knowledge, giving up, individual differences) are written down as premises | `MODEL.md`, p2_summary section 9 |
 
 Earlier code (p1-p2 scripts, retired teachers including bayes, stuck-bayes1 and bayes3, the sokoban port before it moved to its own repo) is at tag
 `pre-cleanup`.
@@ -96,6 +98,7 @@ Set up once (see `requirements.txt` for the CUDA build of torch on Windows):
 Everything runs from the repository root:
 
     python -m rushhour.sessions my_run --fitted --shown-weight 0.1 --teachers none bayes4   # the fitted student
+    python -m rushhour.sessions my_run --fitted --student intuition ...                     # phase 1's student
     python -m rushhour.run_queue watch my_queue
     python experiments/and_or_network.py
 
