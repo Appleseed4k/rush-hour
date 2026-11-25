@@ -161,7 +161,10 @@ The fits (`notebooks/p2.2_forward_planning.ipynb`; `p2_summary.ipynb`, section 7
   the time, so part of "deliberation" is a sharper version of intuition. AND-OR fits best near the goal (26-34% of
   moves 2-3 from it) and on slow moves; the student uses one share everywhere.
 - **The soft memory** is the best of the memories tried on people's revisits and undos (`experiments/fit_memory.py`
-  → `models/summary/memory_fit.csv`). With it the student revisits boards about as often as people do.
+  → `models/summary/memory_fit.csv`). With it the student revisits boards about as often as people do. The fit saw
+  only solved attempts of 1.5-3 × optimal, but in longer attempts too people return to earlier boards about as often
+  (17-24% of moves at 3-8 × optimal, against 15-22%; the hard memory 3-6%). It costs the student about 10 points of
+  solve rate on the teaching runs' tests against the hard memory, with the same network (p2.6, section 4).
 
 Phase 1's student (`--student intuition`, [`solve_intuition`](rushhour/student/solve.py:119)) made every move by
 intuition, at temperature `explore` 1, with a hard memory: moves back to one of the last 10 boards (`memory`) were
@@ -342,7 +345,9 @@ The values are end-score differences, paired by student (lower is better), as me
 - **0.75** shows 10%. It is a little worse at ΔA 0 (+0.12 ± 0.10) and a little better at ΔA 1 (−0.08 ± 0.06).
 - **0.9** shows 31-38%. It is clearly worse at ΔA 0 (+0.79 ± 0.11) and 0.3 (+0.32 ± 0.05).
 
-So 0.45 stays the default. At high agency, more help does slightly better, as random 100% does.
+So 0.45 stays the default. At high agency, more help does slightly better, as random 100% does. The same check with
+the two-mode student (`models/summary/replication_theta.csv`, 2026-11-25) comes out the same way: 0.25 and 0.45 alike,
+0.75 worse at ΔA 0 and better at 1, 0.9 worse at ΔA 0-0.3 (p2.6, section 5).
 
 ## The 4-block start
 
@@ -459,7 +464,10 @@ These are the places where the student is a choice rather than a fit.
 
 12. **Mid-puzzle skill.** People's share of optimal moves 7-9 from the goal rises from 48% to 59% over the session;
     the student's stays at 33-36%, with 2, 4 or 6 lane blocks alike, and even expert iteration's rounds 2-3 reach only
-    37%. The gap is lookahead, not the network's capacity (`notebooks/p2.5_value_network.ipynb`, section 6).
+    37%. The gap is lookahead, not the network's capacity (`notebooks/p2.5_value_network.ipynb`, section 6). On the
+    teaching runs' tests (up to 26 moves, 10 × optimal, no giving up) it shows as looping: in failed attempts the
+    student keeps returning to the same few boards, and more so as its policy sharpens. People loop as much but find
+    a way out (`notebooks/p2.6_teaching_replication.ipynb`, section 4).
 13. **Its level on people's own layouts.** Trained and fitted on pool puzzles of people's lengths, it finds people's
     70 layouts harder than people do (3.4-3.5 moves / optimal in trials 1-9, against people's 2.3).
 14. **Giving up and restarting.** Giving up is people's hazard scaled to fit (§5), not a decision; the student never

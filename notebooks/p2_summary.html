@@ -9606,11 +9606,17 @@ and already helps at ΔA 0.3. Random 30% helps at every ΔA and beats bayes4 fro
 <li><strong>The intuition student on the new start lies between</strong> (+0.51 at ΔA 0.1; bayes4 −0.13 to −0.25), so the new
 start accounts for part of the shift and the two-mode play for the rest.</li>
 <li><strong>The two-mode student no teacher meets is weaker on these tests.</strong> It solves 58% of their puzzles (9-26 moves, up
-to 10 × optimal) at the start of the session and still 58% at the end. The intuition students rise from 65-68% to
-70-71%. On the puzzles it solves it grows as efficient as they do. So its untaught end score is 5.92 against
-4.93-5.00, and it gains 0.54 over the session against 0.84-1.12.</li>
+to 10 × optimal), against the intuition students' 65-71%. On the puzzles it solves it grows as efficient as they do.
+So its untaught end score is 5.92 against 4.93-5.00, and it gains 0.54 over the session against 0.84-1.12.</li>
+<li><strong>Why: it loops on long puzzles, but people loop as much</strong> (p2.6, section 4). Played with the same network, the soft
+memory solves about 10 points fewer of these puzzles than phase 1's hard memory, while AND-OR and flat planning
+barely matter. In failed attempts the student keeps returning to the same few boards. But people return to earlier
+boards as often in their own long attempts (17-24% of moves at 3-8 × optimal, against the soft memory's 15-22% and
+the hard memory's 3-6%). The soft memory stays: what the student lacks is a way out, the mid-puzzle skill gap.</li>
 <li><strong>Relative to that baseline</strong>, bayes4 helps it about as much as phase 1's student (4-7% of the end score against
 4-6%). Showing every move at ΔA 0.1 still hurts it far less (+4%, against +10% and +15%).</li>
+<li><strong>bayes4's θ isn't the reason</strong> (p2.6, section 5). Phase 1's θ check, repeated with this student, comes out the same:
+θ 0.25-0.45 does best at low ΔA, more help does better only at ΔA 1. θ stays 0.45.</li>
 </ul>
 <p><strong>What this means.</strong> Phase 1's conclusions carry over to a student that plans, but where help starts to pay depends
 on the student. A student whose own play teaches it less, or that solves less on its own, loses less when moves are

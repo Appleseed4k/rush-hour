@@ -6,7 +6,8 @@ them.
 
     python experiments/replication_analysis.py
 
-Tables: models/summary/replication_{twomode,intuition}.csv (columns as ao10_agency_seeds.csv).
+Tables: models/summary/replication_{twomode,intuition}.csv (columns as ao10_agency_seeds.csv), and
+replication_theta.csv: bayes4's theta for the two-mode student (replication_queue.py --theta), as bayes4_theta.csv.
 """
 import os
 import sys
@@ -43,3 +44,8 @@ if __name__ == "__main__":
         side = t if side is None else side.merge(t, on=keys, how="outer")
     print("== teacher - no teacher, pooled over seeds (moves / optimal; negative helps)")
     print(side.round(3).to_string(index=False))
+    th = p2.theta(seeds("twomode")[0])
+    th.to_csv(os.path.join(p2.SUMMARY, "replication_theta.csv"), index=False)
+    print()
+    print("== bayes4's theta, two-mode student (seed 0)")
+    print(th.round(3).to_string(index=False))

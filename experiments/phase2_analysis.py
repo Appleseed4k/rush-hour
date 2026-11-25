@@ -121,12 +121,13 @@ def agency_seeds(seeds=SEEDS):
     return pd.DataFrame(rows), pd.DataFrame(none_rows)
 
 
-def theta():
-    none = ends(SEEDS[0].format(NONE_AT), "none")
+def theta(pattern=SEEDS[0]):
+    """pattern: seed 0's run names with {} for the agency (default: phase 1's)."""
+    none = ends(pattern.format(NONE_AT), "none")
     rows = []
     for a in (0.0, 0.3, 1.0):
         for teacher in THETAS:
-            v = versus(SEEDS[0].format(f"{a:g}"), teacher, none)
+            v = versus(pattern.format(f"{a:g}"), teacher, none)
             if v is None:
                 continue
             end, d, sh = v

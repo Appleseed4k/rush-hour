@@ -9,6 +9,11 @@ by side with 8 processes each (the 8 students of a run in parallel), seed 0 firs
 
     python experiments/replication_queue.py            # checks the runs against the spec, then launches both queues
     python experiments/replication_queue.py --check    # only checks
+    python experiments/replication_queue.py --theta    # bayes4's theta sweep for the two-mode student (below)
+
+The theta sweep (--theta, queue replicate_theta): phase 1's check of bayes4's theta (MODEL.md, "bayes4's theta"), on
+the two-mode student - bayes4 at theta 0.25, 0.75 and 0.9 beside the default 0.45, at agencies 0, 0.3 and 1, seed 0,
+added to those runs.
     python -m rushhour.run_queue watch replicate_two_mode      # progress (or replicate_intuition)
 
 Runs: models/sessions/{twomode,intuition}_m10[_s<seed>]_agency<a>/ (seed 0 has no _s0, as phase 1's runs).
@@ -23,6 +28,8 @@ from rushhour.student import spec  # noqa: E402
 STUDENTS = {"twomode": ([], {}), "intuition": (["--student", "intuition"], {"intuition": True})}
 AGENCY_TEACHERS = {0.0: ["bayes4"], 1.0: ["none", "bayes4", "random:0.3", "random:1.0"]}  # else bayes4 and randoms
 PROCESSES = 8
+THETAS = ["bayes4:0.25", "bayes4:0.75", "bayes4:0.9"]
+THETA_AGENCIES = (0.0, 0.3, 1.0)
 
 
 def name(student, seed, a):
@@ -38,6 +45,13 @@ def runs(student):
             out.append((name(student, seed, a), ["--fitted", *flags, "--seed", str(seed), "--shown-weight", str(a),
                                                  "--processes", str(PROCESSES), "--teachers", *teachers]))
     return out
+
+
+def theta_runs():
+    """The two-mode student's seed 0 runs at THETA_AGENCIES with the theta teachers added (the saved teachers
+    are skipped)."""
+    return [(run, [*argv, *THETAS]) for run, argv in runs("twomode")
+            if run in {name("twomode", 0, a) for a in THETA_AGENCIES}]
 
 
 def check(student, queue):
@@ -56,6 +70,12 @@ def check(student, queue):
 
 
 if __name__ == "__main__":
+    if "--theta" in sys.argv:
+        queue = theta_runs()
+        if not check("twomode", queue):
+            raise SystemExit("settings differ from the spec: not launched")
+        rq.launch("replicate_theta", queue)
+        raise SystemExit
     queues = {s: runs(s) for s in STUDENTS}
     good = all([check(s, q) for s, q in queues.items()])
     if not good:
