@@ -74,22 +74,32 @@ def hindsight_fit():
     return pd.DataFrame(rows)
 
 
-def ends(run, teacher):
+def end_scores(e, max_distance=None):
+    """{student: end score} of a teacher's entry; with `max_distance`, over the end test's puzzles of at most that
+    many moves only."""
+    if max_distance is None:
+        return {s: v[0] for s, v in an.final(e).items()}
+    return {s: an.measures([a for a in by_n[max(by_n)] if a["distance"] <= max_distance], e["config"])[0]
+            for s, by_n in e["results"].items()}
+
+
+def ends(run, teacher, max_distance=None):
     e = an.entry(run, teacher)
-    return None if e is None else {s: v[0] for s, v in an.final(e).items()}
+    return None if e is None else end_scores(e, max_distance)
 
 
-def versus(run, teacher, none):
+def versus(run, teacher, none, max_distance=None):
     """(end, [teacher - none per student], share shown) or None."""
     e = an.entry(run, teacher)
     if e is None or none is None:
         return None
-    end = {s: v[0] for s, v in an.final(e).items()}
+    end = end_scores(e, max_distance)
     return np.mean(list(end.values())), [end[s] - none[s] for s in end if s in none], an.spend(e)
 
 
-def agency_seeds(seeds=SEEDS):
-    """seeds: {seed: run name pattern with {} for the agency} (default: phase 1's x10 sweep)."""
+def agency_seeds(seeds=SEEDS, max_distance=None):
+    """seeds: {seed: run name pattern with {} for the agency} (default: phase 1's x10 sweep); max_distance: score
+    only the end test's puzzles of at most that many moves."""
     rows = []
     for a in spec.AGENCIES:
         tag = f"{a:g}"
@@ -97,8 +107,8 @@ def agency_seeds(seeds=SEEDS):
             pooled, ends_, shown = [], [], []
             row = {"agency": a, "teacher": teacher}
             for seed, pattern in seeds.items():
-                none = ends(pattern.format(NONE_AT), "none")
-                v = versus(pattern.format(tag), teacher, none)
+                none = ends(pattern.format(NONE_AT), "none", max_distance)
+                v = versus(pattern.format(tag), teacher, none, max_distance)
                 if v is None:
                     continue
                 end, d, sh = v
@@ -116,7 +126,7 @@ def agency_seeds(seeds=SEEDS):
             rows.append(row)
     none_rows = []
     for seed, pattern in seeds.items():
-        none = ends(pattern.format(NONE_AT), "none")
+        none = ends(pattern.format(NONE_AT), "none", max_distance)
         none_rows.append({"seed": seed, "none end": np.mean(list(none.values())) if none else np.nan})
     return pd.DataFrame(rows), pd.DataFrame(none_rows)
 

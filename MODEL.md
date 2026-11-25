@@ -340,6 +340,13 @@ The values are end-score differences, paired by student (lower is better), as me
 - **Random help** turns from harmful to helpful as ΔA rises. Showing every move overtakes bayes4 between ΔA 0.5
   and 0.7.
 
+**Within people's lengths, bayes4's help doesn't hold** (2026-11-25; `models/summary/replication_within_people.csv`,
+p2.6 section 9). Scored on the end test's puzzles of 9-16 moves only (people played 6-15), bayes4's effect on this
+student is −0.12 to +0.02 at every ΔA, within about 1.5 SE of zero, with 12-16 of 24 students better off; the same for
+phase 1's play on today's start. The −0.20 to −0.30 above comes from the 19-26-move puzzles, beyond people's data,
+where the hard memory's behaviour isn't checked against people. Random help's pattern over ΔA holds within people's
+lengths too. For the two-mode student bayes4 still helps there (−0.13 to −0.22).
+
 **bayes4's θ** (seed 0 only; `models/summary/bayes4_theta.csv`), paired against θ 0.45:
 - **0.25** shows 4% of moves and does as well.
 - **0.75** shows 10%. It is a little worse at ΔA 0 (+0.12 ± 0.10) and a little better at ΔA 1 (−0.08 ± 0.06).
@@ -458,7 +465,10 @@ These are the places where the student is a choice rather than a fit.
 
 **What it is tested on**
 
-11. **The puzzle source.** Pool puzzles of 9-26 moves for teaching, against people's 70 layouts of 6-15.
+11. **The puzzle source.** Pool puzzles of 9-26 moves for teaching, against people's 70 layouts of 6-15. The tests
+    play them to 10 × optimal without giving up, so half their length bins (19-26 moves) and every attempt past about
+    8 × optimal, which people rarely reach, lie outside people's data. Results that depend on them, such as phase 1's
+    bayes4 effect, are extrapolation (p2.6, sections 8-9).
 
 **What it doesn't reproduce.** These are known, and accepted for the teaching work rather than fixed:
 
@@ -467,7 +477,9 @@ These are the places where the student is a choice rather than a fit.
     37%. The gap is lookahead, not the network's capacity (`notebooks/p2.5_value_network.ipynb`, section 6). On the
     teaching runs' tests (up to 26 moves, 10 × optimal, no giving up) it shows as looping: in failed attempts the
     student keeps returning to the same few boards, and more so as its policy sharpens. People loop as much but find
-    a way out (`notebooks/p2.6_teaching_replication.ipynb`, section 4).
+    a way out (`notebooks/p2.6_teaching_replication.ipynb`, section 4). On people's own layouts it loops as they do up
+    to 8 × optimal (section 8). Planning more on a returned board, even on every such move, doesn't get it out
+    (section 7: `solve_two_mode(stuck=...)`, `experiments/stuck_planning.py`).
 13. **Its level on people's own layouts.** Trained and fitted on pool puzzles of people's lengths, it finds people's
     70 layouts harder than people do (3.4-3.5 moves / optimal in trials 1-9, against people's 2.3).
 14. **Giving up and restarting.** Giving up is people's hazard scaled to fit (§5), not a decision; the student never

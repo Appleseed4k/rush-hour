@@ -98,7 +98,7 @@ AO_ORDERS = ("policy", "none")
 
 def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
                    soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0,
-                   ao_order="policy", teacher=None):
+                   ao_order="policy", teacher=None, stuck=None):
     """One attempt by the two-mode student (module docstring); with `w_ao` 0, the forward student.
 
     ao_order: what orders AND-OR's options (and picks a lapse's move) - "policy" (the policy network,
@@ -110,6 +110,10 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
     move is played (a shown move also ends the opening's follow-through), otherwise the student's own; it may look at
     the student's move (computed once, when first asked). Untaught, the random draws are exactly those without a
     teacher.
+
+    `stuck` ({"w_ao": a, "w_flat": f}, either optional): on a board the attempt has been on before, the modes are drawn
+    with these odds instead (planning more when stuck); None: the same odds everywhere. The draws are the same either
+    way, only the thresholds differ.
 
     `trace`, if a list, gets (move, board after it) per move; `sources`, if a list, "intuition", "flat", "and-or",
     "sight" or "shown". `surrender` (a function of moves made): after each move that doesn't solve the puzzle, the
@@ -124,6 +128,7 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
     last_board = {state: 0}
     beta, half = soft_memory if soft_memory else (0.0, 1.0)
     moves, from_ao, pending, taught = 0, 0, [], []
+    returned = False  # whether the board the student is on was visited before in this attempt
 
     def penalty(b):
         when = last_board.get(b)
@@ -133,6 +138,9 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
         """The student's own move on this board: ((move, board after it), mode)."""
         nonlocal pending
         r = rng.random()
+        p_ao, p_flat = w_ao, w_flat
+        if stuck is not None and returned:
+            p_ao, p_flat = stuck.get("w_ao", w_ao), stuck.get("w_flat", w_flat)
         src = "intuition"
         played = None
         seen_goal = goal_in_sight(state, orientations, sight) if sight and not pending else None
@@ -142,7 +150,7 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
         elif seen_goal is not None:
             played = seen_goal
             src = "sight"
-        elif (opening and moves == 0) or r < w_ao:
+        elif (opening and moves == 0) or r < p_ao:
             att = and_or_solve(state, heuristic=heuristic, gamma=gamma)
             steps = (att if type(att) is list else att[1]) or []
             if steps:
@@ -151,7 +159,7 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
                 src = "and-or"
                 if opening and moves == 0 and len(steps) > 1 and _red_steps(nxt) > 0:
                     pending = [(steps[1], AndNode(nxt, *steps[1]).apply(nxt))]
-        elif r < w_ao + w_flat:
+        elif r < p_ao + p_flat:
             options = list(board.neighbors(state, orientations))
             played = options[flat_pick(agent, state, options, [penalty(b) for _, b in options], consider, tau, rng)]
             src = "flat"
@@ -183,6 +191,7 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
         moves += 1
         from_ao += src == "and-or"
         taught.append(shown is not None)
+        returned = state in last_board
         last_board[state] = moves
         if trace is not None:
             trace.append((move, state))

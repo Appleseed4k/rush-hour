@@ -8,6 +8,8 @@ them.
 
 Tables: models/summary/replication_{twomode,intuition}.csv (columns as ao10_agency_seeds.csv), and
 replication_theta.csv: bayes4's theta for the two-mode student (replication_queue.py --theta), as bayes4_theta.csv.
+replication_within_people.csv: all three sweeps scored again on the end test's puzzles of people's lengths only (9-16
+moves: people played 6-15), beside the full scores.
 """
 import os
 import sys
@@ -19,6 +21,7 @@ import phase2_analysis as p2  # noqa: E402
 from replication_queue import STUDENTS, name  # noqa: E402
 
 PHASE1 = os.path.join(p2.SUMMARY, "ao10_agency_seeds.csv")
+PEOPLE_MAX = 16  # the longest test bin within people's lengths (14-16; people's layouts are 6-15 moves)
 
 
 def seeds(student):
@@ -44,6 +47,17 @@ if __name__ == "__main__":
         side = t if side is None else side.merge(t, on=keys, how="outer")
     print("== teacher - no teacher, pooled over seeds (moves / optimal; negative helps)")
     print(side.round(3).to_string(index=False))
+    within = []
+    for label, pattern in [("phase 1", p2.SEEDS), ("intuition", seeds("intuition")), ("twomode", seeds("twomode"))]:
+        ag, none = p2.agency_seeds(pattern, max_distance=PEOPLE_MAX)
+        within.append(ag.assign(student=label, **{"none end": none["none end"].mean()}))
+    within = pd.concat(within)
+    within.to_csv(os.path.join(p2.SUMMARY, "replication_within_people.csv"), index=False)
+    print()
+    print(f"== the same on the end test's puzzles of at most {PEOPLE_MAX} moves")
+    print(within.pivot_table(index=["agency", "teacher"], columns="student", values="pooled", sort=False)
+          .round(3).to_string())
+    print(within.groupby("student")["none end"].first().round(3).to_string())
     th = p2.theta(seeds("twomode")[0])
     th.to_csv(os.path.join(p2.SUMMARY, "replication_theta.csv"), index=False)
     print()
