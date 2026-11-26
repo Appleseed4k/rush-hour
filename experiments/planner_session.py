@@ -283,6 +283,8 @@ def main():
     ap.add_argument("--no-opening", action="store_true")
     ap.add_argument("--ao-order", choices=forward.AO_ORDERS, default="policy",
                     help="with --lean: what orders AND-OR's options (forward.solve_lean's ao_order)")
+    ap.add_argument("--salience", type=float, nargs=2, default=None, metavar=("LAM", "HALF_LIFE"),
+                    help="with --lean: salience of repeated returns (solve_two_mode's salience; HALF_LIFE 0: never fades)")
     ap.add_argument("--seed", type=int, default=None, help="the session's seed (default: the calibrated config's)")
     ap.add_argument("--init", default=paths.START, help="the start network (default paths.START)")
     ap.add_argument("--surrender-scale", type=float, default=spec.STUDENT["surrender_scale"],
@@ -328,6 +330,8 @@ def main():
                           "opening": not args.no_opening}
         if args.ao_order != "policy":
             config["lean"]["ao_order"] = args.ao_order
+        if args.salience:
+            config["lean"]["salience"] = [args.salience[0], args.salience[1] or None]
         del config["planner"]
     run_dir = os.path.join(paths.SESSIONS, args.run)
     if not args.smoke:

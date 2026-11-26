@@ -356,6 +356,20 @@ So 0.45 stays the default. At high agency, more help does slightly better, as ra
 the two-mode student (`models/summary/replication_theta.csv`, 2026-11-25) comes out the same way: 0.25 and 0.45 alike,
 0.75 worse at ΔA 0 and better at 1, 0.9 worse at ΔA 0-0.3 (p2.6, section 5).
 
+**Salience and a loop-aware bayes4** (2026-11-25; `experiments/loops_queue.py`, `loops_analysis.py` →
+`models/summary/loops_stage1.csv`; p2.6 sections 11-14). Two options, both off by default:
+- `solve_two_mode(salience=(λ, half-life))`: each return to a board after the first adds λ to its soft-memory penalty,
+  summed over returns (fading by half every half-life moves, or never). λ 0.5, never fading, fits people's repeat
+  visits in attempts past 5 × optimal, where the soft memory alone loops more than people (`experiments/fit_salience.py`),
+  and keeps the session's fit. It is not in `spec.STUDENT`; the runs pass it with `--two-mode`.
+- `Bayesian4(loops=1)` (`bayes4:0.45,loops=1`): a move of the student's back onto a board of this attempt counts as a
+  misstep in the within-puzzle belief.
+
+On the end test's 9-16-move puzzles, the loop-aware bayes4 beats bayes4 on the salient student (−0.06, −0.15, −0.16 at
+ΔA 0.1, 0.5, 1) and on the soft one (−0.09, −0.15, −0.08), with no memory × teacher interaction; it beats random 10%,
+its spend, at ΔA 0.1 (−0.12, z −3.4) and 0.5 (−0.08), and ties at 1. Plain bayes4 helps the salient student less
+(−0.06 to −0.11), since it loops less untaught (3.54 against 3.88).
+
 ## The 4-block start
 
 For the rest of 2026-11-24 the two networks had 4 lane blocks each (`models/apprentice/separate/round1_epoch03.pt`,
@@ -479,7 +493,9 @@ These are the places where the student is a choice rather than a fit.
     student keeps returning to the same few boards, and more so as its policy sharpens. People loop as much but find
     a way out (`notebooks/p2.6_teaching_replication.ipynb`, section 4). On people's own layouts it loops as they do up
     to 8 × optimal (section 8). Planning more on a returned board, even on every such move, doesn't get it out
-    (section 7: `solve_two_mode(stuck=...)`, `experiments/stuck_planning.py`).
+    (section 7: `solve_two_mode(stuck=...)`, `experiments/stuck_planning.py`). Past 8 × optimal it loops more than
+    people; salience (`solve_two_mode(salience=(0.5, None))`) fits that and closes about half the solve-rate gap to
+    the hard memory on the tests, but is not yet part of the student (sections 11-14).
 13. **Its level on people's own layouts.** Trained and fitted on pool puzzles of people's lengths, it finds people's
     70 layouts harder than people do (3.4-3.5 moves / optimal in trials 1-9, against people's 2.3).
 14. **Giving up and restarting.** Giving up is people's hazard scaled to fit (§5), not a decision; the student never

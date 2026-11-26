@@ -98,7 +98,7 @@ AO_ORDERS = ("policy", "none")
 
 def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=False, consider=5, tau=1.0, gamma=0.07,
                    soft_memory=(2, 1), rng=None, trace=None, surrender=None, sources=None, sight=0, temperature=1.0,
-                   ao_order="policy", teacher=None, stuck=None):
+                   ao_order="policy", teacher=None, stuck=None, salience=None):
     """One attempt by the two-mode student (module docstring); with `w_ao` 0, the forward student.
 
     ao_order: what orders AND-OR's options (and picks a lapse's move) - "policy" (the policy network,
@@ -115,6 +115,11 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
     with these odds instead (planning more when stuck); None: the same odds everywhere. The draws are the same either
     way, only the thresholds differ.
 
+    `salience` ((lam, half_life), optional): repeated returns stand out. Each return to a board (a visit after the
+    first) leaves a trace `lam` on it, fading by half every `half_life` moves (None or inf: never), and the traces
+    add up; a move to the board has its logit lowered by its total trace, on top of the soft memory. A board's first
+    return is penalized as without it. None: no salience.
+
     `trace`, if a list, gets (move, board after it) per move; `sources`, if a list, "intuition", "flat", "and-or",
     "sight" or "shown". `surrender` (a function of moves made): after each move that doesn't solve the puzzle, the
     student gives up with that probability (drawn from `rng`). Returns {"solved", "surrendered", "moves" (a count),
@@ -127,12 +132,20 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
     orientations = board.car_orientations(state)
     last_board = {state: 0}
     beta, half = soft_memory if soft_memory else (0.0, 1.0)
+    lam, slow = salience if salience else (0.0, None)
+    trace_of = {}  # board -> (summed trace, the move it was last updated at)
     moves, from_ao, pending, taught = 0, 0, [], []
     returned = False  # whether the board the student is on was visited before in this attempt
 
+    def faded(b, now):
+        value, at = trace_of.get(b, (0.0, now))
+        return value if slow is None or value == 0.0 else value * 0.5 ** ((now - at) / slow)
+
     def penalty(b):
         when = last_board.get(b)
-        return 0.0 if when is None else beta * 0.5 ** ((moves + 1 - when) / half)
+        if when is None:
+            return 0.0
+        return beta * 0.5 ** ((moves + 1 - when) / half) + (faded(b, moves + 1) if lam else 0.0)
 
     def choose():
         """The student's own move on this board: ((move, board after it), mode)."""
@@ -192,6 +205,8 @@ def solve_two_mode(agent, state, max_steps, w_flat=0.08, w_ao=0.10, opening=Fals
         from_ao += src == "and-or"
         taught.append(shown is not None)
         returned = state in last_board
+        if lam and returned:
+            trace_of[state] = (faded(state, moves) + lam, moves)
         last_board[state] = moves
         if trace is not None:
             trace.append((move, state))

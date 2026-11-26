@@ -257,6 +257,11 @@ class Bayesian4(Teacher):
     The plan and the within-puzzle belief use the best-weighted filter: its tau and its mean skill. Moves the
     teacher showed say nothing about skill.
 
+    With `loops` (1; default 0, off), a move of the student's own back onto a board it has already been on in this
+    attempt counts as a misstep in the within-puzzle belief, even when it brings the puzzle a move closer (as
+    undoing a step away does): going round in circles says the puzzle is harder for the student than thought. The
+    skill carried across puzzles counts the move as before.
+
     The chance of solving alone (planned at the start of each puzzle): the student's progress as a walk in
     distance to the goal - each move of its own one closer with its skill there, else further or sideways - that
     ends when red is out or at the move cap (`step_factor` x the optimal length, at least `min_steps`, as the
@@ -281,8 +286,10 @@ class Bayesian4(Teacher):
     TAUS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0, 1.2)
 
     def __init__(self, theta=DEFAULT, forget=0.99, q=0.0, decay=0.99, step_factor=10.0, min_steps=50,
-                 prior_mean=0.0, prior_sd=1.5, spread=1.0, tau=0.5, tau_sd=0.5, worse=0.35, worse_strength=10.0):
+                 prior_mean=0.0, prior_sd=1.5, spread=1.0, tau=0.5, tau_sd=0.5, worse=0.35, worse_strength=10.0,
+                 loops=0.0):
         super().__init__()
+        self.loops, self._visited = bool(loops), set()
         self.theta, self.forget, self.q = float(theta), float(forget), float(q)
         self.decay, self.step_factor, self.min_steps = decay, step_factor, min_steps
         self.worse, self.worse_strength = worse, worse_strength
@@ -294,13 +301,14 @@ class Bayesian4(Teacher):
         self._pick()
         self._pending, self._finished = False, False
         self.name = f"{self.KIND} {self.theta:g}" + (f" forget{self.forget:g}" if self.forget != 0.99 else "") \
-            + (f" q{self.q:g}" if self.q else "")
+            + (f" q{self.q:g}" if self.q else "") + (" loops" if self.loops else "")
 
     # --- the teaching interface ---
 
     def start(self, state, rng):
         new = self._finished or state != self._puzzle
         super().start(state, rng)
+        self._visited = {state}  # this attempt's boards
         if new:
             self._end_puzzle()
             self._begin_puzzle(state)
@@ -325,6 +333,8 @@ class Bayesian4(Teacher):
 
     def observe(self, state, move, next_state, taught):
         self._moves += 1
+        returned = next_state in self._visited
+        self._visited.add(next_state)
         if taught:
             return
         distances = self.distances()
@@ -337,7 +347,8 @@ class Bayesian4(Teacher):
             self._mistakes[b] += 1
             self._worse[b] += after == k + 1
         logit = self.skill[b] + math.exp(self.log_tau) * self.Z
-        self._shift += _log_sigmoid(logit) if good else _log_sigmoid(-logit)
+        progress = good and not (self.loops and returned)
+        self._shift += _log_sigmoid(logit) if progress else _log_sigmoid(-logit)
 
     def end_attempt(self, result):
         self._offset += len(result["moves"])
