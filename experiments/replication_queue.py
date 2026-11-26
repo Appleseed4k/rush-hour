@@ -1,6 +1,6 @@
 """Does phase 1's teaching result hold for the two-mode student? Phase 1's x10 agency sweep (aostart_free_m10_agency*,
-seeds 0-2: MODEL.md, "Which saved runs use this student") played again with today's fitted student (spec.STUDENT:
-the two-mode student on the 2-block, two-network start) and, alongside, phase 1's intuition student on the same start
+seeds 0-2: MODEL.md, "Which saved runs use this student") played again with that day's fitted student (spec.STUDENT
+then: the two-mode student on the 2-block, two-network start, with the soft memory alone - spec.SOFT) and, alongside, phase 1's intuition student on the same start
 (--student intuition), which tells the change of start apart from the change of play.
 
 The same teachers per agency as phase 1's sweep (experiments/phase2_queue.py): bayes4 alone at agency 0; no teacher,
@@ -18,6 +18,7 @@ added to those runs.
 
 Runs: models/sessions/{twomode,intuition}_m10[_s<seed>]_agency<a>/ (seed 0 has no _s0, as phase 1's runs).
 """
+import json
 import os
 import sys
 
@@ -25,7 +26,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from rushhour import run_queue as rq, sessions as se  # noqa: E402
 from rushhour.student import spec  # noqa: E402
 
-STUDENTS = {"twomode": ([], {}), "intuition": (["--student", "intuition"], {"intuition": True})}
+# the two-mode student as it was (2026-11-25, before the joint memory): the soft memory alone (spec.SOFT)
+SOFT_TWO_MODE = json.dumps(spec.TWO_MODE_SOFT | {"soft_memory": [2, 1], "salience": None})
+STUDENTS = {"twomode": (["--two-mode", SOFT_TWO_MODE], {"soft": True}),
+            "intuition": (["--student", "intuition"], {"intuition": True})}
 AGENCY_TEACHERS = {0.0: ["bayes4"], 1.0: ["none", "bayes4", "random:0.3", "random:1.0"]}  # else bayes4 and randoms
 PROCESSES = 8
 THETAS = ["bayes4:0.25", "bayes4:0.75", "bayes4:0.9"]

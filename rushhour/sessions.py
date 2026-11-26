@@ -261,9 +261,20 @@ def test_points(config, n_puzzles):
     return sorted(set(range(0, n_puzzles + 1, config["test_every"] * multiplier(config))) | {0, n_puzzles})
 
 
+# solve_two_mode's memory when a run's two-mode settings don't name it (runs saved before 2026-11-25's spec)
+TWO_MODE_DEFAULTS = {"soft_memory": [2, 1], "salience": None}
+
+
 def _same_key(setting, value):
     """A setting's value as check_config compares it: --init by its path inside the repo, so a run saved on one
-    machine (an absolute path there) can be added to on another."""
+    machine (an absolute path there) can be added to on another; two-mode settings with solve_two_mode's memory
+    defaults filled in, so a run that relied on them matches one that names them."""
+    if setting == "two_mode" and value is not None:
+        def number(v):  # 1 and 1.0 alike, tuples as lists
+            if isinstance(v, (list, tuple)):
+                return [number(x) for x in v]
+            return float(v) if isinstance(v, int) and not isinstance(v, bool) else v
+        return json.dumps({k: number(v) for k, v in (TWO_MODE_DEFAULTS | value).items()}, sort_keys=True)
     if setting != "init" or value is None:
         return value
     path, repo = value.replace("\\", "/"), "/" + os.path.basename(os.path.abspath(paths.ROOT)) + "/"

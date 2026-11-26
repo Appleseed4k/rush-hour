@@ -1,7 +1,8 @@
 """Stage 1 of the salience and loop-aware bayes4 test (p2.6, sections 11-): the teaching runs, with the comparisons
 fixed in advance.
 
-Student: the two-mode student with salient memory (solve_two_mode's salience (0.5, never fades), fitted to people's
+Student: the two-mode student of that day (the soft memory, beta 2 and half-life 1; spec.SOFT) with salient memory
+(solve_two_mode's salience (0.5, never fades), fitted to people's
 repeat visits by experiments/fit_salience.py; checked against people at people's lengths in
 lean_people_all_m10_ao_b2_salience*), otherwise spec.STUDENT. Contrast: the soft-memory two-mode student's runs of the
 replication (twomode_m10*), to which loop-aware bayes4 is added.
@@ -26,7 +27,8 @@ from rushhour import run_queue as rq, sessions as se  # noqa: E402
 from rushhour.student import spec  # noqa: E402
 
 SALIENCE = [0.5, None]
-SALIENT = spec.TWO_MODE | {"salience": SALIENCE}
+SALIENT = spec.TWO_MODE_SOFT | {"soft_memory": [2, 1], "salience": SALIENCE}  # the soft memory then, plus salience
+SOFT = spec.TWO_MODE_SOFT | {"soft_memory": [2, 1], "salience": None}
 AGENCIES = (0.1, 0.5, 1.0)
 LOOPS = "bayes4:0.45,loops=1"
 MATCHED = "random:0.1"
@@ -57,8 +59,8 @@ def soft_runs():
             teachers = (["none", "bayes4", "random:0.3", "random:1.0"] if a == 1.0
                         else ["bayes4", "random:0.3", "random:1.0"])
             out.append((f"twomode_m10{seed_part(seed)}_agency{a:g}",
-                        ["--fitted", "--seed", str(seed), "--shown-weight", str(a), "--processes", str(PROCESSES),
-                         "--teachers", *teachers, LOOPS]))
+                        ["--fitted", "--two-mode", json.dumps(SOFT), "--seed", str(seed), "--shown-weight", str(a),
+                         "--processes", str(PROCESSES), "--teachers", *teachers, LOOPS]))
     return out
 
 
@@ -66,9 +68,9 @@ def check(queue, salient):
     ok = True
     for run, argv in queue:
         config = vars(se.parse_args([run, *argv]))
-        differs = {k: v for k, v in spec.differences(config).items() if k not in ("seed", spec.AGENCY)}
+        differs = {k: v for k, v in spec.differences(config, soft=True).items() if k not in ("seed", spec.AGENCY)}
         if salient:
-            if differs.pop("two_mode", (None, None))[1] != SALIENT:
+            if se._same_key("two_mode", differs.pop("two_mode", (None, config["two_mode"]))[1])                     != se._same_key("two_mode", SALIENT):
                 ok = False
                 print(f"{run}: not the salient student")
         if differs:

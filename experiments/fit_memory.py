@@ -396,7 +396,8 @@ if __name__ == "__main__":
                  "kw": {"lean": True, "w_flat": solver.flat_at(n + 1), "w_ao": lean["w_ao"],
                         "opening": lean["opening"],
                         **({"ao_order": lean["ao_order"]} if "ao_order" in lean else {}),
-                        **({"salience": lean["salience"]} if lean.get("salience") else {})}}
+                        **({"salience": lean["salience"]} if lean.get("salience") else {}),
+                        **({"soft_memory": tuple(lean["soft_memory"])} if lean.get("soft_memory") else {})}}
             names = ["0"] if n == 0 else [m for m in nets if m.split()[0] == str(n)]
             for i in instances:
                 for sname in names:

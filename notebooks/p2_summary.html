@@ -9488,7 +9488,7 @@ the teachers, with its known gaps listed as premises rather than fixed.</p>
 stopped at round 1, epoch 3 (<code>paths.START</code>), with people's giving up at × 0.40.</li>
 <li><strong>Play:</strong> the two-mode student (<code>rushhour/student/two_mode.py</code>). An AND-OR deliberation makes 18% of moves and the
 opening; flat planning makes 6% → 18% over the first 30 trials; intuition makes the rest. A soft memory penalizes
-returns to recent boards.</li>
+returns to recent boards, and salience boards it keeps coming back to (since 11/25, section 11).</li>
 <li><strong>Learning:</strong> as in phase 1. Full hindsight labels come from solved attempts, at × 10, with one update per human trial.
 Agency (ΔA) is the parameter the teaching runs sweep.</li>
 <li><strong>Phase 1's student</strong> is one flag away (<code>--student intuition</code>, <code>spec.INTUITION</code>), on the same start.</li>
@@ -9798,6 +9798,28 @@ with random 10% is at equal spend. Four of the nine primary tests clear a Bonfer
 <p><strong>What this means.</strong> For teaching, what helped was the teacher noticing loops, on either student; a more salient
 memory didn't make bayes4 more useful. Salience is a better fit to people; whether it becomes the student rests
 on that fit, not on these results.</p>
+</div>
+</div>
+</div>
+</div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=5c2c70b6">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
+<p><strong>Is salience's extra parameter needed? (p2.6, section 15).</strong> Salience should beat the soft memory refitted, not as
+it stood: β 2 and half-life 1 had been fitted for the intuition student. Refitted for this student, the soft memory
+alone fits its own target better at half-life 2, but no setting of it fits short and long attempts at once: those that
+match people past 5 × optimal make short attempts loop too little. Fitted together (<code>experiments/fit_salience.py joint</code>) and scored, as fixed beforehand, by the shape of looping across 1.5-10 × optimal (χ², each gap over people's
+standard error), the best soft memory alone scores 109 and soft β 1, half-life 4 with salience λ 0.5 scores 14, far
+past the 3.84 one parameter needs. In a session it starts closest to people (2.76-2.78 moves / optimal against 2.77),
+gains as much as before, and fits people's revisits better at every stage.</p>
+<p><strong>So the student's memory is now a soft memory (β 1, half-life 4) plus salience (λ 0.5)</strong> (<code>spec.TWO_MODE</code>,
+11/25). The teaching runs above are on the earlier memories; since loop-aware bayes4's gain didn't depend on the
+memory, they should carry over. <code>MODEL.md</code>, "Why each feature is there", sorts every part of the student by whether it
+was shown to be needed: tested against the student without it, kept because the alternative fit no better, fitted but
+never compared with its absence (the opening rule and the flat schedule are next), or chosen.</p>
 </div>
 </div>
 </div>
