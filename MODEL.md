@@ -145,9 +145,9 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | Each move is made by one of three modes, drawn independently per move: nothing on the board or in the attempt so far triggers planning | design | - | fitted: people's moves fit a mixture of the three better than any one (below) | [`solve_two_mode`](rushhour/student/two_mode.py:99) |
 | **Deliberation**: one AND-OR pass from the board, its options ordered by the policy network (with Gumbel noise), lapsing at γ. Its first move is played and no plan is kept: one move per search, as in the paper's model | design + parameter | 18% of moves; γ 0.07 | fitted (the share); inherited (γ) | `w_ao`; [`and_or.solve`](rushhour/and_or.py:364), `PolicyAgent.heuristic` |
-| **Flat planning**: the policy's 5 likeliest moves, each judged one move ahead by the value network, one picked by a softmax over −(moves to go) at τ 1; a move that solves the puzzle is always picked | design + parameter | 6% of moves in trial 1, rising linearly to 18% by trial 30; 5 moves, τ 1 | fitted | `flat_start`, `flat_end`, `ramp`; [`flat_pick`](rushhour/student/two_mode.py:64), [`TwoModeSolver.flat_at`](rushhour/student/two_mode.py:209) |
+| **Flat planning**: the policy's 5 likeliest moves, each judged one move ahead by the value network, one picked by a softmax over −(moves to go) at τ 1; a move that solves the puzzle is always picked | design + parameter | 6% of moves in trial 1, rising linearly to 18% by trial 30; 5 moves, τ 1 | fitted (a constant 12% fits the learning curve as well alone, but not without the opening: p2.7) | `flat_start`, `flat_end`, `ramp`; [`flat_pick`](rushhour/student/two_mode.py:64), [`TwoModeSolver.flat_at`](rushhour/student/two_mode.py:209) |
 | **Intuition**, otherwise: a move sampled from the policy's softmax over legal moves | design + parameter | temperature 1 | chosen | [`sample_move`](rushhour/student/two_mode.py:45) |
-| The opening: an attempt's first move is always a deliberation, and its second is the same pass's second move | design | - | fitted: people's slow first look (2.9 s) and the move after it fit AND-OR | `opening` |
+| The opening: an attempt's first move is always a deliberation, and its second is the same pass's second move | design | - | fitted: people's slow first look (2.9 s) and the move after it fit AND-OR; not needed alone (p2.7), and makes first moves too good, but removing it with the schedule costs learning | `opening` |
 | Soft memory: in intuition and flat planning, a move back to a board the attempt was on `age` moves ago loses β × 0.5^(age / half-life) in its logit | implementation + parameter | β 1, half-life 4 moves | fitted with salience to people's returns at every attempt length | `soft_memory`; `penalty` in `solve_two_mode` |
 | Salience: each return to a board after the first adds λ to that board's penalty, summed over returns and never fading. A board's first return is penalized by the soft memory alone | implementation + parameter | λ 0.5 | fitted with the soft memory (below) | `salience`; `trace_of` in `solve_two_mode` |
 | One attempt per puzzle, no restarts (people could restart) | parameter | 1 | chosen | `max_attempts`; [`learning_session`](rushhour/student/train.py:370) |
@@ -172,7 +172,7 @@ The fits (`notebooks/p2.2_forward_planning.ipynb`; `p2_summary.ipynb`, section 7
   single soft memory fits people's returns at every attempt length: settings that fit short attempts loop too much
   in long ones, and settings that fit long attempts loop too little in short ones. Salience separates the two: it
   penalizes only boards the attempt keeps coming back to. Fitted together (`experiments/fit_salience.py joint` →
-  `models/summary/salience/joint.csv`; p2.6 section 15), on how often a return goes to a board already visited twice
+  `models/summary/salience/joint.csv`; `notebooks/p2.7_feature_tests.ipynb`, section 2), on how often a return goes to a board already visited twice
   and the most visits to one board at 1.5-10 × optimal, each gap from people divided by people's standard error:
   the best soft memory alone (β 2, half-life 2) scores χ² 109, soft β 1, half-life 4 with salience λ 0.5 scores 14,
   well past the 3.84 one more parameter needs, and keeps the revisit-age fit the soft memory was chosen on (0.007
@@ -325,7 +325,7 @@ machinery and need no case; they come last, with what each is known to miss.
 | Flat planning | People's moves fit it more as the evaluator learns (8% → 18% of moves, for 27 of 37 people). Intuition alone with the soft memory can't start where people do (start misfit 10.5, against 0.0-1.2 with the planning modes) | p2.2 2c |
 | AND-OR deliberation | Without it (the forward student) flat planning must start at 18% to match people's start, and the session stalls mid-way (gain 0.52 against 0.60; people 0.60). On people's layouts, at the same share of planned moves, AND-OR plus flat fits people's skill better than flat alone (misfit 1.32 against 1.43), mostly near the goal. It isn't needed for the start alone (flat 18%: misfit 0.6) | p2.2 2c; one seed, with the dest-head start |
 | A soft memory | On people's revisit ages: no memory 0.032, phase 1's hard rule 0.095, soft 0.007 | p2.3 §8 |
-| Salience | No soft memory alone fits people's returns at every attempt length (best χ² 109 against 14 with salience; one parameter needs 3.84). In a session it keeps the learning and improves the revisit fit at every stage | p2.6 §15 |
+| Salience | No soft memory alone fits people's returns at every attempt length (best χ² 109 against 14 with salience; one parameter needs 3.84). In a session it keeps the learning and improves the revisit fit at every stage | p2.7 §1-2 |
 | Full hindsight labels | With own labels long puzzles never improve as people's do, at any multiplier (z +2.6 to +5.1): ruled out. Windows of 3 or 10 moves come close at other multipliers (4.3, 4.6 against 2.8), so full hindsight is the best fit, not the only one | §6, "What is fitted" |
 | The multiplier | ×10 is the best of ×5-×120 with full hindsight (2.8; ×5 15.3, ×20 6.6) | "What is fitted" |
 | AND-OR's apprentice as the start | The previous start (trained on its own play with a random teacher) fits people's learning worse at every multiplier tried (×10: 8.8 against 2.8) | "The previous start" |
@@ -341,30 +341,46 @@ machinery and need no case; they come last, with what each is known to miss.
 | Modes drawn at fixed odds, nothing triggers planning | People's moves after a loop are less AND-OR-like, not more; planning more on a returned board doesn't get the student out of loops | p2.2 2c; p2.6 §7 |
 | Two networks, not one shared trunk | One trunk fits people as well. This is not the smaller model (two trunks have twice the weights); it was chosen so each network learns one thing | p2.5 |
 
-**3. Fitted, but never compared with the student without it**
+**3. Tested: not needed alone, but kept, since removing both costs learning** (2026-11-25;
+`experiments/feature_tests.py`; `notebooks/p2.7_feature_tests.ipynb`, sections 3-4; rules fixed before the runs)
 
-- **The flat schedule** (6% → 18% over the first 30 trials). The rise is in people's moves, but no student with a
-  constant flat share was run, and how much of the session's gain the schedule supplies hasn't been separated from
-  the network's learning (p2_summary §7).
-- **The opening rule** (an attempt's first move a deliberation, and the second the same pass's). People's slow first
-  look is followed by a backward-like move (14% against 4% after a slow move mid-attempt), but the student without the
-  rule wasn't compared.
-- **Flat planning's 5 candidates and τ 1.** The start calibration needs a sharp choice; no comparison of other
-  numbers of candidates is recorded.
+- **The flat schedule** (6% → 18% over the first 30 trials; 3 settings). A constant 12% (1 setting) fits people's
+  learning curve as well: χ² 1.6 against the schedule's 2.5, where the schedule needed the constant to be 5.99 worse.
+  The test has little power (every variant scores 1.6-3.0, people's stage means having wide errors), and people's
+  moves do show the rise (the mixture fit, 27 of 37 people), so the schedule describes people's moves without
+  changing anything in the student's learning the data can detect.
+- **The opening rule** (an attempt's first move a deliberation, and the second the same pass's). It makes the first
+  two moves too good: optimal 54% and 53% of the time against people's 47% and 42% in trials 1-9, and 47% and 45%
+  without it (χ² 21.0 with it, 1.3 without). The learning curve doesn't need it either (χ² 3.0 without, 2.5 with). It
+  came from people's slow first look being followed by an AND-OR-like move, which this test, scoring optimality only,
+  doesn't measure.
+
+**Both removed** (a constant 12% and no opening; `..._joint_noopen_flat12*`), the student fails its rule, fixed before
+the runs: its first two moves fit people (χ² 2.1) and its learning curve is within the cut (3.6 against 2.5), but its
+snapshots fit people's layouts worse than the student's worse seed (skill 0.755 against 0.677; revisits 0.049-0.052
+against 0.043), and it gains only 0.39-0.40 moves / optimal over the session (the student 0.51-0.53, people 0.60). Each
+removal passed alone, and together they cost learning, so both stay. The opening's too-good first moves remain a
+known gap.
+
+**4. Fitted, but never compared with the student without it**
+
 - **Giving up** as people's hazard by moves / optimal, at × 0.40 fitted with the start (§5). The shape is people's;
   the student without giving up wasn't compared with them.
 - **The starting epoch** (round 1, epoch 3) is a fitted level, not a feature: some starting level is needed.
 - **γ 0.07** is the paper's; p1.3 fits 0.01 better, and apprentices at the two train alike.
 
-**4. Chosen, with no test recorded**
+**5. Chosen, with no test recorded**
 
 The architecture's details (row and column convolutions, the start, end and coordinate channels, 96 channels,
-BatchNorm), intuition's temperature 1, AND-OR's Gumbel noise, learning online in one block per human trial with no
+BatchNorm), intuition's temperature 1, flat planning's 5 candidates and τ 1 (settings of a needed feature: τ 1 is the
+sharp choice the start calibration needs, and 5 was set when the mixture was defined; limiting flat planning to the
+policy's likeliest moves rather than judging every legal move is the consideration-set idea of Zhang et al. 2025, in
+keeping with people's 0.7-second moves), AND-OR's Gumbel noise, learning online in one block per human trial with no
 replay, Adam at 1e-4 with 3 passes and equal batches, and the way agency acts (skipping updates). Most of these set
 how the network learns, and the learning curve was fitted with them in place through the multiplier and the labels, so
 they are constrained together, not one by one. Agency is swept by design.
 
-**5. Simplifications: the simplest option, and what it misses**
+**6. Simplifications: the simplest option, and what it misses**
 
 - **One attempt per puzzle, no restarts.** People restart 13-20% of puzzles.
 - **Learning only from solved attempts** (no progress labels). Unsolved attempts teach nothing of the student's own.
@@ -372,9 +388,9 @@ they are constrained together, not one by one. Agency is swept by design.
 - **Giving up as a hazard, not a decision.** People give up more late in the session; the student, less.
 - **Identical students.** They differ only by seed and puzzle order, and their spread is a tenth of people's.
 
-**What to test next, to pare down further**: the opening rule and the flat schedule (group 3) are the parts that add
-machinery without a comparison. Each needs one pair of sessions at people's lengths: the student without it, against
-people's start, learning curve and snapshots.
+**What is left**: of the parts that add machinery, only giving up hasn't been compared with the student without it; its
+shape is taken from people's own data. The rest of group 4 are fitted values, and group 5 settings. The opening's evidence was about which kind of move people make after a slow first look, which the
+optimality test doesn't measure; the move-by-move mixture with and without an opening term would.
 
 ## Which saved runs use this student
 
@@ -581,7 +597,7 @@ These are the places where the student is a choice rather than a fit.
     to 8 × optimal (section 8). Planning more on a returned board, even on every such move, doesn't get it out
     (section 7: `solve_two_mode(stuck=...)`, `experiments/stuck_planning.py`). With the soft memory alone it looped
     more than people past 8 × optimal; salience, part of the student since 2026-11-25 (§4), fits that and closes
-    about half the solve-rate gap to the hard memory on the tests (sections 11-15).
+    about half the solve-rate gap to the hard memory on the tests (`p2.7_feature_tests.ipynb`, sections 1-2).
 13. **Its level on people's own layouts.** Trained and fitted on pool puzzles of people's lengths, it finds people's
     70 layouts harder than people do (3.4-3.5 moves / optimal in trials 1-9, against people's 2.3).
 14. **Giving up and restarting.** Giving up is people's hazard scaled to fit (§5), not a decision; the student never

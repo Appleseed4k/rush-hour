@@ -7883,7 +7883,11 @@ People plan, and how they plan is what a teacher's help would have to fit into. 
 </tr>
 <tr>
 <td><code>p2.6_teaching_replication.ipynb</code></td>
-<td>Phase 1's teaching result played again with the two-mode student; salience and a loop-aware bayes4</td>
+<td>Phase 1's teaching result played again with the two-mode student; a loop-aware bayes4</td>
+</tr>
+<tr>
+<td><code>p2.7_feature_tests.ipynb</code></td>
+<td>Is each feature of the student needed: salience, the flat schedule, the opening</td>
 </tr>
 </tbody>
 </table>
@@ -9710,7 +9714,7 @@ runs past that data (19-26 moves, attempts past 8 × optimal), its results are e
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="11.-Two-ideas-for-the-loops:-salience-and-a-loop-aware-teacher">11. Two ideas for the loops: salience and a loop-aware teacher<a class="anchor-link" href="#11.-Two-ideas-for-the-loops:-salience-and-a-loop-aware-teacher">¶</a></h2><p><em>(p2.6, sections 11-14)</em> Section 10 traced the two-mode student's weakness to loops it can't leave. Two ideas were
+<h2 id="11.-Two-ideas-for-the-loops:-salience-and-a-loop-aware-teacher">11. Two ideas for the loops: salience and a loop-aware teacher<a class="anchor-link" href="#11.-Two-ideas-for-the-loops:-salience-and-a-loop-aware-teacher">¶</a></h2><p><em>(p2.6, sections 11-14; p2.7, section 1)</em> Section 10 traced the two-mode student's weakness to loops it can't leave. Two ideas were
 tested, each checked first against people or in a replay, with the teaching comparisons fixed before the runs
 (<code>experiments/loops_queue.py</code>):</p>
 <ul>
@@ -9808,7 +9812,7 @@ on that fit, not on these results.</p>
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<p><strong>Is salience's extra parameter needed? (p2.6, section 15).</strong> Salience should beat the soft memory refitted, not as
+<p><strong>Is salience's extra parameter needed? (p2.7, section 2).</strong> Salience should beat the soft memory refitted, not as
 it stood: β 2 and half-life 1 had been fitted for the intuition student. Refitted for this student, the soft memory
 alone fits its own target better at half-life 2, but no setting of it fits short and long attempts at once: those that
 match people past 5 × optimal make short attempts loop too little. Fitted together (<code>experiments/fit_salience.py joint</code>) and scored, as fixed beforehand, by the shape of looping across 1.5-10 × optimal (χ², each gap over people's
@@ -9819,7 +9823,73 @@ gains as much as before, and fits people's revisits better at every stage.</p>
 11/25). The teaching runs above are on the earlier memories; since loop-aware bayes4's gain didn't depend on the
 memory, they should carry over. <code>MODEL.md</code>, "Why each feature is there", sorts every part of the student by whether it
 was shown to be needed: tested against the student without it, kept because the alternative fit no better, fitted but
-never compared with its absence (the opening rule and the flat schedule are next), or chosen.</p>
+never compared with its absence, or chosen (section 12).</p>
+</div>
+</div>
+</div>
+</div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=76da617e">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
+<h2 id="12.-Is-each-feature-of-the-student-needed?">12. Is each feature of the student needed?<a class="anchor-link" href="#12.-Is-each-feature-of-the-student-needed?">¶</a></h2><p><em>(p2.7; <code>MODEL.md</code>, "Why each feature is there")</em> A fitted value says how much of a feature people's data wants, not
+that the feature is needed. That takes the student without it, refitted where it has a value to refit, against people,
+by a rule fixed before the runs. <code>MODEL.md</code> now sorts every part of the student this way: <strong>needed</strong> (intuition, flat
+planning, AND-OR, the soft memory, salience, full hindsight, the multiplier, the apprentice start), <strong>kept for
+simplicity</strong> (2 lane blocks, no dest head, one move per deliberation, modes at fixed odds), <strong>tested and not needed</strong>,
+<strong>fitted but never tested</strong>, <strong>chosen</strong>, and <strong>simplifications</strong>.</p>
+<p>Two parts that added machinery had never been compared with the student without them (<code>experiments/feature_tests.py</code>;
+sessions on people's puzzles, seeds 0-1):</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>The simpler model</th>
+<th>Rule</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Salience (1 setting)</td>
+<td>the soft memory alone, refitted</td>
+<td>χ² of looping's shape &gt; 3.84 worse</td>
+<td><strong>needed</strong>: 109 against 14; adopted</td>
+</tr>
+<tr>
+<td>The flat schedule, 6% → 18% (3 settings)</td>
+<td>a constant share, refitted: 12%</td>
+<td>learning curve χ² &gt; 5.99 worse</td>
+<td><strong>not needed</strong>: 1.6 against 2.5</td>
+</tr>
+<tr>
+<td>The opening (a switch)</td>
+<td>no opening</td>
+<td>first two moves' or curve's χ² &gt; 3.84 worse</td>
+<td><strong>not needed, and worse where it acts</strong>: 21.0 with it, 1.3 without</td>
+</tr>
+<tr>
+<td>Both removed</td>
+<td>a constant 12% and no opening</td>
+<td>curve and first moves within 3.84; snapshots no worse than the student's worse seed</td>
+<td><strong>fails</strong>: snapshots worse; gain 0.39-0.40 against 0.51-0.53</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>The opening makes an attempt's first two moves too good</strong>: optimal 54% and 53% of the time, against people's 47%
+and 42%; without it 47% and 45%. It came from people's slow first look being followed by an AND-OR-like move, which
+a test of optimality can't see.</li>
+<li><strong>The learning curve can't tell the flat variants apart</strong>: every variant scores χ² 1.6-3.0, since people's stage
+means have wide errors. People's moves do show the rise, but nothing in the student's learning that this data can
+detect depends on it.</li>
+<li><strong>Together, the removals cost learning.</strong> The student with both removed fits the first moves (χ² 2.1) but its
+snapshots fit people's layouts worse and it gains only 0.39-0.40 moves / optimal (the student 0.51-0.53, people
+0.60). Each passed alone; together they fail, so parts of the student can't be pared one at a time. <strong>The student
+stays as it is</strong>, and the opening's too-good first moves stay a known gap.</li>
+</ul>
 </div>
 </div>
 </div>
