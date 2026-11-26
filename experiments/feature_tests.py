@@ -24,7 +24,17 @@ or the learning curve's chi2 is.
 the student's, its snapshots' misfits are no worse than the worse of the student's two seeds, and its first two moves'
 chi2 is no more than 3.84 above the student's.
 
-    python experiments/feature_tests.py sessions      # the 8 sessions and their snapshots (skips those saved)
+**Four seeds** (added after the combined check; rule fixed before these runs). Two seeds couldn't tell the single
+removals from the student: their snapshots missed the "worse seed" rule by less than the student's own seeds differ.
+So the student, a constant 12%, no opening, and both removed get seeds 2 and 3 as well (FOUR_SEEDS). Per seed, four
+measures, each oriented so that larger is worse: the start's distance from people (moves / optimal in trials 1-9), the
+gain's distance from people's (trials 1-9 to 46-72), and the snapshots' mean skill and revisit misfits. A
+simplification passes if, on every measure, its four-seed mean is no more than 2 SE worse than the student's, the SE
+from the spread between seeds (Welch: sqrt(s1^2 / 4 + s2^2 / 4)); the opening's removal also keeps its first-moves
+result above. Which to drop, fixed in advance: both, if both removed passes; else, if both single removals pass, the
+schedule (it removes two settings, the opening one); else whichever passes; else neither.
+
+    python experiments/feature_tests.py sessions      # the sessions and their snapshots (skips those saved)
     python experiments/feature_tests.py first-moves   # writes models/summary/feature_tests/first_moves.csv
     python experiments/feature_tests.py show          # the summaries
 """
@@ -62,17 +72,26 @@ RUNS = 10
 _AGENT = {}
 
 
+FOUR_SEEDS = [None, "flat12", "noopen", "noopen_flat12"]  # variants played at seeds 0-3 (the rest at 0-1)
+
+
 def run_name(variant, seed):
-    return BASE + (f"_{variant}" if variant else "") + ("_seed1" if seed == 1 else "")
+    return BASE + (f"_{variant}" if variant else "") + (f"_seed{seed}" if seed else "")
+
+
+def seeds_of(variant):
+    return (0, 1, 2, 3) if variant in FOUR_SEEDS else (0, 1)
 
 
 def sessions():
     env = os.environ | {"PYTHONHASHSEED": "0", "PYTHONIOENCODING": "utf-8"}
     py = sys.executable
-    for variant, flags in VARIANTS.items():
-        for seed in (0, 1):
+    for variant, flags in [(None, [])] + list(VARIANTS.items()):
+        for seed in seeds_of(variant):
             run = run_name(variant, seed)
             if not os.path.exists(os.path.join(paths.SESSIONS, run, "no_teacher", "sessions.json")):
+                if os.path.exists(os.path.join(paths.SESSIONS, run)):
+                    raise SystemExit(f"{run} exists without sessions.json: remove it first")
                 subprocess.run([py, "experiments/planner_session.py", "--lean", "--run", run, *MEMORY, *flags,
                                 "--seed", str(seed)], check=True, env=env, cwd=paths.ROOT)
             if not os.path.exists(os.path.join(paths.MODELS, "summary", f"lean_snapshots_{run}.csv")):
@@ -197,6 +216,51 @@ def first_summary():
     return out
 
 
+def seed_measures(variant):
+    """Per seed: the four measures (larger is worse)."""
+    people = people_curve()
+    start, gain = people.ratio.iloc[0], people.ratio.iloc[0] - people.ratio.iloc[-1]
+    rows = []
+    for seed in seeds_of(variant):
+        c = session_curve(run_name(variant, seed))
+        skill, revisit = snapshots(run_name(variant, seed))
+        rows.append({"seed": seed, "start off": abs(c.ratio.iloc[0] - start),
+                     "gain off": abs(c.ratio.iloc[0] - c.ratio.iloc[-1] - gain),
+                     "skill misfit": skill, "revisit misfit": revisit,
+                     "start": c.ratio.iloc[0], "gain": c.ratio.iloc[0] - c.ratio.iloc[-1]})
+    return pd.DataFrame(rows).set_index("seed")
+
+
+MEASURES = ["start off", "gain off", "skill misfit", "revisit misfit"]
+
+
+def four_seed_rule():
+    """Per simplification and measure: its four-seed mean, the student's, the difference, its SE and whether it passes;
+    and the decision."""
+    base = seed_measures(None)
+    rows = []
+    for variant in FOUR_SEEDS[1:]:
+        m = seed_measures(variant)
+        for k in MEASURES:
+            diff = m[k].mean() - base[k].mean()
+            se = float(np.sqrt(m[k].var(ddof=1) / len(m) + base[k].var(ddof=1) / len(base)))
+            rows.append({"variant": variant, "measure": k, "student": base[k].mean(), "variant mean": m[k].mean(),
+                         "worse by": diff, "se": se, "passes": diff <= 2 * se})
+    table = pd.DataFrame(rows)
+    ok = table.groupby("variant").passes.all()
+    if ok.get("noopen_flat12"):
+        decision = "drop both"
+    elif ok.get("flat12") and ok.get("noopen"):
+        decision = "drop the schedule (a constant 12%)"
+    elif ok.get("flat12"):
+        decision = "drop the schedule (a constant 12%)"
+    elif ok.get("noopen"):
+        decision = "drop the opening"
+    else:
+        decision = "keep both"
+    return table, ok, decision
+
+
 if __name__ == "__main__":
     pd.set_option("display.width", 250)
     if "sessions" in sys.argv:
@@ -207,3 +271,8 @@ if __name__ == "__main__":
         print(curve_summary().round(3).to_string())
         print()
         print(first_summary().round(3).to_string())
+    if "rule" in sys.argv:
+        table, ok, decision = four_seed_rule()
+        print(table.round(3).to_string(index=False))
+        print(ok.to_string())
+        print("decision:", decision)

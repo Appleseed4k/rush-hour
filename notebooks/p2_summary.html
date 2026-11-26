@@ -9490,8 +9490,8 @@ the teachers, with its known gaps listed as premises rather than fixed.</p>
 <ul>
 <li><strong>Starting knowledge:</strong> two networks of 2 lane blocks each, a policy network and a value network: AND-OR's apprentice
 stopped at round 1, epoch 3 (<code>paths.START</code>), with people's giving up at × 0.40.</li>
-<li><strong>Play:</strong> the two-mode student (<code>rushhour/student/two_mode.py</code>). An AND-OR deliberation makes 18% of moves and the
-opening; flat planning makes 6% → 18% over the first 30 trials; intuition makes the rest. A soft memory penalizes
+<li><strong>Play:</strong> the two-mode student (<code>rushhour/student/two_mode.py</code>). An AND-OR deliberation makes 18% of moves and, until 11/25, the
+opening (dropped: section 12); flat planning makes 6% → 18% over the first 30 trials; intuition makes the rest. A soft memory penalizes
 returns to recent boards, and salience boards it keeps coming back to (since 11/25, section 11).</li>
 <li><strong>Learning:</strong> as in phase 1. Full hindsight labels come from solved attempts, at × 10, with one update per human trial.
 Agency (ΔA) is the parameter the teaching runs sweep.</li>
@@ -9861,35 +9861,68 @@ sessions on people's puzzles, seeds 0-1):</p>
 <tr>
 <td>The flat schedule, 6% → 18% (3 settings)</td>
 <td>a constant share, refitted: 12%</td>
-<td>learning curve χ² &gt; 5.99 worse</td>
-<td><strong>not needed</strong>: 1.6 against 2.5</td>
+<td>four seeds: no session measure &gt; 2 SE worse</td>
+<td><strong>needed</strong>: revisits 0.048 against 0.041 (SE 0.003); kept</td>
 </tr>
 <tr>
 <td>The opening (a switch)</td>
 <td>no opening</td>
-<td>first two moves' or curve's χ² &gt; 3.84 worse</td>
-<td><strong>not needed, and worse where it acts</strong>: 21.0 with it, 1.3 without</td>
-</tr>
-<tr>
-<td>Both removed</td>
-<td>a constant 12% and no opening</td>
-<td>curve and first moves within 3.84; snapshots no worse than the student's worse seed</td>
-<td><strong>fails</strong>: snapshots worse; gain 0.39-0.40 against 0.51-0.53</td>
+<td>the same; and its first two moves</td>
+<td><strong>not needed, and worse where it acts</strong> (first moves χ² 21.0 with it, 1.3 without); <strong>dropped</strong></td>
 </tr>
 </tbody>
 </table>
+<p>The session measures, per seed: the start's and the gain's distance from people's, and the snapshots' skill and
+revisit misfits. Each simplification had to be within 2 SE of the student on all four, over four seeds.</p>
 <ul>
-<li><strong>The opening makes an attempt's first two moves too good</strong>: optimal 54% and 53% of the time, against people's 47%
-and 42%; without it 47% and 45%. It came from people's slow first look being followed by an AND-OR-like move, which
-a test of optimality can't see.</li>
-<li><strong>The learning curve can't tell the flat variants apart</strong>: every variant scores χ² 1.6-3.0, since people's stage
-means have wide errors. People's moves do show the rise, but nothing in the student's learning that this data can
-detect depends on it.</li>
-<li><strong>Together, the removals cost learning.</strong> The student with both removed fits the first moves (χ² 2.1) but its
-snapshots fit people's layouts worse and it gains only 0.39-0.40 moves / optimal (the student 0.51-0.53, people
-0.60). Each passed alone; together they fail, so parts of the student can't be pared one at a time. <strong>The student
-stays as it is</strong>, and the opening's too-good first moves stay a known gap.</li>
+<li><strong>The opening goes.</strong> Without it the student is within noise on every measure, and its first two moves match
+people's (47% and 45% optimal; people 47% and 42%; with the opening 54% and 53%). The opening came from people's
+slow first look being followed by an AND-OR-like move, which a test of optimality can't see.</li>
+<li><strong>The schedule stays.</strong> A constant 12% fits the learning curve as well, but makes the student's revisits a little
+less like people's, and the revisit misfit barely varies between seeds, so the difference is clear. People's moves
+show the rise too.</li>
+<li><strong>Two seeds weren't enough.</strong> At two seeds both removals looked like they cost learning together (a gain of 0.39-0.40);
+over four seeds the student's own gain runs 0.44-0.53, and both-removed's 0.39-0.59.</li>
 </ul>
+<p><strong>The student is now without the opening</strong> (<code>spec.TWO_MODE</code>, 11/25): the soft memory with salience, the flat schedule,
+AND-OR on 18% of moves.</p>
+<p><strong>Stage 1's teaching results carry over to it</strong> (p2.7 section 6; <code>experiments/final_queue.py</code>, runs
+<code>joint_noopen_m10*</code>). On people's lengths, all nine primary differences keep section 11's sign, and none moves by
+more than 2 SE:</p>
+<table>
+<thead>
+<tr>
+<th>ΔA</th>
+<th>bayes4 − none</th>
+<th>loop-aware − bayes4</th>
+<th>loop-aware − random 10%</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.1</td>
+<td>−0.12 (z −2.5)</td>
+<td>−0.07 (z −1.7)</td>
+<td><strong>−0.13 (z −3.1)</strong></td>
+</tr>
+<tr>
+<td>0.5</td>
+<td>−0.09 (z −1.4)</td>
+<td><strong>−0.12 (z −5.0)</strong></td>
+<td>−0.06 (z −1.6)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>−0.13 (z −2.0)</td>
+<td>−0.06 (z −2.2)</td>
+<td>−0.01 (z −0.2)</td>
+</tr>
+</tbody>
+</table>
+<p>(bold: past the Bonferroni cut, |z| &gt; 2.8.) Loop-aware bayes4 beats bayes4 at every ΔA, by less at ΔA 1 than on the
+salient student (−0.16) because bayes4 alone helps this student more there. It beats random help at its own spend
+(8-9% of moves against 10%) when agency is low and ties when it is high: random 10%'s effect grows with ΔA (−0.05,
+−0.15, −0.19 from no teacher) while the loop-aware teacher's stays −0.18 to −0.21, the assistance dilemma's shape.</p>
 </div>
 </div>
 </div>

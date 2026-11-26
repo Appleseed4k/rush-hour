@@ -1,10 +1,12 @@
 """Scores stage 1 of the salience and loop-aware bayes4 test (experiments/loops_queue.py): the comparisons fixed there,
-paired by student, per agency, on the end test's 9-16-move puzzles (primary) and on all of them (secondary).
+paired by student, per agency, on the end test's 9-16-move puzzles (primary) and on all of them (secondary). With
+`final`, scores the same comparisons on the final student (experiments/final_queue.py: the joint memory, no opening).
 
 End score: moves / optimal with an unsolved attempt at its cap (lower is better); a negative difference favours the
 first teacher named.
 
-    python experiments/loops_analysis.py     # writes models/summary/loops_stage1.csv and prints it
+    python experiments/loops_analysis.py         # writes models/summary/loops_stage1.csv and prints it
+    python experiments/loops_analysis.py final   # writes models/summary/final_stage1.csv and prints it
 """
 import os
 import sys
@@ -19,8 +21,10 @@ from loops_queue import AGENCIES, LOOPS, MATCHED, seed_part  # noqa: E402
 from rushhour import analysis as an  # noqa: E402
 
 OUT = os.path.join(p2.SUMMARY, "loops_stage1.csv")
+FINAL_OUT = os.path.join(p2.SUMMARY, "final_stage1.csv")
 PEOPLE_MAX = 16
-STUDENTS = {"salient": "salient_m10{}_agency{:g}", "soft": "twomode_m10{}_agency{:g}"}
+STUDENTS = {"salient": "salient_m10{}_agency{:g}", "soft": "twomode_m10{}_agency{:g}",
+            "final": "joint_noopen_m10{}_agency{:g}"}
 SEEDS = (0, 1, 2)
 
 
@@ -76,11 +80,30 @@ def table():
     return pd.DataFrame(rows)
 
 
-def ends():
+def final_table():
+    """Stage 1's three comparisons on the final student, and (unpaired) how far each differs from the salient
+    student's."""
+    rows = []
+    for max_distance, scope in ((PEOPLE_MAX, "9-16"), (None, "all")):
+        for a in AGENCIES:
+            fin = {t: scores("final", a, t, max_distance) for t in ("none", "bayes4", LOOPS, MATCHED)}
+            sal = {t: scores("salient", a, t, max_distance) for t in ("none", "bayes4", LOOPS, MATCHED)}
+            for name, x, y in (("1. bayes4 - none", "bayes4", "none"), ("2. loops - bayes4", LOOPS, "bayes4"),
+                               ("3. loops - random 10%", LOOPS, MATCHED), ("(loops - none)", LOOPS, "none"),
+                               ("(random 10% - none)", MATCHED, "none")):
+                p = paired(fin[x], fin[y])
+                q = paired(sal[x], sal[y])
+                rows.append({"scope": scope, "agency": a, "comparison": name, **p,
+                             "salient": q["diff"], "change": p["diff"] - q["diff"],
+                             "change_se": np.hypot(p["se"], q["se"])})
+    return pd.DataFrame(rows)
+
+
+def ends(students=(("salient", ("none", "bayes4", LOOPS, MATCHED)), ("soft", ("none", "bayes4", LOOPS)))):
     """Mean end score per student, teacher and agency, with the teacher's spend."""
     rows = []
     for max_distance, scope in ((PEOPLE_MAX, "9-16"), (None, "all")):
-        for student, teachers in (("salient", ("none", "bayes4", LOOPS, MATCHED)), ("soft", ("none", "bayes4", LOOPS))):
+        for student, teachers in students:
             for a in AGENCIES:
                 for t in teachers:
                     s = scores(student, a, t, max_distance)
@@ -92,9 +115,13 @@ def ends():
 
 if __name__ == "__main__":
     pd.set_option("display.width", 200)
-    t, e = table(), ends()
-    t.to_csv(OUT, index=False)
-    e.to_csv(OUT.replace(".csv", "_ends.csv"), index=False)
+    if "final" in sys.argv:
+        out, t = FINAL_OUT, final_table()
+        e = ends((("final", ("none", "bayes4", LOOPS, MATCHED)),))
+    else:
+        out, t, e = OUT, table(), ends()
+    t.to_csv(out, index=False)
+    e.to_csv(out.replace(".csv", "_ends.csv"), index=False)
     print(e.round(3).to_string(index=False))
     print()
     print(t.round(3).to_string(index=False))

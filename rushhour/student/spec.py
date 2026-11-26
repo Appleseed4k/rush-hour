@@ -27,14 +27,15 @@ from .. import paths
 # How the two-mode student plays (student.TwoModeSolver): each move a deliberation (one AND-OR pass ordered by the
 # policy network, its first move played) with probability w_ao, flat planning (the policy's top 5 judged by the value
 # network) with a probability rising from flat_start to flat_end over the first `ramp` human trials, intuition
-# otherwise; the attempt's first move a deliberation (opening). All fitted to people's moves
-# (experiments/mode_mixture.py, refitted 2026-11-24 with policy-ordered AND-OR). Its memory of the attempt's boards
+# otherwise. All fitted to people's moves (experiments/mode_mixture.py, refitted 2026-11-24 with policy-ordered
+# AND-OR). Until 2026-11-25 the attempt's first move was also a deliberation (opening); the four-seed test of
+# experiments/feature_tests.py found the student as good without it, and it makes first moves too good, so it's off. Its memory of the attempt's boards
 # (since 2026-11-25): a soft memory (beta 1, half-life 4 moves) plus salience (each return to a board after the first
 # adds 0.5 to its penalty, never fading), fitted together to how people return to boards at every attempt length
 # (experiments/fit_salience.py joint); before, the soft memory alone at solve_two_mode's default (beta 2, half-life 1),
 # fitted to the intuition student's revisits (experiments/fit_memory.py) - TWO_MODE_SOFT.
 TWO_MODE_SOFT = {"w_ao": 0.18, "flat_start": 0.06, "flat_end": 0.18, "ramp": 30, "opening": True}
-TWO_MODE = TWO_MODE_SOFT | {"soft_memory": [1, 4], "salience": [0.5, None]}
+TWO_MODE = TWO_MODE_SOFT | {"soft_memory": [1, 4], "salience": [0.5, None], "opening": False}
 
 STUDENT = {
     # how it plays: the two-mode student

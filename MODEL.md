@@ -32,7 +32,8 @@ deliberation, flat planning or intuition, with weights fitted to people's moves 
 intuition alone (`spec.INTUITION`, `--student intuition`), and every teaching result so far is from it.
 
 **Since 2026-11-25 its memory of the attempt's boards is a soft memory plus salience**, fitted together to how people
-return to boards at every attempt length (§4). The two-mode student with the soft memory alone, which the replication's
+return to boards at every attempt length (§4), **and it no longer opens each attempt with a deliberation** (§4,
+"Why each feature is there"). The two-mode student with the soft memory alone, which the replication's
 runs used, is `spec.SOFT` (`spec.differences(config, soft=True)`). ["Why each feature is there"](#why-each-feature-is-there)
 sorts every part of the student by the evidence that it is needed.
 
@@ -145,9 +146,9 @@ apprentice curve shows that round 1 passes people's level within a few epochs.
 |---|---|---|---|---|
 | Each move is made by one of three modes, drawn independently per move: nothing on the board or in the attempt so far triggers planning | design | - | fitted: people's moves fit a mixture of the three better than any one (below) | [`solve_two_mode`](rushhour/student/two_mode.py:99) |
 | **Deliberation**: one AND-OR pass from the board, its options ordered by the policy network (with Gumbel noise), lapsing at γ. Its first move is played and no plan is kept: one move per search, as in the paper's model | design + parameter | 18% of moves; γ 0.07 | fitted (the share); inherited (γ) | `w_ao`; [`and_or.solve`](rushhour/and_or.py:364), `PolicyAgent.heuristic` |
-| **Flat planning**: the policy's 5 likeliest moves, each judged one move ahead by the value network, one picked by a softmax over −(moves to go) at τ 1; a move that solves the puzzle is always picked | design + parameter | 6% of moves in trial 1, rising linearly to 18% by trial 30; 5 moves, τ 1 | fitted (a constant 12% fits the learning curve as well alone, but not without the opening: p2.7) | `flat_start`, `flat_end`, `ramp`; [`flat_pick`](rushhour/student/two_mode.py:64), [`TwoModeSolver.flat_at`](rushhour/student/two_mode.py:209) |
+| **Flat planning**: the policy's 5 likeliest moves, each judged one move ahead by the value network, one picked by a softmax over −(moves to go) at τ 1; a move that solves the puzzle is always picked | design + parameter | 6% of moves in trial 1, rising linearly to 18% by trial 30; 5 moves, τ 1 | fitted; needed: a constant 12% makes revisits less like people's (p2.7) | `flat_start`, `flat_end`, `ramp`; [`flat_pick`](rushhour/student/two_mode.py:64), [`TwoModeSolver.flat_at`](rushhour/student/two_mode.py:209) |
 | **Intuition**, otherwise: a move sampled from the policy's softmax over legal moves | design + parameter | temperature 1 | chosen | [`sample_move`](rushhour/student/two_mode.py:45) |
-| The opening: an attempt's first move is always a deliberation, and its second is the same pass's second move | design | - | fitted: people's slow first look (2.9 s) and the move after it fit AND-OR; not needed alone (p2.7), and makes first moves too good, but removing it with the schedule costs learning | `opening` |
+| No opening (until 2026-11-25 an attempt's first move was always a deliberation, and its second the same pass's second move) | parameter | off | tested: the student is as good without it over four seeds, and it made first moves too good (p2.7) | `opening` |
 | Soft memory: in intuition and flat planning, a move back to a board the attempt was on `age` moves ago loses β × 0.5^(age / half-life) in its logit | implementation + parameter | β 1, half-life 4 moves | fitted with salience to people's returns at every attempt length | `soft_memory`; `penalty` in `solve_two_mode` |
 | Salience: each return to a board after the first adds λ to that board's penalty, summed over returns and never fading. A board's first return is penalized by the soft memory alone | implementation + parameter | λ 0.5 | fitted with the soft memory (below) | `salience`; `trace_of` in `solve_two_mode` |
 | One attempt per puzzle, no restarts (people could restart) | parameter | 1 | chosen | `max_attempts`; [`learning_session`](rushhour/student/train.py:370) |
@@ -323,6 +324,7 @@ machinery and need no case; they come last, with what each is known to miss.
 |---|---|---|
 | Intuition as the base mode | Flat planning alone predicts people's moves far worse (log likelihood per move −3.4 against −1.9); the move-by-move mixture gives intuition 76-88% of moves in every breakdown | p2.2 2c |
 | Flat planning | People's moves fit it more as the evaluator learns (8% → 18% of moves, for 27 of 37 people). Intuition alone with the soft memory can't start where people do (start misfit 10.5, against 0.0-1.2 with the planning modes) | p2.2 2c |
+| The flat schedule (6% → 18% over the first 30 trials) | A constant 12%, the best constant, makes the student's revisits less like people's: snapshot revisit misfit 0.048 against 0.041 over four seeds (SE 0.003). The learning curve can't tell them apart (χ² 1.6 against 2.5). People's moves show the rise too (27 of 37 people) | p2.7 §3-4 |
 | AND-OR deliberation | Without it (the forward student) flat planning must start at 18% to match people's start, and the session stalls mid-way (gain 0.52 against 0.60; people 0.60). On people's layouts, at the same share of planned moves, AND-OR plus flat fits people's skill better than flat alone (misfit 1.32 against 1.43), mostly near the goal. It isn't needed for the start alone (flat 18%: misfit 0.6) | p2.2 2c; one seed, with the dest-head start |
 | A soft memory | On people's revisit ages: no memory 0.032, phase 1's hard rule 0.095, soft 0.007 | p2.3 §8 |
 | Salience | No soft memory alone fits people's returns at every attempt length (best χ² 109 against 14 with salience; one parameter needs 3.84). In a session it keeps the learning and improves the revisit fit at every stage | p2.7 §1-2 |
@@ -341,26 +343,15 @@ machinery and need no case; they come last, with what each is known to miss.
 | Modes drawn at fixed odds, nothing triggers planning | People's moves after a loop are less AND-OR-like, not more; planning more on a returned board doesn't get the student out of loops | p2.2 2c; p2.6 §7 |
 | Two networks, not one shared trunk | One trunk fits people as well. This is not the smaller model (two trunks have twice the weights); it was chosen so each network learns one thing | p2.5 |
 
-**3. Tested: not needed alone, but kept, since removing both costs learning** (2026-11-25;
-`experiments/feature_tests.py`; `notebooks/p2.7_feature_tests.ipynb`, sections 3-4; rules fixed before the runs)
+**3. Tested and dropped: no longer in the student** (2026-11-25; `experiments/feature_tests.py`;
+`notebooks/p2.7_feature_tests.ipynb`, section 4; rules fixed before the runs)
 
-- **The flat schedule** (6% → 18% over the first 30 trials; 3 settings). A constant 12% (1 setting) fits people's
-  learning curve as well: χ² 1.6 against the schedule's 2.5, where the schedule needed the constant to be 5.99 worse.
-  The test has little power (every variant scores 1.6-3.0, people's stage means having wide errors), and people's
-  moves do show the rise (the mixture fit, 27 of 37 people), so the schedule describes people's moves without
-  changing anything in the student's learning the data can detect.
-- **The opening rule** (an attempt's first move a deliberation, and the second the same pass's). It makes the first
-  two moves too good: optimal 54% and 53% of the time against people's 47% and 42% in trials 1-9, and 47% and 45%
-  without it (χ² 21.0 with it, 1.3 without). The learning curve doesn't need it either (χ² 3.0 without, 2.5 with). It
-  came from people's slow first look being followed by an AND-OR-like move, which this test, scoring optimality only,
-  doesn't measure.
-
-**Both removed** (a constant 12% and no opening; `..._joint_noopen_flat12*`), the student fails its rule, fixed before
-the runs: its first two moves fit people (χ² 2.1) and its learning curve is within the cut (3.6 against 2.5), but its
-snapshots fit people's layouts worse than the student's worse seed (skill 0.755 against 0.677; revisits 0.049-0.052
-against 0.043), and it gains only 0.39-0.40 moves / optimal over the session (the student 0.51-0.53, people 0.60). Each
-removal passed alone, and together they cost learning, so both stay. The opening's too-good first moves remain a
-known gap.
+- **The opening rule** (an attempt's first move a deliberation, and the second the same pass's). It made the first two
+  moves too good: optimal 54% and 53% of the time against people's 47% and 42% in trials 1-9, and 47% and 45% without
+  it (χ² 21.0 with it, 1.3 without). Over four seeds, the student without it is within 2 SE of the student with it on
+  every session measure (the start, the gain, the snapshots' skill and revisits). So it is off (`opening: False`). It
+  came from people's slow first look being followed by an AND-OR-like move, which these tests, scoring optimality,
+  don't measure; the move-by-move mixture with and without an opening term would.
 
 **4. Fitted, but never compared with the student without it**
 
@@ -389,16 +380,18 @@ they are constrained together, not one by one. Agency is swept by design.
 - **Identical students.** They differ only by seed and puzzle order, and their spread is a tenth of people's.
 
 **What is left**: of the parts that add machinery, only giving up hasn't been compared with the student without it; its
-shape is taken from people's own data. The rest of group 4 are fitted values, and group 5 settings. The opening's evidence was about which kind of move people make after a slow first look, which the
-optimality test doesn't measure; the move-by-move mixture with and without an opening term would.
+shape is taken from people's own data. The rest of group 4 are fitted values, and group 5 settings. **A lesson for
+these tests**: two seeds per student are too few to compare students by snapshots or gain (the student's own gain runs
+0.44-0.53 over four seeds); the revisit misfit, which barely varies between seeds, is the most telling measure.
 
 ## Which saved runs use this student
 
 **The teaching runs:** `twomode_m10[_s1|_s2]_agency{0,0.1,0.3,0.5,0.7,0.9,1}` (2026-11-25,
 `experiments/replication_queue.py`): phase 1's ×10 agency sweep with this student as it was then, with the soft
 memory alone (`spec.differences(config, soft=True)`), seeds 0-2 (p2.6). `salient_m10*` add salience to that soft
-memory (`experiments/loops_queue.py`). No teaching run has the current memory yet; its sessions at people's lengths
-are `lean_people_all_m10_ao_b2_joint` and `_joint_seed1`. Beside them,
+memory (`experiments/loops_queue.py`). The current student (the joint memory, no opening) plays stage 1's design in
+`joint_noopen_m10[_s1|_s2]_agency{0.1,0.5,1}` (`experiments/final_queue.py`, 2026-11-25; p2.7 section 6); its sessions at
+people's lengths are `lean_people_all_m10_ao_b2_joint_noopen` and `_seed1-3` (with the opening: `..._joint*`). Beside them,
 `intuition_m10[_s1|_s2]_agency*` are the same sweep with phase 1's intuition student on this start
 (`spec.differences(config, intuition=True)`). Its sessions before these have no teacher and were run by
 `experiments/planner_session.py --lean` at people's lengths (config key `lean`, not `student`): at this start
@@ -471,6 +464,12 @@ On the end test's 9-16-move puzzles, the loop-aware bayes4 beats bayes4 on the s
 ΔA 0.1, 0.5, 1) and on the soft one (−0.09, −0.15, −0.08), with no memory × teacher interaction; it beats random 10%,
 its spend, at ΔA 0.1 (−0.12, z −3.4) and 0.5 (−0.08), and ties at 1. Plain bayes4 helps the salient student less
 (−0.06 to −0.11), since it loops less untaught (3.54 against 3.88).
+
+On the current student (the joint memory, no opening; `joint_noopen_m10*`, `loops_analysis.py final` →
+`models/summary/final_stage1.csv`; p2.7 section 6) the three comparisons come out the same: all nine primary
+differences keep stage 1's sign and none moves by more than 2 SE. Loop-aware bayes4 beats bayes4 (−0.07, −0.12, −0.06
+at ΔA 0.1, 0.5, 1) and random 10% at ΔA 0.1 (−0.13, z −3.1), leans better at 0.5 (−0.06) and ties at 1; bayes4 helps
+by −0.09 to −0.13; untaught it scores 3.51.
 
 ## The 4-block start
 
